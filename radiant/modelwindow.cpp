@@ -571,6 +571,9 @@ private:
 		return constructCellPos().totalHeight( m_height, m_modelInstances.size() );
 	}
 	void updateScroll() const {
+		if ( m_gl_scroll == nullptr ) {
+			return;
+		}
 		m_gl_scroll->setMinimum( 0 );
 		m_gl_scroll->setMaximum( totalHeight() - m_height );
 		m_gl_scroll->setValue( -m_originZ );
@@ -981,10 +984,17 @@ protected:
 		m_modBro.forEachModelInstance( models_set_transforms() );
 
 		delete m_fbo;
+		m_fbo = nullptr;
+		if ( m_modBro.m_width <= 0 || m_modBro.m_height <= 0 ) {
+			return;
+		}
 		m_fbo = new FBO( m_modBro.m_width, m_modBro.m_height, true, m_modBro.m_MSAA );
 	}
 	void paintGL() override
 	{
+		if ( m_fbo == nullptr ) {
+			return;
+		}
 		if( ScreenUpdates_Enabled() && m_fbo->bind() ){
 			GlobalOpenGL_debugAssertNoErrors();
 			ModelBrowser_render();
@@ -1003,7 +1013,8 @@ protected:
 		else if ( press == MousePresses::Left || press == MousePresses::Right ) {
 			m_modBro.tracking_MouseDown();
 			if ( press == MousePresses::Left ) {
-				m_modBro.testSelect( event->x() * m_scale, event->y() * m_scale );
+				const QPoint localPos = mouseEventLocalPos( event );
+				m_modBro.testSelect( localPos.x() * m_scale, localPos.y() * m_scale );
 			}
 		}
 	}
@@ -1266,6 +1277,8 @@ protected:
 QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 	g_ModelBrowser.m_parent = toplevel;
 
+	const bool disableOpenGL = OpenGLWidgetsDisabled();
+
 	auto *splitter = new QSplitter;
 	auto *containerWidgetLeft = new QWidget; // Adding a QLayout to a QSplitter is not supported, use proxy widget
 	auto *containerWidgetRight = new QWidget; // Adding a QLayout to a QSplitter is not supported, use proxy widget
@@ -1305,16 +1318,27 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		vbox->addWidget( g_ModelBrowser.m_treeView );
 	}
 	{	// gl_widget
-		g_ModelBrowser.m_gl_widget = new ModelBrowserGLWidget( g_ModelBrowser );
-		hbox->addWidget( g_ModelBrowser.m_gl_widget );
+		if ( disableOpenGL ) {
+			g_ModelBrowser.m_gl_widget = nullptr;
+			hbox->addWidget( glwidget_createDisabledPlaceholder( "OpenGL disabled (Models)", nullptr ) );
+		}
+		else {
+			g_ModelBrowser.m_gl_widget = new ModelBrowserGLWidget( g_ModelBrowser );
+			hbox->addWidget( g_ModelBrowser.m_gl_widget );
+		}
 	}
 	{	// gl_widget scrollbar
-		auto *scroll = g_ModelBrowser.m_gl_scroll = new QScrollBar;
-		hbox->addWidget( scroll );
+		if ( !disableOpenGL ) {
+			auto *scroll = g_ModelBrowser.m_gl_scroll = new QScrollBar;
+			hbox->addWidget( scroll );
 
-		QObject::connect( scroll, &QAbstractSlider::valueChanged, []( int value ){
-			g_ModelBrowser.m_scrollAdjustment.value_changed( value );
-		} );
+			QObject::connect( scroll, &QAbstractSlider::valueChanged, []( int value ){
+				g_ModelBrowser.m_scrollAdjustment.value_changed( value );
+			} );
+		}
+		else {
+			g_ModelBrowser.m_gl_scroll = nullptr;
+		}
 	}
 
 	splitter->setStretchFactor( 0, 0 ); // consistent treeview side sizing on resizes

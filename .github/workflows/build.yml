@@ -101,7 +101,7 @@ jobs:
           echo "MY_DATE=$(date +'%Y%m%d')" >> $GITHUB_ENV
 
       - name: Create latest build
-        uses: Garux/action-automatic-releases@master
+        uses: themuffinator/action-automatic-releases@master
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           automatic_release_tag: ${{ env.MY_DATE }}

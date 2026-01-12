@@ -68,6 +68,7 @@ Doom3: add model browser.
 Doom3: s_diversity light key.
 HalfLife: enable HL-mode on linux/osx.
 Renderer: doom3 'parallel' and 'spot' light support.
+Renderer: QRhi full renderer rewrite with user-selectable GL/Vulkan/D3D backends across all supported platforms.
 Entity: add mouse-editing for doom3 light_center key
 Shaders: add support for texture transforms.
 Shaders: add support for 'addnormals' keyword - e.g. models/mapobjects/healthgui/healthguidirty

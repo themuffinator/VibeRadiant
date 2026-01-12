@@ -48,6 +48,9 @@ inline MapFile* Node_getMapFile( scene::Node& node ){
 
 template<typename Iterator>
 inline MapFile* path_find_mapfile( Iterator first, Iterator last ){
+	if ( first == last ) {
+		return 0;
+	}
 	Iterator i = last;
 	for (;; )
 	{
@@ -62,6 +65,5 @@ inline MapFile* path_find_mapfile( Iterator first, Iterator last ){
 			break;
 		}
 	}
-	ERROR_MESSAGE( "failed to find parent mapfile for path" );
 	return 0;
 }

@@ -297,8 +297,14 @@ class Single_QKeySequenceEdit : public QKeySequenceEdit
 protected:
 	void keyPressEvent( QKeyEvent *e ) override {
 		QKeySequenceEdit::keyPressEvent( e );
-		if( e->modifiers() & Qt::KeypadModifier ) //. workaround Qt issue: Qt::KeypadModifier is ignored
+		if( e->modifiers() & Qt::KeypadModifier ){ //. workaround Qt issue: Qt::KeypadModifier is ignored
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+			const QKeyCombination combo = keySequence()[0];
+			setKeySequence( QKeySequence( QKeyCombination( combo.keyboardModifiers() | Qt::KeypadModifier, combo.key() ) ) );
+#else
 			setKeySequence( QKeySequence( keySequence()[0] | Qt::KeypadModifier ) );
+#endif
+		}
 		if( QKeySequence_valid( keySequence() ) )
 			clearFocus(); // trigger editingFinished(); via losing focus 🙉
 			              // because this can still receive focus loss b4 getting deleted (practically because modal msgbox)

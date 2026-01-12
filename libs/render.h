@@ -31,6 +31,7 @@
 #include "math/vector.h"
 #include "math/pi.h"
 
+#include <string>
 #include <vector>
 
 typedef unsigned int RenderIndex;
@@ -1257,29 +1258,61 @@ inline void ArbitraryMeshTriangle_sumTangents( ArbitraryMeshVertex& a, Arbitrary
 
 class RenderTextLabel : public OpenGLRenderable
 {
-	unsigned int width;
-	unsigned int height;
+	mutable unsigned int width = 0;
+	mutable unsigned int height = 0;
+	mutable std::string m_text;
+	mutable Vector3 m_color01 = Vector3( 1, 1, 1 );
+	mutable bool m_pending = false;
+
+	bool glContextReady() const {
+		return GlobalOpenGL().contextValid && GlobalOpenGL().funcs != nullptr;
+	}
+	bool canRenderText() const {
+		return glContextReady() && GlobalOpenGL().m_font != nullptr;
+	}
+	void ensureAllocated() const {
+		if ( !m_pending || tex > 0 ) {
+			return;
+		}
+		if ( !canRenderText() ) {
+			return;
+		}
+		gl().glGenTextures( 1, &tex );
+		if ( tex > 0 ) {
+			const BasicVector3<unsigned char> colour = m_color01 * 255.f;
+			GlobalOpenGL().m_font->renderString( m_text.c_str(), tex, colour.data(), width, height );
+			m_pending = false;
+		}
+	}
 public:
-	GLuint tex = 0;
+	mutable GLuint tex = 0;
 	unsigned int subTex = 0;
 	Vector2 screenPos;
 	~RenderTextLabel(){
 		texFree();
 	}
 	void texAlloc( const char* text, const Vector3& color01 ){
-		gl().glGenTextures( 1, &tex );
-		if( tex > 0 ){
-			const BasicVector3<unsigned char> colour = color01 * 255.f;
-			GlobalOpenGL().m_font->renderString( text, tex, colour.data(), width, height );
+		texFree();
+		if ( text == nullptr || text[0] == '\0' ) {
+			return;
 		}
+		m_text = text;
+		m_color01 = color01;
+		m_pending = true;
 	}
 	void texFree(){
-		if( tex > 0 ){
+		if( tex > 0 && glContextReady() ){
 			gl().glDeleteTextures( 1, &tex );
-			tex = 0;
 		}
+		tex = 0;
+		m_pending = false;
+		m_text.clear();
+	}
+	bool hasText() const {
+		return !m_text.empty();
 	}
 	void render( RenderStateFlags state ) const override {
+		ensureAllocated();
 		if( tex > 0 ){
 			gl().glBindTexture( GL_TEXTURE_2D, tex );
 			//Here we draw the texturemaped quads.

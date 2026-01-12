@@ -13,8 +13,10 @@
 #include "qe3.h"
 #include "url.h"
 #include "version.h"
+#include "stringio.h"
 #include "stream/stringstream.h"
 
+#include <QAbstractButton>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -30,6 +32,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QProgressDialog>
+#include <QPushButton>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
@@ -97,16 +100,34 @@ QString platform_key(){
 }
 
 bool is_prerelease_version( const QString& version ){
-	QString suffix;
-	QVersionNumber::fromString( version, &suffix );
-	return !suffix.isEmpty();
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+	qsizetype suffix_index = -1;
+#else
+	int suffix_index = -1;
+#endif
+	const QVersionNumber parsed = QVersionNumber::fromString( version, &suffix_index );
+	if ( parsed.isNull() ) {
+		return false;
+	}
+	return suffix_index >= 0 && suffix_index < version.size();
 }
 
 int compare_versions( const QString& current, const QString& latest ){
-	QString current_suffix;
-	QString latest_suffix;
-	const QVersionNumber current_ver = QVersionNumber::fromString( current, &current_suffix );
-	const QVersionNumber latest_ver = QVersionNumber::fromString( latest, &latest_suffix );
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+	qsizetype current_suffix_index = -1;
+	qsizetype latest_suffix_index = -1;
+#else
+	int current_suffix_index = -1;
+	int latest_suffix_index = -1;
+#endif
+	const QVersionNumber current_ver = QVersionNumber::fromString( current, &current_suffix_index );
+	const QVersionNumber latest_ver = QVersionNumber::fromString( latest, &latest_suffix_index );
+	const QString current_suffix = ( current_suffix_index >= 0 && current_suffix_index < current.size() )
+		? current.mid( current_suffix_index )
+		: QString();
+	const QString latest_suffix = ( latest_suffix_index >= 0 && latest_suffix_index < latest.size() )
+		? latest.mid( latest_suffix_index )
+		: QString();
 	const int base_compare = QVersionNumber::compare( current_ver, latest_ver );
 	if ( base_compare != 0 ) {
 		return base_compare;
@@ -189,7 +210,16 @@ void Update_constructPreferences( PreferencesPage& page ){
 class UpdateManager final : public QObject
 {
 public:
+	~UpdateManager() override{
+		cancel_reply();
+	}
+
 	void construct(){
+		if ( m_constructed ) {
+			return;
+		}
+		m_constructed = true;
+
 		PreferencesDialog_addSettingsPreferences( makeCallbackF( Update_constructPreferences ) );
 		GlobalPreferenceSystem().registerPreference( "UpdateAutoCheck", BoolImportStringCaller( g_update_auto_check ), BoolExportStringCaller( g_update_auto_check ) );
 		GlobalPreferenceSystem().registerPreference( "UpdateAllowPrerelease", BoolImportStringCaller( g_update_allow_prerelease ), BoolExportStringCaller( g_update_allow_prerelease ) );
@@ -208,7 +238,7 @@ public:
 		if ( g_update_last_check > 0 && now - g_update_last_check < k_update_check_interval_seconds ) {
 			return;
 		}
-		QTimer::singleShot( 1500, [this](){ checkForUpdates( UpdateCheckMode::Automatic ); } );
+		QTimer::singleShot( 1500, this, [this](){ checkForUpdates( UpdateCheckMode::Automatic ); } );
 	}
 
 	void checkForUpdates( UpdateCheckMode mode ){
@@ -218,6 +248,7 @@ public:
 		if ( mode == UpdateCheckMode::Automatic && !g_update_auto_check ) {
 			return;
 		}
+		ensure_network();
 
 		const qint64 now = QDateTime::currentSecsSinceEpoch();
 		g_update_last_check = static_cast<int>( now );
@@ -238,19 +269,19 @@ public:
 			m_check_dialog = new QProgressDialog( "Checking for updates...", "Cancel", 0, 0, MainFrame_getWindow() );
 			m_check_dialog->setWindowModality( Qt::WindowModal );
 			m_check_dialog->setMinimumDuration( 0 );
-			connect( m_check_dialog, &QProgressDialog::canceled, [this](){
+			connect( m_check_dialog, &QProgressDialog::canceled, this, [this](){
 				if ( m_reply ) {
 					m_reply->abort();
 				}
 			} );
 		}
 
-		m_reply = m_network.get( request );
-		connect( m_reply, &QNetworkReply::finished, [this](){ handle_manifest_finished(); } );
+		m_reply = m_network->get( request );
+		connect( m_reply, &QNetworkReply::finished, this, [this](){ handle_manifest_finished(); } );
 	}
 
 private:
-	QNetworkAccessManager m_network;
+	QNetworkAccessManager *m_network = nullptr;
 	QPointer<QProgressDialog> m_check_dialog;
 	QPointer<QProgressDialog> m_download_dialog;
 	QNetworkReply *m_reply = nullptr;
@@ -260,6 +291,13 @@ private:
 	bool m_download_in_progress = false;
 	QString m_download_path;
 	QString m_download_dir;
+	bool m_constructed = false;
+
+	void ensure_network(){
+		if ( !m_network ) {
+			m_network = new QNetworkAccessManager( this );
+		}
+	}
 
 	void handle_manifest_finished(){
 		if ( m_check_dialog ) {
@@ -332,11 +370,11 @@ private:
 	void prompt_update( const UpdateManifest& manifest, const UpdateAsset& asset ){
 		QMessageBox dialog( MainFrame_getWindow() );
 		dialog.setWindowTitle( "VibeRadiant Update" );
-		dialog.setText( StringStream( "VibeRadiant ", manifest.version.toLatin1().constData(), " is available." ) );
-		dialog.setInformativeText( StringStream( "Current version: ", current_version().toLatin1().constData(), "\nLatest version: ", manifest.version.toLatin1().constData() ) );
+		dialog.setText( QStringLiteral( "VibeRadiant %1 is available." ).arg( manifest.version ) );
+		dialog.setInformativeText( QStringLiteral( "Current version: %1\nLatest version: %2" ).arg( current_version(), manifest.version ) );
 
-		auto *download_button = dialog.addButton( "Download and Install", QMessageBox::AcceptRole );
-		auto *release_button = dialog.addButton( "View Release", QMessageBox::ActionRole );
+		QAbstractButton* download_button = dialog.addButton( "Download and Install", QMessageBox::AcceptRole );
+		QAbstractButton* release_button = dialog.addButton( "View Release", QMessageBox::ActionRole );
 		dialog.addButton( "Later", QMessageBox::RejectRole );
 		dialog.exec();
 
@@ -362,7 +400,8 @@ private:
 			return;
 		}
 
-		m_download_dir = QDir( temp_root ).filePath( StringStream( "viberadiant-update-", QDateTime::currentMSecsSinceEpoch() ).c_str() );
+		m_download_dir = QDir( temp_root ).filePath(
+			QStringLiteral( "viberadiant-update-%1" ).arg( QDateTime::currentMSecsSinceEpoch() ) );
 		QDir().mkpath( m_download_dir );
 
 		m_download_path = QDir( m_download_dir ).filePath( asset.name.isEmpty() ? "update.bin" : asset.name );
@@ -381,19 +420,20 @@ private:
 		m_download_dialog->setWindowModality( Qt::WindowModal );
 		m_download_dialog->setMinimumDuration( 0 );
 		m_download_dialog->setValue( 0 );
-		connect( m_download_dialog, &QProgressDialog::canceled, [this](){
+		connect( m_download_dialog, &QProgressDialog::canceled, this, [this](){
 			if ( m_reply ) {
 				m_reply->abort();
 			}
 		} );
 
-		m_reply = m_network.get( request );
-		connect( m_reply, &QNetworkReply::readyRead, [this](){
+		ensure_network();
+		m_reply = m_network->get( request );
+		connect( m_reply, &QNetworkReply::readyRead, this, [this](){
 			if ( m_reply ) {
 				m_download_file.write( m_reply->readAll() );
 			}
 		} );
-		connect( m_reply, &QNetworkReply::downloadProgress, [this]( qint64 received, qint64 total ){
+		connect( m_reply, &QNetworkReply::downloadProgress, this, [this]( qint64 received, qint64 total ){
 			if ( m_download_dialog ) {
 				if ( total > 0 ) {
 					m_download_dialog->setValue( static_cast<int>( ( received * 100 ) / total ) );
@@ -403,7 +443,7 @@ private:
 				}
 			}
 		} );
-		connect( m_reply, &QNetworkReply::finished, [this, asset](){ handle_download_finished( asset ); } );
+		connect( m_reply, &QNetworkReply::finished, this, [this, asset](){ handle_download_finished( asset ); } );
 	}
 
 	void handle_download_finished( const UpdateAsset& asset ){
@@ -579,24 +619,35 @@ private:
 			m_reply->deleteLater();
 			m_reply = nullptr;
 		}
+		if ( m_download_file.isOpen() ) {
+			m_download_file.close();
+		}
 	}
 };
 
-UpdateManager g_update_manager;
+UpdateManager *g_update_manager = nullptr;
 } // namespace
 
 void UpdateManager_Construct(){
-	g_update_manager.construct();
+	if ( !g_update_manager ) {
+		g_update_manager = new UpdateManager();
+	}
+	g_update_manager->construct();
 }
 
 void UpdateManager_Destroy(){
-	g_update_manager.destroy();
+	delete g_update_manager;
+	g_update_manager = nullptr;
 }
 
 void UpdateManager_MaybeAutoCheck(){
-	g_update_manager.maybeAutoCheck();
+	if ( g_update_manager ) {
+		g_update_manager->maybeAutoCheck();
+	}
 }
 
 void UpdateManager_CheckForUpdates( UpdateCheckMode mode ){
-	g_update_manager.checkForUpdates( mode );
+	if ( g_update_manager ) {
+		g_update_manager->checkForUpdates( mode );
+	}
 }

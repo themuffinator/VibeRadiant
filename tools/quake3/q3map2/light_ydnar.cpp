@@ -2113,6 +2113,8 @@ void IlluminateRawLightmap( int rawLightmapNum ){
 	float tests[ 4 ][ 2 ] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
 	trace_t trace;
 	SuperLuxel stackLightLuxels[ 64 * 64 ];
+	const Vector3 zeroVector( 0.0f );
+	const SuperLuxel zeroSuperLuxel{ Vector3( 0.0f ), 0.0f };
 
 
 	/* bail if this number exceeds the number of raw lightmaps */
@@ -2122,6 +2124,7 @@ void IlluminateRawLightmap( int rawLightmapNum ){
 
 	/* get lightmap */
 	lm = &rawLightmaps[ rawLightmapNum ];
+	const size_t superCount = static_cast<size_t>( lm->sw ) * lm->sh;
 
 	/* setup trace */
 	trace.testOcclusion = !noTrace;
@@ -2264,7 +2267,7 @@ void IlluminateRawLightmap( int rawLightmapNum ){
 		for ( lightmapNum = 1; lightmapNum < MAX_LIGHTMAPS; ++lightmapNum )
 		{
 			if ( lm->superLuxels[ lightmapNum ] != nullptr ) {
-				memset( lm->superLuxels[ lightmapNum ], 0, size );
+				std::fill_n( lm->superLuxels[ lightmapNum ], superCount, zeroSuperLuxel );
 			}
 		}
 
@@ -2294,9 +2297,9 @@ void IlluminateRawLightmap( int rawLightmapNum ){
 			}
 
 			/* setup */
-			memset( tmplm.superLuxels[0], 0, llSize );
+			std::fill_n( tmplm.superLuxels[0], superCount, zeroSuperLuxel );
 			if ( deluxemap ) {
-				memset( tmplm.superDeluxels, 0, ldSize );
+				std::fill_n( tmplm.superDeluxels, superCount, zeroVector );
 			}
 			totalLighted = 0;
 
@@ -3720,11 +3723,9 @@ float FloodLightForSample( trace_t *trace, float floodLightDistance, bool floodL
 
 // floodlight pass on a lightmap
 static void FloodLightRawLightmapPass( rawLightmap_t *lm, Vector3& lmFloodLightRGB, float lmFloodLightIntensity, float lmFloodLightDistance, bool lmFloodLightLowQuality, float floodlightDirectionScale ){
-	trace_t trace;
+	trace_t trace{};
 	// int sx, sy;
 	// float samples, average, *floodlight2;
-
-	memset( &trace, 0, sizeof( trace_t ) );
 
 	/* setup trace */
 	trace.testOcclusion = true;

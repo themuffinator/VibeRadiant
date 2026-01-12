@@ -32,6 +32,9 @@
 #include <QApplication>
 #include <QAction>
 #include <QKeyEvent>
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+#include <QEnterEvent>
+#endif
 
 #include "string/string.h"
 #include "scenelib.h"
@@ -190,9 +193,17 @@ void EntityList_toggleShown(){
 class Filter_QLineEdit : public QLineEdit
 {
 protected:
-	void enterEvent( QEvent *event ) override {
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+	void enterEvent( QEnterEvent *event ) override {
+		QLineEdit::enterEvent( event );
 		setFocus();
 	}
+#else
+	void enterEvent( QEvent *event ) override {
+		QLineEdit::enterEvent( event );
+		setFocus();
+	}
+#endif
 	void leaveEvent( QEvent *event ) override {
 		clearFocus();
 	}

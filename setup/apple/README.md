@@ -20,7 +20,7 @@ sudo port install dylibbundler pkgconfig gtkglext
 - Get the VibeRadiant code and compile:
 
 ```
-git clone https://github.com/Garux/VibeRadiant.git
+git clone https://github.com/themuffinator/VibeRadiant.git
 cd VibeRadiant/
 make
 ```

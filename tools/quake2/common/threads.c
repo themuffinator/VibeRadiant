@@ -111,11 +111,19 @@ void RunThreadsOnIndividual( int workcnt, qboolean showpacifier, void ( *func )(
 #define USED
 
 #include <windows.h>
+#include <stdint.h>
 
 // Setting default Threads to 1
 int numthreads = 1;
 CRITICAL_SECTION crit;
 static int enter;
+static void ( *thread_workfunction )( int );
+
+static DWORD WINAPI ThreadWorkerProc( LPVOID param ){
+	const int threadnum = (int)(intptr_t)param;
+	thread_workfunction( threadnum );
+	return 0;
+}
 
 void ThreadSetDefault( void ){
 	SYSTEM_INFO info;
@@ -170,6 +178,7 @@ void RunThreadsOn( int workcnt, qboolean showpacifier, void ( *func )( int ) ){
 	oldf = -1;
 	pacifier = showpacifier;
 	threaded = true;
+	thread_workfunction = func;
 
 	//
 	// run threads in parallel
@@ -190,8 +199,8 @@ void RunThreadsOn( int workcnt, qboolean showpacifier, void ( *func )( int ) ){
 			    /* ydnar: cranking stack size to eliminate radiosity crash with 1MB stack on win32 */
 				( 4096 * 1024 ),
 
-				(LPTHREAD_START_ROUTINE)func,   // LPTHREAD_START_ROUTINE lpStartAddr,
-				(LPVOID)i,  // LPVOID lpvThreadParm,
+				ThreadWorkerProc,   // LPTHREAD_START_ROUTINE lpStartAddr,
+				(LPVOID)(intptr_t)i,  // LPVOID lpvThreadParm,
 				0,          //   DWORD fdwCreate,
 				NULL );
 		}

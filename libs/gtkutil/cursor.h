@@ -28,21 +28,71 @@
 
 #include "debugging/debugging.h"
 
+struct StoredMouseEvent
+{
+	QEvent::Type type{ QEvent::MouseMove };
+	QPointF localPos{};
+	QPointF globalPos{};
+	Qt::MouseButton button{ Qt::MouseButton::NoButton };
+	Qt::MouseButtons buttons{};
+	Qt::KeyboardModifiers modifiers{};
+
+	void update( const QMouseEvent& event ){
+		type = event.type();
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+		localPos = event.position();
+		globalPos = event.globalPosition();
+#else
+		localPos = event.localPos();
+		globalPos = event.globalPos();
+#endif
+		button = event.button();
+		buttons = event.buttons();
+		modifiers = event.modifiers();
+	}
+
+	QMouseEvent toEvent() const {
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+		return QMouseEvent( type, localPos, globalPos, button, buttons, modifiers );
+#else
+		return QMouseEvent( type, localPos, button, buttons, modifiers );
+#endif
+	}
+};
+
+inline QPoint mouseEventLocalPos( const QMouseEvent* event ){
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+	return event->position().toPoint();
+#else
+	return event->pos();
+#endif
+}
+
+inline QPoint mouseEventGlobalPos( const QMouseEvent* event ){
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+	return event->globalPosition().toPoint();
+#else
+	return event->globalPos();
+#endif
+}
+
 
 class DeferredMotion
 {
-	QMouseEvent m_mouseMoveEvent;
+	StoredMouseEvent m_mouseMoveEvent;
 	QTimer m_timer;
 public:
 	template<class Functor>
-	DeferredMotion( Functor func ) :
-		m_mouseMoveEvent( QEvent::MouseMove, QPointF(), Qt::MouseButton::NoButton, Qt::MouseButtons(), Qt::KeyboardModifiers() )
+	DeferredMotion( Functor func )
 	{
 		m_timer.setSingleShot( true );
-		m_timer.callOnTimeout( [this, func](){ func( m_mouseMoveEvent ); } );
+		m_timer.callOnTimeout( [this, func](){
+			const QMouseEvent event = m_mouseMoveEvent.toEvent();
+			func( event );
+		} );
 	}
 	void motion( const QMouseEvent *event ){
-		m_mouseMoveEvent = *event;
+		m_mouseMoveEvent.update( *event );
 		if( !m_timer.isActive() )
 			m_timer.start();
 	}
@@ -50,38 +100,38 @@ public:
 
 class DeferredMotion2
 {
-	QMouseEvent m_mouseMoveEvent;
+	StoredMouseEvent m_mouseMoveEvent;
 	const std::function<void( const QMouseEvent& )> m_func;
 public:
 	template<class Functor>
 	DeferredMotion2( Functor func ) :
-		m_mouseMoveEvent( QEvent::MouseMove, QPointF(), Qt::MouseButton::NoButton, Qt::MouseButtons(), Qt::KeyboardModifiers() ),
 		m_func( func )
 	{
 	}
 	void motion( const QMouseEvent& event ){
-		m_mouseMoveEvent = event;
+		m_mouseMoveEvent.update( event );
 	}
 	void invoke(){
-		m_func( m_mouseMoveEvent );
+		const QMouseEvent event = m_mouseMoveEvent.toEvent();
+		m_func( event );
 	}
 	typedef MemberCaller<DeferredMotion2, void(), &DeferredMotion2::invoke> InvokeCaller;
 };
 
 class DeferredMotionDelta
 {
-	QMouseEvent m_mouseMoveEvent;
+	StoredMouseEvent m_mouseMoveEvent;
 	QTimer m_timer;
 	int m_delta_x = 0;
 	int m_delta_y = 0;
 public:
 	template<class Functor>
-	DeferredMotionDelta( Functor func ) :
-		m_mouseMoveEvent( QEvent::MouseMove, QPointF(), Qt::MouseButton::NoButton, Qt::MouseButtons(), Qt::KeyboardModifiers() )
+	DeferredMotionDelta( Functor func )
 	{
 		m_timer.setSingleShot( true );
 		m_timer.callOnTimeout( [this, func](){
-			func( m_delta_x, m_delta_y, m_mouseMoveEvent );
+			const QMouseEvent event = m_mouseMoveEvent.toEvent();
+			func( m_delta_x, m_delta_y, event );
 			m_delta_x = 0;
 			m_delta_y = 0;
 		} );
@@ -93,7 +143,7 @@ public:
 	void motion_delta( int x, int y, const QMouseEvent *event ){
 		m_delta_x += x;
 		m_delta_y += y;
-		m_mouseMoveEvent = *event;
+		m_mouseMoveEvent.update( *event );
 		if( !m_timer.isActive() )
 			m_timer.start();
 	}
@@ -101,24 +151,24 @@ public:
 
 class DeferredMotionDelta2
 {
-	QMouseEvent m_mouseMoveEvent;
+	StoredMouseEvent m_mouseMoveEvent;
 	std::function<void( int, int, const QMouseEvent& )> m_func;
 	int m_delta_x = 0;
 	int m_delta_y = 0;
 public:
 	template<class Functor>
 	DeferredMotionDelta2( Functor func ) :
-		m_mouseMoveEvent( QEvent::MouseMove, QPointF(), Qt::MouseButton::NoButton, Qt::MouseButtons(), Qt::KeyboardModifiers() ),
 		m_func( func )
 	{
 	}
 	void motion_delta( int x, int y, const QMouseEvent *event ){
 		m_delta_x += x;
 		m_delta_y += y;
-		m_mouseMoveEvent = *event;
+		m_mouseMoveEvent.update( *event );
 	}
 	void invoke(){
-		m_func( m_delta_x, m_delta_y, m_mouseMoveEvent );
+		const QMouseEvent event = m_mouseMoveEvent.toEvent();
+		m_func( m_delta_x, m_delta_y, event );
 		m_delta_x = 0;
 		m_delta_y = 0;
 	}
@@ -148,16 +198,16 @@ protected:
 			const QPoint center = getCenter();
 			/* QCursor::setPos( center ) effect may happen not immediately; suspend processing till then, otherwise start dash will happen */
 			if( !m_trackingEstablished ){
-				m_trackingEstablished = mouseEvent->globalPos() == center;
+				m_trackingEstablished = mouseEventGlobalPos( mouseEvent ) == center;
 				QCursor::setPos( center );
 			}
-			else if( mouseEvent->globalPos() != center ){
-				const QPoint delta = mouseEvent->globalPos() - center;
+			else if( mouseEventGlobalPos( mouseEvent ) != center ){
+				const QPoint delta = mouseEventGlobalPos( mouseEvent ) - center;
 				m_motion_delta_function( delta.x(), delta.y(), mouseEvent );
 				QCursor::setPos( center );
 			}
 			// handle runaways with released buttons; FIXME: need more elegant way to persistently grab in this case
-			if( !m_widget->rect().contains( mouseEvent->pos() ) ){ // bomb cursor via timer to get it back to the widget
+			if( !m_widget->rect().contains( mouseEventLocalPos( mouseEvent ) ) ){ // bomb cursor via timer to get it back to the widget
 				if( !m_rescueTimer.isActive() ){
 					m_rescueTimer.disconnect(); // disconnect everything
 					m_rescueTimer.callOnTimeout( [center = center](){ QCursor::setPos( center ); } );

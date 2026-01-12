@@ -694,7 +694,7 @@ void OpenHelpURL(){
 
 void OpenBugReportURL(){
 	// OpenURL( "http://www.icculus.org/netradiant/?cmd=bugs" );
-	OpenURL( "https://github.com/Garux/VibeRadiant/issues" );
+	OpenURL( "https://github.com/themuffinator/VibeRadiant/issues" );
 }
 
 
@@ -946,8 +946,8 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 	if ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) {
 		create_menu_item_with_mnemonic( menu, "Console", "ToggleConsole" );
 	}
-	if ( ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) || g_Layout_builtInGroupDialog.m_value ) {
-		create_menu_item_with_mnemonic( menu, "Texture Browser", "ToggleTextures" );
+	if ( AssetBrowser_isEnabled() && ( ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) || g_Layout_builtInGroupDialog.m_value ) ) {
+		create_menu_item_with_mnemonic( menu, "Asset Browser", "ToggleTextures" );
 	}
 	create_menu_item_with_mnemonic( menu, "Model Browser", "ToggleModelBrowser" );
 	create_menu_item_with_mnemonic( menu, "Entity Inspector", "ToggleEntityInspector" );
@@ -968,6 +968,8 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 		submenu->addSeparator();
 		create_menu_item_with_mnemonic( submenu, "Far Clip Plane In", "CubicClipZoomIn" );
 		create_menu_item_with_mnemonic( submenu, "Far Clip Plane Out", "CubicClipZoomOut" );
+		submenu->addSeparator();
+		create_menu_item_with_mnemonic( submenu, "Toggle Lighting Preview", "TogglePreview" );
 		submenu->addSeparator();
 		create_menu_item_with_mnemonic( submenu, "Next leak spot", "NextLeakSpot" );
 		create_menu_item_with_mnemonic( submenu, "Previous leak spot", "PrevLeakSpot" );
@@ -1322,7 +1324,9 @@ void register_shortcuts(){
 //	SelectNudge_registerShortcuts();
 //	SnapToGrid_registerShortcuts();
 //	SelectByType_registerShortcuts();
-	TexBro_registerShortcuts();
+	if ( AssetBrowser_isEnabled() ) {
+		TexBro_registerShortcuts();
+	}
 	Misc_registerShortcuts();
 	Entity_registerShortcuts();
 	Layers_registerShortcuts();
@@ -1389,7 +1393,7 @@ extern CopiedString g_toolbarHiddenButtons;
 
 #include <QSvgGenerator>
 void create_main_toolbar( QToolBar *toolbar,  MainFrame::EViewStyle style ){
-	QSvgGenerator dummy; // reference symbol, so that Qt5Svg.dll required dependency is explicit, also install-dlls-msys2-mingw.sh will find it
+	QSvgGenerator dummy; // reference symbol so the QtSvg DLL is explicit and install-dlls-msys2-mingw.sh can find it
 
  	File_constructToolbar( toolbar );
 	toolbar_append_separator( toolbar );
@@ -1434,8 +1438,8 @@ void create_main_toolbar( QToolBar *toolbar,  MainFrame::EViewStyle style ){
 	if ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) {
 		toolbar_append_button( toolbar, "Console", "console.png", "ToggleConsole" );
 	}
-	if ( ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) || g_Layout_builtInGroupDialog.m_value ) {
-		toolbar_append_button( toolbar, "Texture Browser", "texture_browser.png", "ToggleTextures" );
+	if ( AssetBrowser_isEnabled() && ( ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) || g_Layout_builtInGroupDialog.m_value ) ) {
+		toolbar_append_button( toolbar, "Asset Browser", "texture_browser.png", "ToggleTextures" );
 	}
 
 	// TODO: call light inspector
@@ -1459,7 +1463,7 @@ void create_main_statusbar( QStatusBar *statusbar, QLabel *pStatusLabel[c_status
 		if( i == c_status_brushcount ){
 			auto *widget = new QWidget;
 			auto *hbox = new QHBoxLayout( widget );
-			hbox->setMargin( 0 );
+			hbox->setContentsMargins( 0, 0, 0, 0 );
 			statusbar->addPermanentWidget( widget, 0 );
 			const char* imgs[3] = { "status_brush.png", "status_patch.png", "status_entity.png" };
 			for( ; i < c_status_brushcount + 3; ++i ){
@@ -1709,7 +1713,9 @@ void MainFrame::Create(){
 
 	if ( FloatingGroupDialog() ) {
 		g_page_console = GroupDialog_addPage( "Console", Console_constructWindow(), RawStringExportCaller( "Console" ) );
-		g_page_textures = GroupDialog_addPage( "Textures", AssetBrowser_constructWindow( GroupDialog_getWindow() ), TextureBrowserExportTitleCaller() );
+		if ( AssetBrowser_isEnabled() ) {
+			g_page_textures = GroupDialog_addPage( "Asset Browser", AssetBrowser_constructWindow( GroupDialog_getWindow() ), TextureBrowserExportTitleCaller() );
+		}
 	}
 
 	g_page_models = GroupDialog_addPage( "Models", ModelBrowser_constructWindow( GroupDialog_getWindow() ), RawStringExportCaller( "Models" ) );
@@ -1752,10 +1758,12 @@ void MainFrame::Create(){
 				m_vSplit2->addWidget( CamWnd_getWidget( *m_pCamWnd ) );
 
 				// textures
-				if( g_Layout_builtInGroupDialog.m_value )
-					g_page_textures = GroupDialog_addPage( "Textures", AssetBrowser_constructWindow( GroupDialog_getWindow() ), TextureBrowserExportTitleCaller() );
-				else
-					m_vSplit2->addWidget( AssetBrowser_constructWindow( window ) );
+				if ( AssetBrowser_isEnabled() ) {
+					if( g_Layout_builtInGroupDialog.m_value )
+						g_page_textures = GroupDialog_addPage( "Asset Browser", AssetBrowser_constructWindow( GroupDialog_getWindow() ), TextureBrowserExportTitleCaller() );
+					else
+						m_vSplit2->addWidget( AssetBrowser_constructWindow( window ) );
+				}
 			}
 		}
 	}
@@ -1941,10 +1949,12 @@ void MainFrame::Shutdown(){
 
 	ModelBrowser_destroyWindow();
 	LayersBrowser_destroyWindow();
-	SoundBrowser_destroyWindow();
-	EntityBrowser_destroyWindow();
-	TextureBrowser_destroyWindow();
-	AssetBrowser_destroyWindow();
+	if ( AssetBrowser_isEnabled() ) {
+		SoundBrowser_destroyWindow();
+		EntityBrowser_destroyWindow();
+		TextureBrowser_destroyWindow();
+		AssetBrowser_destroyWindow();
+	}
 
 	DeleteCamWnd( m_pCamWnd );
 	m_pCamWnd = 0;

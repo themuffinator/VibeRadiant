@@ -185,6 +185,48 @@ void createShader( GLuint program, const char* filename, GLenum type ){
 	GlobalOpenGL_debugAssertNoErrors();
 }
 
+bool tryCreateShader( GLuint program, const char* filename, GLenum type ){
+	if ( !file_readable( filename ) ) {
+		globalErrorStream() << "shader missing: " << Quoted( filename ) << '\n';
+		return false;
+	}
+
+	GLuint shader = gl().glCreateShader( type );
+	GlobalOpenGL_debugAssertNoErrors();
+
+	std::size_t size = file_size( filename );
+	FileInputStream file( filename );
+	if ( file.failed() ) {
+		globalErrorStream() << "failed to open shader: " << Quoted( filename ) << '\n';
+		gl().glDeleteShader( shader );
+		return false;
+	}
+
+	Array<GLchar> buffer( size );
+	size = file.read( reinterpret_cast<StreamBase::byte_type*>( buffer.data() ), size );
+
+	const GLchar* string = buffer.data();
+	GLint length = GLint( size );
+	gl().glShaderSource( shader, 1, &string, &length );
+
+	gl().glCompileShader( shader );
+
+	GLint compiled = 0;
+	gl().glGetShaderiv( shader, GL_COMPILE_STATUS, &compiled );
+	if ( !compiled ) {
+		printShaderLog( shader );
+		globalErrorStream() << "shader compile failed: " << Quoted( filename ) << '\n';
+		gl().glDeleteShader( shader );
+		return false;
+	}
+
+	gl().glAttachShader( program, shader );
+	gl().glDeleteShader( shader );
+
+	GlobalOpenGL_debugAssertNoErrors();
+	return true;
+}
+
 void GLSLProgram_link( GLuint program ){
 	gl().glLinkProgram( program );
 
@@ -335,17 +377,27 @@ public:
 	GLuint m_program;
 	GLint u_light_origin;
 	GLint u_light_color;
+	bool m_valid;
 
-	GLSLPreviewLightProgram() : m_program( 0 ){
+	GLSLPreviewLightProgram() : m_program( 0 ), m_valid( false ){
 	}
 
 	void create(){
+		m_valid = false;
 		m_program = gl().glCreateProgram();
 
 		{
-			StringOutputStream filename( 256 );
-			createShader( m_program, filename( GlobalRadiant().getAppPath(), "gl/lighting_preview_vp.glsl" ), GL_VERTEX_SHADER );
-			createShader( m_program, filename( GlobalRadiant().getAppPath(), "gl/lighting_preview_fp.glsl" ), GL_FRAGMENT_SHADER );
+			StringOutputStream vertexPath( 256 );
+			StringOutputStream fragmentPath( 256 );
+			const char* vertexShader = vertexPath( GlobalRadiant().getAppPath(), "gl/lighting_preview_vp.glsl" );
+			const char* fragmentShader = fragmentPath( GlobalRadiant().getAppPath(), "gl/lighting_preview_fp.glsl" );
+			if ( !tryCreateShader( m_program, vertexShader, GL_VERTEX_SHADER )
+			  || !tryCreateShader( m_program, fragmentShader, GL_FRAGMENT_SHADER ) ) {
+				globalErrorStream() << "preview lighting disabled: shader load failed\n";
+				gl().glDeleteProgram( m_program );
+				m_program = 0;
+				return;
+			}
 		}
 
 		GLSLProgram_link( m_program );
@@ -362,15 +414,24 @@ public:
 
 		gl().glUseProgram( 0 );
 
+		m_valid = true;
+
 		GlobalOpenGL_debugAssertNoErrors();
 	}
 
 	void destroy(){
+		if ( m_program == 0 ) {
+			return;
+		}
 		gl().glDeleteProgram( m_program );
 		m_program = 0;
+		m_valid = false;
 	}
 
 	void enable() override {
+		if ( m_program == 0 ) {
+			return;
+		}
 		gl().glUseProgram( m_program );
 
 		gl().glEnableVertexAttribArray( c_attr_TexCoord0 );
@@ -379,6 +440,9 @@ public:
 	}
 
 	void disable() override {
+		if ( m_program == 0 ) {
+			return;
+		}
 		gl().glUseProgram( 0 );
 
 		gl().glDisableVertexAttribArray( c_attr_TexCoord0 );
@@ -387,6 +451,9 @@ public:
 	}
 
 	void setParameters( const Vector3& viewer, const Matrix4& localToWorld, const Vector3& origin, const Vector3& colour, const Matrix4& world2light ) override {
+		if ( m_program == 0 ) {
+			return;
+		}
 		Matrix4 world2local( localToWorld );
 		matrix4_affine_invert( world2local );
 
@@ -407,6 +474,10 @@ public:
 		gl().glMatrixMode( GL_MODELVIEW );
 
 		GlobalOpenGL_debugAssertNoErrors();
+	}
+
+	bool isValid() const {
+		return m_valid && m_program != 0;
 	}
 };
 
@@ -2193,7 +2264,7 @@ void OpenGLShader::construct( const char* name ){
 				state.m_sort = OpenGLState::eSortFullbright;
 			}
 
-			if ( g_ShaderCache->lightingEnabled() && g_pGameDescription->mGameType != "doom3" ) {
+			if ( g_ShaderCache->lightingEnabled() && g_pGameDescription->mGameType != "doom3" && g_previewLightGLSL.isValid() ) {
 				OpenGLState& lightPass = appendDefaultPass();
 				lightPass = state;
 				lightPass.m_state |= RENDER_BLEND | RENDER_BUMP | RENDER_PROGRAM;

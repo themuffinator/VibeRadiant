@@ -56,6 +56,12 @@
 #include "gtkutil/guisettings.h"
 #include <QPlainTextEdit>
 #include <QComboBox>
+#include <QFile>
+
+#ifdef WIN32
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 #include "os/path.h"
 #include "generic/static.h"
@@ -1472,7 +1478,8 @@ void ShaderHighlighter::highlightBlock( const QString &text )
 {
 	int start = 0;
 	stateSetComment( false );
-	depthSet( depth( previousBlockState() ) == -1? eShaderDepth0 : depth( previousBlockState() ) );
+	const auto previousDepth = depth( previousBlockState() );
+	depthSet( previousDepth == -1 ? static_cast<std::int16_t>( eShaderDepth0 ) : previousDepth );
 
 	if( auto *data = currentBlockUserData() ){
 		static_cast<BlockData*>( data )->shaderFormat = nullptr;
@@ -1480,8 +1487,13 @@ void ShaderHighlighter::highlightBlock( const QString &text )
 
 	const auto highlight_normal = [&]( const std::vector<Rule>& rules, const QStringView str ){
 		for( const auto& rule : rules ){
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+			const auto match = rule.pattern.matchView( str, start, QRegularExpression::MatchType::NormalMatch,
+				QRegularExpression::MatchOption::AnchorAtOffsetMatchOption );
+#else
 			const auto match = rule.pattern.match( str, start, QRegularExpression::MatchType::NormalMatch,
 				QRegularExpression::MatchOption::AnchoredMatchOption );
+#endif
 			if( match.hasMatch() ){
 				for( int i = 1; i <= match.lastCapturedIndex(); ++i ){
 					if( !rule.colors[i - 1].isValid() ){ // c_colorColor3f
@@ -2215,9 +2227,10 @@ private:
 		}
 		if( !list.isEmpty() ){
 			if( list.size() > 3 ){ // try to find long enough common prefix to reduce typing
-				int len = list[0].length();
+				int len = static_cast<int>( list[0].length() );
 				for( int i = 0; i < list.size() && len > 0; ++i ){
-					len = std::min( len, list[i].length() );
+					const int itemLen = static_cast<int>( list[i].length() );
+					len = std::min( len, itemLen );
 					for( int j = 0; j < len; ++j ){
 						if( list[0][j].toLower() != list[i][j].toLower() ){
 							len = j;
@@ -2225,8 +2238,8 @@ private:
 						}
 					}
 				}
-				const int postSlashId = line.last().lastIndexOf( '/' ) + 1; // -1 + 1 when not found
-				if( len >= line.last().length() - postSlashId + 2 ){ // two or more chars may be completed, cool
+				const int postSlashId = static_cast<int>( line.last().lastIndexOf( '/' ) + 1 ); // -1 + 1 when not found
+				if( len >= static_cast<int>( line.last().length() ) - postSlashId + 2 ){ // two or more chars may be completed, cool
 					QString prefix( list[0].left( len ) );
 					list.clear();
 					list.push_back( prefix );

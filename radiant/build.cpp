@@ -779,6 +779,13 @@ public:
 		setDragDropMode( QAbstractItemView::DragDropMode::InternalMove );
 	}
 protected:
+	static QPoint dropEventPosition( const QDropEvent* event ){
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+		return event->position().toPoint();
+#else
+		return event->pos();
+#endif
+	}
 	void mousePressEvent( QMouseEvent* event ) override {
 		setDragDropMode( event->modifiers() == Qt::KeyboardModifier::ControlModifier
 		                 ? QAbstractItemView::DragDropMode::DragDrop
@@ -795,7 +802,7 @@ protected:
 		      ( index.row() + 1 == topLevelItemCount() && pos.y() > visualRect( index ).center().y() ); // last item
 	}
 	void dragMoveEvent( QDragMoveEvent* event ) override {
-		if( positionBelowLast( event->pos() ) ){
+		if( positionBelowLast( dropEventPosition( event ) ) ){
 			event->ignore();
 			return;
 		}
@@ -803,7 +810,7 @@ protected:
 	}
 	bool m_drop = false;
 	void dropEvent( QDropEvent* event ) override {
-		if( positionBelowLast( event->pos() ) ){
+		if( positionBelowLast( dropEventPosition( event ) ) ){
 			event->ignore();
 			return;
 		}
@@ -1013,7 +1020,8 @@ public:
 			}
 
 			Tool& newtool = tools.begin()->second;
-			model->setData( index, newtool.evaluate().c_str(), Qt::ItemDataRole::DisplayRole );
+			const auto evaluated = newtool.evaluate();
+			model->setData( index, QString::fromLatin1( evaluated.c_str() ), Qt::ItemDataRole::DisplayRole );
 			g_build_tools[ thisname.constData() ] = std::move( newtool );
 			g_tools_changed = true;
 			build_clear_variables();
@@ -1149,7 +1157,7 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 						XMLStreamWriter writer( stream ); // destructor dumps to stream
 						tool.exportXML( writer );
 					}
-					item->setData( Qt::ItemDataRole::UserRole, strchr( stream, '>' ) + 1 ); // skip xml header
+					item->setData( Qt::ItemDataRole::UserRole, QString( strchr( stream, '>' ) + 1 ) ); // skip xml header
 				}
 				table->insertRow( table->rowCount() );
 				table->setItem( table->rowCount() - 1, 0, new QTableWidgetItem( LAST_ITER_STRING ) );

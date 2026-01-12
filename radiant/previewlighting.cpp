@@ -21,6 +21,7 @@
 #include "iarchive.h"
 #include "idatastream.h"
 #include "iscriplib.h"
+#include "signal/isignal.h"
 
 #include "string/string.h"
 #include "stringio.h"
@@ -829,15 +830,15 @@ void preview_lighting_rebuild(){
 void preview_lighting_mark_dirty(){
 	g_previewLighting.dirty = true;
 }
-typedef FreeCaller<void(), preview_lighting_mark_dirty> PreviewLightingChangedCaller;
+using PreviewLightingChangedCaller = BindFirstOpaque<detail::FreeCallerWrapper<void()>>;
 }
 
 void PreviewLighting_Enable( bool enable ){
 	if ( game_is_doom3() ) {
 		return;
 	}
-	if ( !g_previewLighting.callbackRegistered ) {
-		AddSceneChangeCallback( PreviewLightingChangedCaller() );
+	if ( enable && !g_previewLighting.callbackRegistered ) {
+		AddSceneChangeCallback( makeSignalHandler( PreviewLightingChangedCaller( reinterpret_cast<void*>( preview_lighting_mark_dirty ) ) ) );
 		g_previewLighting.callbackRegistered = true;
 	}
 

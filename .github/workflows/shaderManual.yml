@@ -16,7 +16,7 @@ jobs:
         github-token: ${{ secrets.ACTION_TOKEN }}
         script: |
           await github.rest.actions.createWorkflowDispatch({
-           owner: 'Garux',
+           owner: 'themuffinator',
            repo: 'shaderManual',
            workflow_id: 'static.yml',
            ref: 'main'

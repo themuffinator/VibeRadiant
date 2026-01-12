@@ -27,14 +27,47 @@
 
 #include "igl.h"
 
+#include <QByteArray>
+#include <QLabel>
+#include <QVBoxLayout>
+#include <QWidget>
 #include <QSurfaceFormat>
 #include <QCoreApplication>
 #include <QOpenGLWidget>
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+#include <QOpenGLVersionFunctionsFactory>
+#endif
 
 void ( *GLWidget_sharedContextCreated )() = 0;
 void ( *GLWidget_sharedContextDestroyed )() = 0;
 
 unsigned int g_context_count = 0;
+
+bool OpenGLWidgetsDisabled(){
+	static bool disabled = [](){
+		QByteArray value = qgetenv( "VIBERADIANT_DISABLE_OPENGL" );
+		if ( value.isEmpty() ) {
+			value = qgetenv( "RADIANT_DISABLE_OPENGL" );
+		}
+		return !value.isEmpty() && value != "0";
+	}();
+	return disabled;
+}
+
+QWidget* glwidget_createDisabledPlaceholder( const char* label, QWidget* parent ){
+	auto *placeholder = new QWidget( parent );
+	auto *layout = new QVBoxLayout( placeholder );
+	layout->setContentsMargins( 0, 0, 0, 0 );
+	layout->setSpacing( 0 );
+	const char* message = ( label != nullptr && label[0] != '\0' )
+		? label
+		: "OpenGL disabled";
+	auto *text = new QLabel( message, placeholder );
+	text->setAlignment( Qt::AlignmentFlag::AlignCenter );
+	text->setWordWrap( true );
+	layout->addWidget( text );
+	return placeholder;
+}
 
 
 void glwidget_context_created( QOpenGLWidget& widget ){
@@ -49,8 +82,14 @@ void glwidget_context_created( QOpenGLWidget& widget ){
 	ASSERT_MESSAGE( widget.isValid(), "failed to create OpenGL widget" );
 
 	if ( ++g_context_count == 1 ) {
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+		GlobalOpenGL().funcs = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_2_0>( widget.context() );
+#else
 		GlobalOpenGL().funcs = widget.context()->versionFunctions<QOpenGLFunctions_2_0>();
-		ASSERT_MESSAGE( GlobalOpenGL().funcs, "failed to initializeOpenGLFunctions" );
+#endif
+		ASSERT_MESSAGE( GlobalOpenGL().funcs, "failed to resolve OpenGL functions" );
+		const bool initialized = GlobalOpenGL().funcs->initializeOpenGLFunctions();
+		ASSERT_MESSAGE( initialized, "failed to initialize OpenGL functions" );
 		GlobalOpenGL().contextValid = true;
 
 		GLWidget_sharedContextCreated();

@@ -107,6 +107,9 @@ SimpleCounter g_patchCount;
 SimpleCounter g_entityCount;
 
 void QE_brushCountChange(){
+	if ( g_pParentWnd == nullptr ) {
+		return;
+	}
 	std::size_t counts[3] = { g_brushCount.get(), g_patchCount.get(), g_entityCount.get() };
 	if( GlobalSelectionSystem().countSelected() != 0 )
 		GlobalSelectionSystem().countSelectedStuff( counts[0], counts[1], counts[2] );

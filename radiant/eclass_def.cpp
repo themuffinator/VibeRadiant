@@ -21,6 +21,8 @@
 
 #include "eclass_def.h"
 
+#include <cstring>
+
 #include "iscriplib.h"
 
 #include "eclasslib.h"
@@ -260,7 +262,16 @@ EntityClass *Eclass_InitFromText( const char *text ){
 			 || string_equal_prefix_nocase( Get_COM_Token(), "unused" ) ){
 				continue;
 			}
-			strncpy( e->flagnames[i], Get_COM_Token(), std::size( e->flagnames[i] ) - 1 );
+			const char* token = Get_COM_Token();
+			const std::size_t flagSize = std::size( e->flagnames[i] );
+			const std::size_t tokenLength = std::strlen( token );
+			if ( tokenLength >= flagSize ) {
+				std::memcpy( e->flagnames[i], token, flagSize - 1 );
+				e->flagnames[i][flagSize - 1] = '\0';
+			}
+			else {
+				std::memcpy( e->flagnames[i], token, tokenLength + 1 );
+			}
 		}
 	}
 

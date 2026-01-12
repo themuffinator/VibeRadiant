@@ -26,8 +26,11 @@
 #include "ifiletypes.h"
 #include "ifilesystem.h"
 #include "igl.h"
+#include "mainframe.h"
+#include "math/vector.h"
 #include "string/string.h"
 #include "stream/stringstream.h"
+#include "view.h"
 #include "generic/callback.h"
 
 #include "gtkutil/cursor.h"
@@ -35,6 +38,7 @@
 #include "gtkutil/glfont.h"
 #include "gtkutil/glwidget.h"
 #include "gtkutil/guisettings.h"
+#include "gtkutil/image.h"
 #include "gtkutil/mousepresses.h"
 #include "gtkutil/toolbar.h"
 #include "gtkutil/widget.h"
@@ -184,6 +188,9 @@ private:
 		return constructCellPos().totalHeight( m_height, m_visibleFiles.size() );
 	}
 	void updateScroll() const {
+		if ( m_gl_scroll == nullptr ) {
+			return;
+		}
 		m_gl_scroll->setMinimum( 0 );
 		m_gl_scroll->setMaximum( totalHeight() - m_height );
 		m_gl_scroll->setValue( -m_originZ );
@@ -457,10 +464,17 @@ protected:
 		m_sndBro.m_originInvalid = true;
 
 		delete m_fbo;
+		m_fbo = nullptr;
+		if ( m_sndBro.m_width <= 0 || m_sndBro.m_height <= 0 ) {
+			return;
+		}
 		m_fbo = new FBO( m_sndBro.m_width, m_sndBro.m_height, true, m_sndBro.m_MSAA );
 	}
 	void paintGL() override
 	{
+		if ( m_fbo == nullptr ) {
+			return;
+		}
 		if( ScreenUpdates_Enabled() && m_fbo->bind() ){
 			GlobalOpenGL_debugAssertNoErrors();
 			SoundBrowser_render();
@@ -476,8 +490,9 @@ protected:
 		if ( press == MousePresses::Left || press == MousePresses::Right ) {
 			m_sndBro.tracking_MouseDown();
 			if ( press == MousePresses::Left ) {
-				m_dragStart = event->pos();
-				m_sndBro.testSelect( event->x() * m_scale, event->y() * m_scale );
+				const QPoint localPos = mouseEventLocalPos( event );
+				m_dragStart = localPos;
+				m_sndBro.testSelect( localPos.x() * m_scale, localPos.y() * m_scale );
 			}
 		}
 	}
@@ -485,7 +500,8 @@ protected:
 		if ( !( event->buttons() & Qt::MouseButton::LeftButton ) ) {
 			return;
 		}
-		if ( ( event->pos() - m_dragStart ).manhattanLength() < QApplication::startDragDistance() ) {
+		const QPoint localPos = mouseEventLocalPos( event );
+		if ( ( localPos - m_dragStart ).manhattanLength() < QApplication::startDragDistance() ) {
 			return;
 		}
 
@@ -621,6 +637,8 @@ protected:
 QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 	g_SoundBrowser.m_parent = toplevel;
 
+	const bool disableOpenGL = OpenGLWidgetsDisabled();
+
 	auto *splitter = new QSplitter;
 	auto *containerWidgetLeft = new QWidget;
 	auto *containerWidgetRight = new QWidget;
@@ -692,16 +710,27 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 		vbox->addWidget( g_SoundBrowser.m_treeView );
 	}
 	{	// gl_widget
-		g_SoundBrowser.m_gl_widget = new SoundBrowserGLWidget( g_SoundBrowser );
-		hbox->addWidget( g_SoundBrowser.m_gl_widget );
+		if ( disableOpenGL ) {
+			g_SoundBrowser.m_gl_widget = nullptr;
+			hbox->addWidget( glwidget_createDisabledPlaceholder( "OpenGL disabled (Sounds)", nullptr ) );
+		}
+		else {
+			g_SoundBrowser.m_gl_widget = new SoundBrowserGLWidget( g_SoundBrowser );
+			hbox->addWidget( g_SoundBrowser.m_gl_widget );
+		}
 	}
 	{	// gl_widget scrollbar
-		auto *scroll = g_SoundBrowser.m_gl_scroll = new QScrollBar;
-		hbox->addWidget( scroll );
+		if ( !disableOpenGL ) {
+			auto *scroll = g_SoundBrowser.m_gl_scroll = new QScrollBar;
+			hbox->addWidget( scroll );
 
-		QObject::connect( scroll, &QAbstractSlider::valueChanged, []( int value ){
-			g_SoundBrowser.m_scrollAdjustment.value_changed( value );
-		} );
+			QObject::connect( scroll, &QAbstractSlider::valueChanged, []( int value ){
+				g_SoundBrowser.m_scrollAdjustment.value_changed( value );
+			} );
+		}
+		else {
+			g_SoundBrowser.m_gl_scroll = nullptr;
+		}
 	}
 
 	g_guiSettings.addSplitter( splitter, "SoundBrowser/splitter", { 100, 500 } );

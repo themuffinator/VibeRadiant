@@ -61,6 +61,7 @@
 #include "mainframe.h"
 #include "soundbrowser.h"
 #include "build.h"
+#include "assetbrowser.h"
 #include "mru.h"
 #include "surfacedialog.h"
 #include "groupdialog.h"
@@ -263,8 +264,10 @@ public:
 		BuildMonitor_Construct();
 		TextureBrowser_Construct();
 		ModelBrowser_Construct();
-		EntityBrowser_Construct();
-		SoundBrowser_Construct();
+		if ( AssetBrowser_isEnabled() ) {
+			EntityBrowser_Construct();
+			SoundBrowser_Construct();
+		}
 		Entity_Construct();
 		Autosave_Construct();
 		EntityInspector_construct();
@@ -285,8 +288,10 @@ public:
 		EntityInspector_destroy();
 		Autosave_Destroy();
 		Entity_Destroy();
-		SoundBrowser_Destroy();
-		EntityBrowser_Destroy();
+		if ( AssetBrowser_isEnabled() ) {
+			SoundBrowser_Destroy();
+			EntityBrowser_Destroy();
+		}
 		ModelBrowser_Destroy();
 		TextureBrowser_Destroy();
 		BuildMonitor_Destroy();

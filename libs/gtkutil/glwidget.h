@@ -25,6 +25,11 @@ void glwidget_setDefaultFormat();
 void glwidget_context_created( class QOpenGLWidget& widget );
 void glwidget_context_destroyed();
 
+class QWidget;
+
+bool OpenGLWidgetsDisabled();
+QWidget* glwidget_createDisabledPlaceholder( const char* label, QWidget* parent = nullptr );
+
 
 extern void ( *GLWidget_sharedContextCreated )();
 extern void ( *GLWidget_sharedContextDestroyed )();

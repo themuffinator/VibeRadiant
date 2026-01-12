@@ -28,11 +28,17 @@
 #include "igl.h"
 #include "irender.h"
 #include "iscenegraph.h"
+#include "instancelib.h"
+#include "mainframe.h"
 #include "renderable.h"
 #include "renderer.h"
 #include "scenelib.h"
+#include "selectionlib.h"
 #include "string/string.h"
 #include "stream/stringstream.h"
+#include "traverselib.h"
+#include "view.h"
+
 #include "generic/callback.h"
 
 #include "gtkutil/cursor.h"
@@ -40,6 +46,7 @@
 #include "gtkutil/glfont.h"
 #include "gtkutil/glwidget.h"
 #include "gtkutil/guisettings.h"
+#include "gtkutil/image.h"
 #include "gtkutil/mousepresses.h"
 #include "gtkutil/toolbar.h"
 #include "gtkutil/widget.h"
@@ -58,6 +65,7 @@ bool string_contains_nocase( const char* haystack, const char* needle ){
 	}
 	return false;
 }
+
 } // namespace
 
 /* specialized copy of class CompiledGraph */
@@ -470,6 +478,9 @@ private:
 		return constructCellPos().totalHeight( m_height, m_visibleClasses.size() );
 	}
 	void updateScroll() const {
+		if ( m_gl_scroll == nullptr ) {
+			return;
+		}
 		m_gl_scroll->setMinimum( 0 );
 		m_gl_scroll->setMaximum( totalHeight() - m_height );
 		m_gl_scroll->setValue( -m_originZ );
@@ -863,10 +874,17 @@ protected:
 		m_entBro.forEachEntityInstance( entities_set_transforms() );
 
 		delete m_fbo;
+		m_fbo = nullptr;
+		if ( m_entBro.m_width <= 0 || m_entBro.m_height <= 0 ) {
+			return;
+		}
 		m_fbo = new FBO( m_entBro.m_width, m_entBro.m_height, true, m_entBro.m_MSAA );
 	}
 	void paintGL() override
 	{
+		if ( m_fbo == nullptr ) {
+			return;
+		}
 		if( ScreenUpdates_Enabled() && m_fbo->bind() ){
 			GlobalOpenGL_debugAssertNoErrors();
 			EntityBrowser_render();
@@ -882,8 +900,9 @@ protected:
 		if ( press == MousePresses::Left || press == MousePresses::Right ) {
 			m_entBro.tracking_MouseDown();
 			if ( press == MousePresses::Left ) {
-				m_dragStart = event->pos();
-				m_entBro.testSelect( event->x() * m_scale, event->y() * m_scale );
+				const QPoint localPos = mouseEventLocalPos( event );
+				m_dragStart = localPos;
+				m_entBro.testSelect( localPos.x() * m_scale, localPos.y() * m_scale );
 			}
 		}
 	}
@@ -891,7 +910,8 @@ protected:
 		if ( !( event->buttons() & Qt::MouseButton::LeftButton ) ) {
 			return;
 		}
-		if ( ( event->pos() - m_dragStart ).manhattanLength() < QApplication::startDragDistance() ) {
+		const QPoint localPos = mouseEventLocalPos( event );
+		if ( ( localPos - m_dragStart ).manhattanLength() < QApplication::startDragDistance() ) {
 			return;
 		}
 
@@ -933,7 +953,7 @@ static void EntityBrowser_selectCategory( const QString& name ){
 			}
 		}
 
-		if ( Traversable* traversable = Node_getTraversable( g_entityGraph->root() ) ) {
+		if ( scene::Traversable* traversable = Node_getTraversable( g_entityGraph->root() ) ) {
 			for ( EntityClass* eclass : g_EntityBrowser.visibleClasses() ) {
 				NodeSmartReference node( GlobalEntityCreator().createEntity( eclass ) );
 				traversable->insert( node );
@@ -1004,6 +1024,8 @@ protected:
 
 QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 	g_EntityBrowser.m_parent = toplevel;
+
+	const bool disableOpenGL = OpenGLWidgetsDisabled();
 
 	auto *splitter = new QSplitter;
 	auto *containerWidgetLeft = new QWidget;
@@ -1078,16 +1100,27 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 		vbox->addWidget( g_EntityBrowser.m_treeView );
 	}
 	{	// gl_widget
-		g_EntityBrowser.m_gl_widget = new EntityBrowserGLWidget( g_EntityBrowser );
-		hbox->addWidget( g_EntityBrowser.m_gl_widget );
+		if ( disableOpenGL ) {
+			g_EntityBrowser.m_gl_widget = nullptr;
+			hbox->addWidget( glwidget_createDisabledPlaceholder( "OpenGL disabled (Entities)", nullptr ) );
+		}
+		else {
+			g_EntityBrowser.m_gl_widget = new EntityBrowserGLWidget( g_EntityBrowser );
+			hbox->addWidget( g_EntityBrowser.m_gl_widget );
+		}
 	}
 	{	// gl_widget scrollbar
-		auto *scroll = g_EntityBrowser.m_gl_scroll = new QScrollBar;
-		hbox->addWidget( scroll );
+		if ( !disableOpenGL ) {
+			auto *scroll = g_EntityBrowser.m_gl_scroll = new QScrollBar;
+			hbox->addWidget( scroll );
 
-		QObject::connect( scroll, &QAbstractSlider::valueChanged, []( int value ){
-			g_EntityBrowser.m_scrollAdjustment.value_changed( value );
-		} );
+			QObject::connect( scroll, &QAbstractSlider::valueChanged, []( int value ){
+				g_EntityBrowser.m_scrollAdjustment.value_changed( value );
+			} );
+		}
+		else {
+			g_EntityBrowser.m_gl_scroll = nullptr;
+		}
 	}
 
 	g_guiSettings.addSplitter( splitter, "EntityBrowser/splitter", { 100, 500 } );
@@ -1097,6 +1130,15 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 
 void EntityBrowser_destroyWindow(){
 	g_EntityBrowser.m_gl_widget = nullptr;
+}
+
+void EntityBrowser_flushReferences(){
+	if ( g_entityGraph == nullptr ) {
+		return;
+	}
+
+	EntityGraph_clear();
+	g_EntityBrowser.queueDraw();
 }
 
 void EntityBrowser_Construct(){

@@ -98,10 +98,17 @@ protected:
 		m_zwnd.m_drawRequired = true;
 
 		delete m_fbo;
+		m_fbo = nullptr;
+		if ( m_zwnd.m_nWidth <= 0 || m_zwnd.m_nHeight <= 0 ) {
+			return;
+		}
 		m_fbo = new FBO( m_zwnd.m_nWidth, m_zwnd.m_nHeight, false, XYWnd_getMSAA() );
 	}
 	void paintGL() override
 	{
+		if ( m_fbo == nullptr ) {
+			return;
+		}
 		if( m_fbo->m_samples != XYWnd_getMSAA() ){
 			delete m_fbo;
 			m_fbo = new FBO( m_zwnd.m_nWidth, m_zwnd.m_nHeight, false, XYWnd_getMSAA() );
@@ -239,7 +246,9 @@ protected:
 };
 
 ZWnd::ZWnd() :
-	m_gl_widget( new ZGLWidget( *this ) ),
+	m_gl_widget( OpenGLWidgetsDisabled()
+		? glwidget_createDisabledPlaceholder( "OpenGL disabled (Z view)", nullptr )
+		: static_cast<QWidget*>( new ZGLWidget( *this ) ) ),
 	m_deferredDraw( WidgetQueueDrawCaller( *m_gl_widget ) ),
 	m_window_observer( NewWindowObserver() )
 {

@@ -20,9 +20,9 @@ Makefile variables:
 
 Update URLs:
 - `RADIANT_UPDATE_URL` defaults to
-  `https://github.com/Garux/VibeRadiant/releases/latest/download/update.json`.
+  `https://github.com/themuffinator/VibeRadiant/releases/latest/download/update.json`.
 - `RADIANT_RELEASES_URL` defaults to
-  `https://github.com/Garux/VibeRadiant/releases/latest`.
+  `https://github.com/themuffinator/VibeRadiant/releases/latest`.
 - Both can be overridden in `Makefile.conf` or the environment to point at another channel.
 
 ## Packaging outputs
@@ -72,18 +72,18 @@ Example (trimmed):
 ```json
 {
   "version": "1.6.0",
-  "notes": "https://github.com/Garux/VibeRadiant/releases/tag/v1.6.0",
+  "notes": "https://github.com/themuffinator/VibeRadiant/releases/tag/v1.6.0",
   "published_at": "2026-01-01T12:00:00Z",
   "assets": {
     "windows-x86_64": {
-      "url": "https://github.com/Garux/VibeRadiant/releases/download/v1.6.0/VibeRadiant-1.6.0-windows-x86_64.zip",
+      "url": "https://github.com/themuffinator/VibeRadiant/releases/download/v1.6.0/VibeRadiant-1.6.0-windows-x86_64.zip",
       "sha256": "....",
       "name": "VibeRadiant-1.6.0-windows-x86_64.zip",
       "type": "zip",
       "size": 12345678
     },
     "linux-x86_64": {
-      "url": "https://github.com/Garux/VibeRadiant/releases/download/v1.6.0/VibeRadiant-1.6.0-linux-x86_64.AppImage",
+      "url": "https://github.com/themuffinator/VibeRadiant/releases/download/v1.6.0/VibeRadiant-1.6.0-linux-x86_64.AppImage",
       "sha256": "....",
       "name": "VibeRadiant-1.6.0-linux-x86_64.AppImage",
       "type": "appimage",

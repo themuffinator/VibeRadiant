@@ -397,7 +397,7 @@ struct ClipWinding
 
 	// for volumetric merge
 	std::vector<ClipWinding> frontWindings;
-	Vector3 bestNormal;
+	Vector3 bestNormal{ 0 };
 	bool isplanar() const {
 		return frontWindings.size() <= 1;
 	}

@@ -60,6 +60,7 @@
 #include "xywindow.h"
 #include "mainframe.h"
 #include "preferences.h"
+#include "entitybrowser.h"
 #include "referencecache.h"
 #include "mru.h"
 #include "commands.h"
@@ -394,6 +395,7 @@ void Map_Free(){
 	g_map.m_resource = 0;
 
 	ModelBrowser_flushReferences();
+	EntityBrowser_flushReferences();
 
 	FlushReferences();
 

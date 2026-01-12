@@ -115,7 +115,7 @@ public:
 		m_named.attach( IdentifierChangedCaller( *this ) );
 	}
 	bool excluded_not() const {
-		return m_label.tex > 0;
+		return m_label.hasText();
 	}
 public:
 	void render( Renderer& renderer, const VolumeTest& volume, const Matrix4& localToWorld, bool selected, bool childSelected = false ) const {

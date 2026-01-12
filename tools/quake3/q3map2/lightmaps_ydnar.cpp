@@ -286,6 +286,9 @@ static void FinishRawLightmap( rawLightmap_t& lm ){
 	int i, j, c, size, *sc;
 	float is;
 	surfaceInfo_t       *info;
+	const Vector3 zeroVector( 0.0f );
+	const SuperLuxel zeroSuperLuxel{ Vector3( 0.0f ), 0.0f };
+	const SuperFloodLight zeroFloodLight{ Vector3( 0.0f ), 0.0f };
 
 
 	/* sort light surfaces by shader name */
@@ -362,7 +365,7 @@ static void FinishRawLightmap( rawLightmap_t& lm ){
 	if ( lm.bspLuxels[ 0 ] == nullptr ) {
 		lm.bspLuxels[ 0 ] = safe_malloc( size );
 	}
-	memset( lm.bspLuxels[ 0 ], 0, size );
+	std::fill_n( lm.bspLuxels[ 0 ], static_cast<size_t>( lm.w ) * lm.h, zeroVector );
 
 	/* allocate radiosity lightmap storage */
 	if ( bounce ) {
@@ -370,7 +373,7 @@ static void FinishRawLightmap( rawLightmap_t& lm ){
 		if ( lm.radLuxels[ 0 ] == nullptr ) {
 			lm.radLuxels[ 0 ] = safe_malloc( size );
 		}
-		memset( lm.radLuxels[ 0 ], 0, size );
+		std::fill_n( lm.radLuxels[ 0 ], static_cast<size_t>( lm.w ) * lm.h, zeroVector );
 	}
 
 	/* allocate sampling lightmap storage */
@@ -378,21 +381,21 @@ static void FinishRawLightmap( rawLightmap_t& lm ){
 	if ( lm.superLuxels[ 0 ] == nullptr ) {
 		lm.superLuxels[ 0 ] = safe_malloc( size );
 	}
-	memset( lm.superLuxels[ 0 ], 0, size );
+	std::fill_n( lm.superLuxels[ 0 ], static_cast<size_t>( lm.sw ) * lm.sh, zeroSuperLuxel );
 
 	/* allocate origin map storage */
 	size = lm.sw * lm.sh * sizeof( *lm.superOrigins );
 	if ( lm.superOrigins == nullptr ) {
 		lm.superOrigins = safe_malloc( size );
 	}
-	memset( lm.superOrigins, 0, size );
+	std::fill_n( lm.superOrigins, static_cast<size_t>( lm.sw ) * lm.sh, zeroVector );
 
 	/* allocate normal map storage */
 	size = lm.sw * lm.sh * sizeof( *lm.superNormals );
 	if ( lm.superNormals == nullptr ) {
 		lm.superNormals = safe_malloc( size );
 	}
-	memset( lm.superNormals, 0, size );
+	std::fill_n( lm.superNormals, static_cast<size_t>( lm.sw ) * lm.sh, zeroVector );
 
 	/* allocate dirt map storage */
 	size = lm.sw * lm.sh * sizeof( *lm.superDirt );
@@ -406,7 +409,7 @@ static void FinishRawLightmap( rawLightmap_t& lm ){
 	if ( lm.superFloodLight == nullptr ) {
 		lm.superFloodLight = safe_malloc( size );
 	}
-	memset( lm.superFloodLight, 0, size );
+	std::fill_n( lm.superFloodLight, static_cast<size_t>( lm.sw ) * lm.sh, zeroFloodLight );
 
 	/* allocate cluster map storage */
 	size = lm.sw * lm.sh * sizeof( *lm.superClusters );
@@ -425,14 +428,14 @@ static void FinishRawLightmap( rawLightmap_t& lm ){
 		if ( lm.superDeluxels == nullptr ) {
 			lm.superDeluxels = safe_malloc( size );
 		}
-		memset( lm.superDeluxels, 0, size );
+		std::fill_n( lm.superDeluxels, static_cast<size_t>( lm.sw ) * lm.sh, zeroVector );
 
 		/* allocate bsp deluxel storage */
 		size = lm.w * lm.h * sizeof( *lm.bspDeluxels );
 		if ( lm.bspDeluxels == nullptr ) {
 			lm.bspDeluxels = safe_malloc( size );
 		}
-		memset( lm.bspDeluxels, 0, size );
+		std::fill_n( lm.bspDeluxels, static_cast<size_t>( lm.w ) * lm.h, zeroVector );
 	}
 
 	/* add to count */
@@ -2265,6 +2268,7 @@ void StoreSurfaceLightmaps( bool fastAllocate, bool storeForReal ){
 	char lightmapName[ 128 ];
 	const char              *rgbGenValues[ 256 ] = {0};
 	const char              *alphaGenValues[ 256 ] = {0};
+	const Vector3 zeroVector( 0.0f );
 
 
 	/* note it */
@@ -2319,7 +2323,7 @@ void StoreSurfaceLightmaps( bool fastAllocate, bool storeForReal ){
 				if ( lm->radLuxels[ lightmapNum ] == nullptr ) {
 					lm->radLuxels[ lightmapNum ] = safe_malloc( size );
 				}
-				memset( lm->radLuxels[ lightmapNum ], 0, size );
+				std::fill_n( lm->radLuxels[ lightmapNum ], static_cast<size_t>( lm->w ) * lm->h, zeroVector );
 			}
 
 			/* average supersampled luxels */

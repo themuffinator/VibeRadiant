@@ -39,6 +39,7 @@ See [COMPILING](COMPILING) for platform-by-platform build instructions. 🔧🧪
 - 🧾📜 [CHANGES_FROM_NRC.md](CHANGES_FROM_NRC.md) - VibeRadiant vs NRC change log.
 - 📓🧨 [docs/changelog-custom.txt](docs/changelog-custom.txt) - detailed editor/compiler change notes.
 - 🧪🔄 [docs/auto-updater.md](docs/auto-updater.md) - update flow details.
+  - [docs/language-packs.md](docs/language-packs.md) - language pack format and supported languages.
 - 🏗️🔧 [COMPILING](COMPILING) - build instructions.
 - 📦🧬 [RELEASING.md](RELEASING.md) - versioning and release pipeline.
 - 🧱🎛️ [docs/Additional_map_editor_features.htm](docs/Additional_map_editor_features.htm) - editor feature catalog.

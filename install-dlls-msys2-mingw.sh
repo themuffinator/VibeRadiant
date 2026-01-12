@@ -63,17 +63,29 @@ function dependencies {
     fi
 }
 
-for DEPENDENCY in `dependencies ./install/*.exe`; do
+cd $MINGWDIR
+
+QT_PLUGINS_DIR="./share/qt6/plugins"
+if [ ! -d "$QT_PLUGINS_DIR" ]; then
+    QT_PLUGINS_DIR="./share/qt5/plugins"
+fi
+
+PLUGIN_DLLS=""
+for EXTRAPATH in \
+    "$QT_PLUGINS_DIR/imageformats/*.dll" \
+    "$QT_PLUGINS_DIR/platforms/*.dll" \
+    "$QT_PLUGINS_DIR/styles/*.dll" \
+    "$QT_PLUGINS_DIR/iconengines/*.dll" \
+    "$QT_PLUGINS_DIR/tls/*.dll" \
+    "$QT_PLUGINS_DIR/ssl/*.dll" \
+; do
+    PLUGIN_DLLS="$PLUGIN_DLLS $(find $EXTRAPATH -type f 2>/dev/null)"
+done
+
+for DEPENDENCY in `dependencies $INSTALLDIR/*.exe $PLUGIN_DLLS`; do
     cp -v "$DEPENDENCY" "$INSTALLDIR"
 done
 
-cd $MINGWDIR
-
-for EXTRAPATH in \
-    './share/qt5/plugins/imageformats/*.dll' \
-    './share/qt5/plugins/platforms/*.dll' \
-    './share/qt5/plugins/styles/*.dll' \
-    './share/qt5/plugins/iconengines/*.dll' \
-; do
-    cp --parent -v `find $EXTRAPATH -type f` "$INSTALLDIR"
+for PLUGIN in $PLUGIN_DLLS; do
+    cp --parent -v "$PLUGIN" "$INSTALLDIR"
 done

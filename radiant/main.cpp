@@ -408,9 +408,11 @@ int main( int argc, char* argv[] ){
 
 	glwidget_setDefaultFormat(); // must go before QApplication instantiation
 
+#if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
 	QCoreApplication::setAttribute( Qt::AA_EnableHighDpiScaling );
 	// QGuiApplication::setHighDpiScaleFactorRoundingPolicy( Qt::HighDpiScaleFactorRoundingPolicy::PassThrough );
 	QCoreApplication::setAttribute( Qt::AA_UseHighDpiPixmaps );
+#endif
 
 	QApplication qapplication( argc, argv );
 	setlocale( LC_NUMERIC, "C" );

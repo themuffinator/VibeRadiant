@@ -34,6 +34,7 @@ Common overrides
 - INSTALL_DLLS: yes/no (Windows DLL staging)
 - ASSIMP_INTERNAL: yes to build bundled assimp, no to use system assimp
 - PKG_CONFIG_PATH: for nonstandard dependency prefixes
+- QT_MAJOR: set to 6 (default) or 5 to target Qt5 pkg-config modules
 
 Dependencies (common)
 ---------------------
@@ -46,7 +47,7 @@ Build tools:
 - standard shell tools: sed, find, diff, tar
 
 Libraries (development headers):
-- Qt5Core, Qt5Gui, Qt5Widgets, Qt5Svg
+- Qt6Core, Qt6Gui, Qt6Widgets, Qt6Svg, Qt6Network
 - glib-2.0
 - libxml2
 - libpng
@@ -62,7 +63,7 @@ Linux
 -----
 1) Install build tools and dependencies with your distro's package manager.
    The checker looks for packages equivalent to:
-     libjpeg, glib-2.0, libxml2, libpng, OpenGL, Qt5 (Core/Gui/Widgets/Svg),
+     libjpeg, glib-2.0, libxml2, libpng, OpenGL, Qt6 (Core/Gui/Widgets/Svg/Network),
      zlib, assimp.
 2) Build:
      make -j$(nproc)
@@ -78,10 +79,10 @@ Windows (MSYS2)
 3) Install dependencies:
    32-bit:
      pacman -S --needed base-devel
-     pacman -S --needed mingw-w64-i686-{toolchain,qt5-base,qt5-svg,assimp,libxml2}
+     pacman -S --needed mingw-w64-i686-{toolchain,qt6-base,qt6-svg,assimp,libxml2}
    64-bit:
      pacman -S --needed base-devel
-     pacman -S --needed mingw-w64-x86_64-{toolchain,qt5-base,qt5-svg,assimp,libxml2}
+     pacman -S --needed mingw-w64-x86_64-{toolchain,qt6-base,qt6-svg,assimp,libxml2}
    Optional for gamepacks:
      pacman -S --needed unzip svn git
 4) Build (release):
@@ -101,7 +102,7 @@ packaging notes and a Makefile for building a .app bundle.
 1) Install Xcode command line tools.
 2) Install XQuartz.
 3) Install dependencies with your package manager so pkg-config can find:
-   Qt5Core/Gui/Widgets/Svg, glib-2.0, libxml2, libpng, zlib, libjpeg, assimp.
+   Qt6Core/Gui/Widgets/Svg/Network, glib-2.0, libxml2, libpng, zlib, libjpeg, assimp.
 4) Build:
      make
 5) Run:
