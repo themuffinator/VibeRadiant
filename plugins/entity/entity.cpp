@@ -114,6 +114,7 @@ Counter* EntityKeyValues::m_counter = 0;
 bool g_showNames = true;
 bool g_showBboxes = false;
 bool g_showConnections = true;
+bool g_showConnectionsThick = false;
 int g_showNamesDist = 512;
 int g_showNamesRatio = 64;
 bool g_showTargetNames = false;
@@ -250,6 +251,12 @@ public:
 	bool getShowConnections() override {
 		return g_showConnections;
 	}
+	void setShowConnectionsThick( bool showConnectionsThick ) override {
+		g_showConnectionsThick = showConnectionsThick;
+	}
+	bool getShowConnectionsThick() override {
+		return g_showConnectionsThick;
+	}
 	void setShowNamesDist( int dist ) override {
 		g_showNamesDist = dist;
 	}
@@ -312,6 +319,7 @@ public:
 };
 
 filter_entity_classname g_filter_entity_func_group( "func_group" );
+filter_entity_classname g_filter_entity_func_splinemover( "func_splinemover" );
 filter_entity_classgroup g_filter_entity_func_detail( "func_detail" );
 filter_entity_classname g_filter_entity_light( "light" );
 filter_entity_classgroup g_filter_entity_trigger( "trigger_" );
@@ -380,6 +388,9 @@ filter_entity_point g_filter_entity_point;
 void Entity_InitFilters(){
 	add_entity_filter( g_filter_entity_world, EXCLUDE_WORLD );
 	add_entity_filter( g_filter_entity_func_group, EXCLUDE_FUNC_GROUPS );
+	if ( g_gameType == eGameTypeDoom3 ) {
+		add_entity_filter( g_filter_entity_func_splinemover, EXCLUDE_SPLINEMOVERS );
+	}
 	if( string_equal( GlobalRadiant().getRequiredGameDescriptionKeyValue( "brushtypes" ), "quake" ) ){
 		add_entity_filter( g_filter_entity_func_detail, EXCLUDE_DETAILS );
 		add_entity_filter( g_filter_entity_not_func_detail, EXCLUDE_STRUCTURAL );
@@ -415,6 +426,7 @@ void Entity_Construct( EGameType gameType ){
 	GlobalPreferenceSystem().registerPreference( "SI_ShowNames", BoolImportStringCaller( g_showNames ), BoolExportStringCaller( g_showNames ) );
 	GlobalPreferenceSystem().registerPreference( "SI_ShowBboxes", BoolImportStringCaller( g_showBboxes ), BoolExportStringCaller( g_showBboxes ) );
 	GlobalPreferenceSystem().registerPreference( "SI_ShowConnections", BoolImportStringCaller( g_showConnections ), BoolExportStringCaller( g_showConnections ) );
+	GlobalPreferenceSystem().registerPreference( "SI_ShowConnectionsThick", BoolImportStringCaller( g_showConnectionsThick ), BoolExportStringCaller( g_showConnectionsThick ) );
 	GlobalPreferenceSystem().registerPreference( "SI_ShowNamesDist", IntImportStringCaller( g_showNamesDist ), IntExportStringCaller( g_showNamesDist ) );
 	GlobalPreferenceSystem().registerPreference( "SI_ShowNamesRatio", IntImportStringCaller( g_showNamesRatio ), IntExportStringCaller( g_showNamesRatio ) );
 	GlobalPreferenceSystem().registerPreference( "SI_ShowTargetNames", BoolImportStringCaller( g_showTargetNames ), BoolExportStringCaller( g_showTargetNames ) );

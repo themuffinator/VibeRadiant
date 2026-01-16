@@ -421,24 +421,24 @@ void Patch::Smooth( EMatrixMajor mt ){
 	controlPointsChanged();
 }
 
-void Patch::InsertRemove( bool bInsert, bool bColumn, bool bFirst ){
+void Patch::InsertRemove( bool bInsert, bool bColumn, bool bFirst, std::size_t selectedPos ){
 	undoSave();
 
 	if ( bInsert ) {
 		if ( bColumn && ( m_width + 2 <= MAX_PATCH_WIDTH ) ) {
-			InsertPoints( COL, bFirst );
+			InsertPoints( COL, bFirst, selectedPos );
 		}
 		else if ( m_height + 2 <= MAX_PATCH_HEIGHT ) {
-			InsertPoints( ROW, bFirst );
+			InsertPoints( ROW, bFirst, selectedPos );
 		}
 	}
 	else
 	{
 		if ( bColumn && ( m_width - 2 >= MIN_PATCH_WIDTH ) ) {
-			RemovePoints( COL, bFirst );
+			RemovePoints( COL, bFirst, selectedPos );
 		}
 		else if ( m_height - 2 >= MIN_PATCH_HEIGHT ) {
-			RemovePoints( ROW, bFirst );
+			RemovePoints( ROW, bFirst, selectedPos );
 		}
 	}
 
@@ -775,7 +775,7 @@ void Patch::AccumulateBBox(){
 	m_lightsChanged();
 }
 
-void Patch::InsertPoints( EMatrixMajor mt, bool bFirst ){
+void Patch::InsertPoints( EMatrixMajor mt, bool bFirst, std::size_t selectedPos ){
 	std::size_t width, height, row_stride, col_stride;
 
 	switch ( mt )
@@ -797,48 +797,8 @@ void Patch::InsertPoints( EMatrixMajor mt, bool bFirst ){
 		return;
 	}
 
-	std::size_t pos = 0;
-	{
-		PatchControl* p1 = m_ctrl.data();
-		/*
-			if( GlobalSelectionSystem().countSelected() != 0 )
-			{
-				scene::Instance& instance = GlobalSelectionSystem().ultimateSelected();
-				PatchInstance* patch = Instance_getPatch( instance );
-				patch->m_selectable.isSelected();
-			}
-		*/
-		for ( std::size_t w = 0; w != width; ++w, p1 += col_stride )
-		{
-			{
-				PatchControl* p2 = p1;
-				for ( std::size_t h = 1; h < height; h += 2, p2 += 2 * row_stride )
-				{
-					if ( 0 ) { //p2->m_selectable.isSelected())
-						pos = h;
-						break;
-					}
-				}
-				if ( pos != 0 ) {
-					break;
-				}
-			}
-
-			{
-				PatchControl* p2 = p1;
-				for ( std::size_t h = 0; h < height; h += 2, p2 += 2 * row_stride )
-				{
-					if ( 0 ) { //p2->m_selectable.isSelected())
-						pos = h;
-						break;
-					}
-				}
-				if ( pos != 0 ) {
-					break;
-				}
-			}
-		}
-	}
+	const bool useSelectedPos = selectedPos != std::numeric_limits<std::size_t>::max() && selectedPos < height;
+	std::size_t pos = useSelectedPos ? selectedPos : 0;
 
 	Array<PatchControl> tmp( m_ctrl );
 
@@ -859,12 +819,8 @@ void Patch::InsertPoints( EMatrixMajor mt, bool bFirst ){
 		ERROR_MESSAGE( "neither row-major nor column-major" );
 		return;
 	}
-	if ( bFirst ) {
-		pos = 2;
-	}
-	else
-	{
-		pos = height - 1;
+	if ( !useSelectedPos ) {
+		pos = bFirst ? 2 : height - 1;
 	}
 
 	if ( pos >= height ) {
@@ -927,7 +883,7 @@ void Patch::InsertPoints( EMatrixMajor mt, bool bFirst ){
 	}
 }
 
-void Patch::RemovePoints( EMatrixMajor mt, bool bFirst ){
+void Patch::RemovePoints( EMatrixMajor mt, bool bFirst, std::size_t selectedPos ){
 	std::size_t width, height, row_stride, col_stride;
 
 	switch ( mt )
@@ -949,40 +905,8 @@ void Patch::RemovePoints( EMatrixMajor mt, bool bFirst ){
 		return;
 	}
 
-	std::size_t pos = 0;
-	{
-		PatchControl* p1 = m_ctrl.data();
-		for ( std::size_t w = 0; w != width; ++w, p1 += col_stride )
-		{
-			{
-				PatchControl* p2 = p1;
-				for ( std::size_t h = 1; h < height; h += 2, p2 += 2 * row_stride )
-				{
-					if ( 0 ) { //p2->m_selectable.isSelected())
-						pos = h;
-						break;
-					}
-				}
-				if ( pos != 0 ) {
-					break;
-				}
-			}
-
-			{
-				PatchControl* p2 = p1;
-				for ( std::size_t h = 0; h < height; h += 2, p2 += 2 * row_stride )
-				{
-					if ( 0 ) { //p2->m_selectable.isSelected())
-						pos = h;
-						break;
-					}
-				}
-				if ( pos != 0 ) {
-					break;
-				}
-			}
-		}
-	}
+	const bool useSelectedPos = selectedPos != std::numeric_limits<std::size_t>::max() && selectedPos < height;
+	std::size_t pos = useSelectedPos ? selectedPos : 0;
 
 	Array<PatchControl> tmp( m_ctrl );
 
@@ -1003,12 +927,8 @@ void Patch::RemovePoints( EMatrixMajor mt, bool bFirst ){
 		ERROR_MESSAGE( "neither row-major nor column-major" );
 		return;
 	}
-	if ( bFirst ) {
-		pos = 2;
-	}
-	else
-	{
-		pos = height - 3;
+	if ( !useSelectedPos ) {
+		pos = bFirst ? 2 : height - 3;
 	}
 	if ( pos >= height ) {
 		if ( bFirst ) {

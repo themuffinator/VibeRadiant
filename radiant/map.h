@@ -123,6 +123,8 @@ scene::Node& Node_Clone_Selected( scene::Node& node );
 void Scene_parentSelectedBrushesToEntity( scene::Graph& graph, scene::Node& parent );
 void Scene_parentSubgraphSelectedBrushesToEntity( scene::Graph& graph, scene::Node& parent, const scene::Path& start );
 std::size_t Scene_countSelectedBrushes( scene::Graph& graph );
+void Scene_parentSelectedWorldBrushesToEntity( scene::Graph& graph, scene::Node& parent );
+std::size_t Scene_countSelectedWorldBrushes( scene::Graph& graph );
 
 //void Scene_parentSelected();
 

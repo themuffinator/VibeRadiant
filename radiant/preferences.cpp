@@ -536,9 +536,15 @@ void Widget_connectToggleDependency( QWidget* self, QCheckBox* toggleButton ){
 		}
 	};
 	new EnabledTracker( toggleButton, self ); // track graying out for chained dependencies
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+	QObject::connect( toggleButton, &QCheckBox::checkStateChanged, [self, toggleButton]( Qt::CheckState state ){ // track being checked
+		self->setEnabled( state != Qt::CheckState::Unchecked && toggleButton->isEnabled() );
+	} );
+#else
 	QObject::connect( toggleButton, &QCheckBox::stateChanged, [self, toggleButton]( int state ){ // track being checked
 		self->setEnabled( state && toggleButton->isEnabled() );
 	} );
+#endif
 	self->setEnabled( toggleButton->checkState() && toggleButton->isEnabled() ); // apply dependency effect right away
 }
 void Widget_connectToggleDependency( QCheckBox* self, QCheckBox* toggleButton ){
@@ -589,7 +595,7 @@ void PrefsDlg::BuildDialog(){
 
 	{
 		auto *grid = new QGridLayout( GetWidget() );
-		grid->setSizeConstraint( QLayout::SizeConstraint::SetFixedSize );
+		grid->setSizeConstraint( QLayout::SizeConstraint::SetMinimumSize );
 		{
 			auto *buttons = new QDialogButtonBox( QDialogButtonBox::StandardButton::Ok | QDialogButtonBox::StandardButton::Cancel );
 			grid->addWidget( buttons, 1, 1 );
@@ -702,6 +708,9 @@ void PrefsDlg::BuildDialog(){
 			}
 		}
 	}
+
+	GetWidget()->setMinimumSize( 720, 540 );
+	GetWidget()->resize( 900, 700 );
 }
 
 preferences_globals_t g_preferences_globals;

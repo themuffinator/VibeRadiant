@@ -8,11 +8,14 @@
 #include <QAction>
 #include <QApplication>
 #include <QDrag>
+#include <QEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLineEdit>
 #include <QMimeData>
 #include <QOpenGLWidget>
+#include <QPixmap>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStandardItemModel>
@@ -23,6 +26,7 @@
 
 #include "assetdrop.h"
 #include "eclasslib.h"
+#include "entitylib.h"
 #include "ieclass.h"
 #include "ientity.h"
 #include "igl.h"
@@ -38,6 +42,8 @@
 #include "stream/stringstream.h"
 #include "traverselib.h"
 #include "view.h"
+#include "filterbar.h"
+#include "math/aabb.h"
 
 #include "generic/callback.h"
 
@@ -64,6 +70,31 @@ bool string_contains_nocase( const char* haystack, const char* needle ){
 		}
 	}
 	return false;
+}
+
+constexpr float kAssetBrowserHoverScale = 1.05f;
+constexpr float kAssetBrowserHoverLerp = 0.2f;
+constexpr float kAssetBrowserHoverEpsilon = 0.001f;
+
+float AssetBrowser_approachHoverScale( float current, float target ){
+	return current + ( target - current ) * kAssetBrowserHoverLerp;
+}
+
+QImage applyOpacity( QImage image, float opacity ){
+	if ( image.isNull() ) {
+		return image;
+	}
+	image = image.convertToFormat( QImage::Format_ARGB32 );
+	const int alphaScale = std::clamp( static_cast<int>( opacity * 255.0f ), 0, 255 );
+	for ( int y = 0; y < image.height(); ++y ) {
+		auto* line = reinterpret_cast<QRgb*>( image.scanLine( y ) );
+		for ( int x = 0; x < image.width(); ++x ) {
+			const int alpha = qAlpha( line[x] );
+			line[x] = qRgba( qRed( line[x] ), qGreen( line[x] ), qBlue( line[x] ),
+			                 ( alpha * alphaScale ) / 255 );
+		}
+	}
+	return image;
 }
 
 } // namespace
@@ -259,6 +290,197 @@ public:
 	}
 };
 
+class BrowserCube final : public Bounded
+{
+	Shader* m_state = nullptr;
+	bool m_ownsState = false;
+	CopiedString m_shaderName;
+	AABB m_aabb_local;
+	RenderableSolidAABB m_aabb_solid;
+	RenderableWireframeAABB m_aabb_wire;
+public:
+	BrowserCube( const AABB& aabb, Shader* state ) :
+		m_state( state ),
+		m_aabb_local( aabb ),
+		m_aabb_solid( m_aabb_local ),
+		m_aabb_wire( m_aabb_local ){
+	}
+	BrowserCube( const AABB& aabb, const char* shaderName ) :
+		m_state( GlobalShaderCache().capture( shaderName ) ),
+		m_ownsState( true ),
+		m_shaderName( shaderName ),
+		m_aabb_local( aabb ),
+		m_aabb_solid( m_aabb_local ),
+		m_aabb_wire( m_aabb_local ){
+	}
+	~BrowserCube(){
+		if ( m_ownsState ) {
+			GlobalShaderCache().release( m_shaderName.c_str() );
+		}
+	}
+	const AABB& localAABB() const override {
+		return m_aabb_local;
+	}
+	void renderSolid( Renderer& renderer, const VolumeTest& volume, const Matrix4& localToWorld ) const {
+		renderer.SetState( m_state, Renderer::eFullMaterials );
+		renderer.addRenderable( m_aabb_solid, localToWorld );
+	}
+	void renderWireframe( Renderer& renderer, const VolumeTest& volume, const Matrix4& localToWorld ) const {
+		renderer.addRenderable( m_aabb_wire, localToWorld );
+	}
+};
+
+class BrowserCubeInstance final : public scene::Instance, public Renderable
+{
+	class TypeCasts
+	{
+		InstanceTypeCastTable m_casts;
+	public:
+		TypeCasts(){
+			InstanceContainedCast<BrowserCubeInstance, Bounded>::install( m_casts );
+			InstanceStaticCast<BrowserCubeInstance, Renderable>::install( m_casts );
+		}
+		InstanceTypeCastTable& get(){
+			return m_casts;
+		}
+	};
+
+	BrowserCube& m_cube;
+public:
+	typedef LazyStatic<TypeCasts> StaticTypeCasts;
+
+	Bounded& get( NullType<Bounded> ){
+		return m_cube;
+	}
+
+	BrowserCubeInstance( const scene::Path& path, scene::Instance* parent, BrowserCube& cube ) :
+		Instance( path, parent, this, StaticTypeCasts::instance().get() ),
+		m_cube( cube ){
+	}
+
+	void renderSolid( Renderer& renderer, const VolumeTest& volume ) const override {
+		m_cube.renderSolid( renderer, volume, Instance::localToWorld() );
+	}
+	void renderWireframe( Renderer& renderer, const VolumeTest& volume ) const override {
+		m_cube.renderWireframe( renderer, volume, Instance::localToWorld() );
+	}
+};
+
+class BrowserCubeNode final : public scene::Node::Symbiot, public scene::Instantiable
+{
+	class TypeCasts
+	{
+		NodeTypeCastTable m_casts;
+	public:
+		TypeCasts(){
+			NodeStaticCast<BrowserCubeNode, scene::Instantiable>::install( m_casts );
+		}
+		NodeTypeCastTable& get(){
+			return m_casts;
+		}
+	};
+
+	scene::Node m_node;
+	InstanceSet m_instances;
+	BrowserCube m_cube;
+public:
+	typedef LazyStatic<TypeCasts> StaticTypeCasts;
+
+	BrowserCubeNode( const AABB& aabb, Shader* state ) :
+		m_node( this, this, StaticTypeCasts::instance().get(), nullptr ),
+		m_cube( aabb, state ){
+	}
+	BrowserCubeNode( const AABB& aabb, const char* shaderName ) :
+		m_node( this, this, StaticTypeCasts::instance().get(), nullptr ),
+		m_cube( aabb, shaderName ){
+	}
+
+	void release() override {
+		delete this;
+	}
+	scene::Node& node(){
+		return m_node;
+	}
+
+	scene::Instance* create( const scene::Path& path, scene::Instance* parent ) override {
+		return new BrowserCubeInstance( path, parent, m_cube );
+	}
+	void forEachInstance( const scene::Instantiable::Visitor& visitor ) override {
+		m_instances.forEachInstance( visitor );
+	}
+	void insert( scene::Instantiable::Observer* observer, const scene::Path& path, scene::Instance* instance ) override {
+		m_instances.insert( observer, path, instance );
+	}
+	scene::Instance* erase( scene::Instantiable::Observer* observer, const scene::Path& path ) override {
+		return m_instances.erase( observer, path );
+	}
+};
+
+class EntityBrowserPreviewNode final : public scene::Node::Symbiot, public scene::Instantiable, public scene::Traversable::Observer
+{
+	class TypeCasts
+	{
+		NodeTypeCastTable m_casts;
+	public:
+		TypeCasts(){
+			NodeStaticCast<EntityBrowserPreviewNode, scene::Instantiable>::install( m_casts );
+			NodeContainedCast<EntityBrowserPreviewNode, scene::Traversable>::install( m_casts );
+			NodeContainedCast<EntityBrowserPreviewNode, TransformNode>::install( m_casts );
+		}
+		NodeTypeCastTable& get(){
+			return m_casts;
+		}
+	};
+
+	scene::Node m_node;
+	MatrixTransform m_transform;
+	TraversableEntityNodeSet m_traverse;
+	InstanceSet m_instances;
+public:
+	typedef LazyStatic<TypeCasts> StaticTypeCasts;
+
+	EntityBrowserPreviewNode( const NodeSmartReference& child ) :
+		m_node( this, this, StaticTypeCasts::instance().get(), nullptr ){
+		m_traverse.attach( this );
+		m_traverse.insert( child );
+	}
+
+	void release() override {
+		m_traverse.detach( this );
+		delete this;
+	}
+	scene::Node& node(){
+		return m_node;
+	}
+
+	scene::Traversable& get( NullType<scene::Traversable> ){
+		return m_traverse;
+	}
+	TransformNode& get( NullType<TransformNode> ){
+		return m_transform;
+	}
+
+	void insert( scene::Node& child ) override {
+		m_instances.insert( child );
+	}
+	void erase( scene::Node& child ) override {
+		m_instances.erase( child );
+	}
+
+	scene::Instance* create( const scene::Path& path, scene::Instance* parent ) override {
+		return new SelectableInstance( path, parent );
+	}
+	void forEachInstance( const scene::Instantiable::Visitor& visitor ) override {
+		m_instances.forEachInstance( visitor );
+	}
+	void insert( scene::Instantiable::Observer* observer, const scene::Path& path, scene::Instance* instance ) override {
+		m_instances.insert( observer, path, instance );
+	}
+	scene::Instance* erase( scene::Instantiable::Observer* observer, const scene::Path& path ) override {
+		return m_instances.erase( observer, path );
+	}
+};
+
 class EntityGraphRoot final : public scene::Node::Symbiot, public scene::Instantiable, public scene::Traversable::Observer
 {
 	class TypeCasts
@@ -390,6 +612,9 @@ public:
 	void operator++(){
 		++m_index;
 	}
+	int index() const {
+		return m_index;
+	}
 	Vector3 getOrigin( int index ) const {
 		const int x = ( index % m_cellsInRow ) * m_cellSize * 2 + m_cellSize + ( index % m_cellsInRow + 1 ) * m_plusWidth;
 		const int z = ( index / m_cellsInRow ) * m_cellSize * 2 + m_cellSize + ( index / m_cellsInRow + 1 ) * ( m_fontHeight + m_plusHeight );
@@ -458,6 +683,9 @@ public:
 
 	int m_cellSize = 80;
 	int m_currentEntityId = -1;
+	int m_hoverEntityId = -1;
+	float m_hoverScale = 1.0f;
+	float m_hoverScaleTarget = 1.0f;
 
 	CellPos constructCellPos() const {
 		return CellPos( m_width, m_cellSize, GlobalOpenGL().m_font->getPixelHeight() );
@@ -467,6 +695,55 @@ public:
 		if( m_currentEntityId >= static_cast<int>( m_visibleClasses.size() ) )
 			m_currentEntityId = -1;
 	}
+	void updateHover( int x, int z ){
+		setHoverId( constructCellPos().testSelect( x, z - m_originZ ) );
+	}
+	void clearHover(){
+		setHoverId( -1 );
+	}
+	int hoverEntityId() const {
+		return m_hoverEntityId;
+	}
+	float hoverScale() const {
+		return m_hoverScale;
+	}
+	float hoverScaleForIndex( int index ) const {
+		return index == m_hoverEntityId ? m_hoverScale : 1.0f;
+	}
+	float hoverAlpha() const {
+		if ( m_hoverEntityId < 0 ) {
+			return 0.0f;
+		}
+		return std::clamp( ( m_hoverScale - 1.0f ) / ( kAssetBrowserHoverScale - 1.0f ), 0.0f, 1.0f );
+	}
+	bool updateHoverAnimation(){
+		if ( m_hoverEntityId < 0 ) {
+			m_hoverScale = 1.0f;
+			m_hoverScaleTarget = 1.0f;
+			return false;
+		}
+		if ( m_hoverEntityId >= static_cast<int>( m_visibleClasses.size() ) ) {
+			m_hoverEntityId = -1;
+			m_hoverScale = 1.0f;
+			m_hoverScaleTarget = 1.0f;
+			return false;
+		}
+		const float previous = m_hoverScale;
+		m_hoverScale = AssetBrowser_approachHoverScale( m_hoverScale, m_hoverScaleTarget );
+		if ( std::fabs( m_hoverScale - m_hoverScaleTarget ) < kAssetBrowserHoverEpsilon ) {
+			m_hoverScale = m_hoverScaleTarget;
+		}
+		else{
+			queueDraw();
+		}
+		if ( m_hoverScaleTarget <= 1.0f + kAssetBrowserHoverEpsilon
+		  && m_hoverScale <= 1.0f + kAssetBrowserHoverEpsilon ) {
+			m_hoverScale = 1.0f;
+			m_hoverScaleTarget = 1.0f;
+			m_hoverEntityId = -1;
+		}
+		return std::fabs( m_hoverScale - previous ) > kAssetBrowserHoverEpsilon;
+	}
 	const EntityClass* currentEntityClass() const {
 		if ( m_currentEntityId < 0 || m_currentEntityId >= static_cast<int>( m_visibleClasses.size() ) ) {
 			return nullptr;
@@ -474,6 +751,28 @@ public:
 		return m_visibleClasses[m_currentEntityId];
 	}
 private:
+	void setHoverId( int hoverId ){
+		if ( hoverId >= static_cast<int>( m_visibleClasses.size() ) ) {
+			hoverId = -1;
+		}
+		if ( hoverId < 0 ) {
+			if ( m_hoverEntityId >= 0 && m_hoverScaleTarget != 1.0f ) {
+				m_hoverScaleTarget = 1.0f;
+				queueDraw();
+			}
+			return;
+		}
+
+		const bool idChanged = hoverId != m_hoverEntityId;
+		if ( idChanged ) {
+			m_hoverEntityId = hoverId;
+			m_hoverScale = 1.0f;
+		}
+		if ( idChanged || m_hoverScaleTarget != kAssetBrowserHoverScale ) {
+			m_hoverScaleTarget = kAssetBrowserHoverScale;
+			queueDraw();
+		}
+	}
 	int totalHeight() const {
 		return constructCellPos().totalHeight( m_height, m_visibleClasses.size() );
 	}
@@ -591,6 +890,79 @@ public:
 
 EntityBrowser g_EntityBrowser;
 
+static bool EntityBrowser_isTriggerClass( const EntityClass* eclass ){
+	return eclass != nullptr
+	    && !eclass->fixedsize
+	    && string_equal_nocase_n( eclass->name(), "trigger_", 8 );
+}
+
+static bool EntityBrowser_needsFixedSizePreview( const EntityClass* eclass ){
+	return eclass != nullptr
+	    && eclass->fixedsize
+	    && !eclass->miscmodel_is
+	    && string_empty( eclass->modelpath() );
+}
+
+static void EntityBrowser_addTriggerPreview( scene::Node& node ){
+	scene::Traversable* traversable = Node_getTraversable( node );
+	if ( traversable == nullptr ) {
+		return;
+	}
+
+	const Vector3 extents( 16.0f, 16.0f, 16.0f );
+	const AABB bounds( g_vector3_identity, extents );
+	const CopiedString shader = GetCommonShader( "trigger" );
+	NodeSmartReference cubeNode( ( new BrowserCubeNode( bounds, shader.c_str() ) )->node() );
+	traversable->insert( cubeNode );
+}
+
+static NodeSmartReference EntityBrowser_createFixedSizePreviewNode( EntityClass* eclass ){
+	const AABB bounds = aabb_for_minmax( eclass->mins, eclass->maxs );
+	NodeSmartReference cubeNode( ( new BrowserCubeNode( bounds, eclass->m_state_fill ) )->node() );
+	return NodeSmartReference( ( new EntityBrowserPreviewNode( cubeNode ) )->node() );
+}
+
+static NodeSmartReference EntityBrowser_createPreviewNode( EntityClass* eclass ){
+	if ( EntityBrowser_needsFixedSizePreview( eclass ) ) {
+		return EntityBrowser_createFixedSizePreviewNode( eclass );
+	}
+	NodeSmartReference node( GlobalEntityCreator().createEntity( eclass ) );
+	if ( EntityBrowser_isTriggerClass( eclass ) ) {
+		EntityBrowser_addTriggerPreview( node.get() );
+	}
+	return node;
+}
+
+static QRect EntityBrowser_cellRectPixels( const EntityBrowser& browser, int index ){
+	const CellPos cellPos = browser.constructCellPos();
+	const Vector3 origin = cellPos.getOrigin( index );
+	const float cellSize = cellPos.getCellSize();
+	const float minx = origin.x() - cellSize;
+	const float maxx = origin.x() + cellSize;
+	const float minz = origin.z() - cellSize;
+	const float maxz = origin.z() + cellSize;
+	const int x = float_to_integer( minx );
+	const int y = float_to_integer( browser.m_originZ - maxz );
+	const int w = float_to_integer( maxx - minx );
+	const int h = float_to_integer( maxz - minz );
+	return QRect( x, y, w, h );
+}
+
+static QPixmap EntityBrowser_dragPixmap( EntityBrowser& browser ){
+	if ( browser.m_gl_widget == nullptr || browser.m_currentEntityId < 0 ) {
+		return QPixmap();
+	}
+	QImage frame = browser.m_gl_widget->grabFramebuffer();
+	QRect rect = EntityBrowser_cellRectPixels( browser, browser.m_currentEntityId ).intersected( frame.rect() );
+	if ( rect.isEmpty() ) {
+		return QPixmap();
+	}
+	QImage tile = applyOpacity( frame.copy( rect ), 0.6f );
+	QPixmap pixmap = QPixmap::fromImage( tile );
+	pixmap.setDevicePixelRatio( browser.m_gl_widget->devicePixelRatioF() );
+	return pixmap;
+}
+
 class entities_set_transforms
 {
 	mutable CellPos m_cellPos = g_EntityBrowser.constructCellPos();
@@ -599,14 +971,25 @@ public:
 		if( TransformNode *transformNode = Node_getTransformNode( instance->path().parent() ) ){
 			if( Bounded *bounded = Instance_getBounded( *instance ) ){
 				AABB aabb = bounded->localAABB();
+				const Entity* entity = Node_getEntity( instance->path().parent() );
+				const bool isTrigger = entity != nullptr && EntityBrowser_isTriggerClass( &entity->getEntityClass() );
 				const float max_extent = std::max( { aabb.extents[0], aabb.extents[1], aabb.extents[2] } );
-				const float scale = max_extent > 0.0f ? m_cellPos.getCellSize() / max_extent : 1.0f;
+				const int index = m_cellPos.index();
+				const float baseScale = max_extent > 0.0f ? m_cellPos.getCellSize() / max_extent : 1.0f;
+				float scale = baseScale * g_EntityBrowser.hoverScaleForIndex( index );
+				if ( isTrigger ) {
+					scale *= 2.0f;
+				}
+				const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( Vector3( 45, 0, 45 ) );
 				const_cast<Matrix4&>( transformNode->localToParent() ) =
 				        matrix4_multiplied_by_matrix4(
 				            matrix4_translation_for_vec3( m_cellPos.getOrigin() ),
 				            matrix4_multiplied_by_matrix4(
-				                matrix4_scale_for_vec3( Vector3( scale, scale, scale ) ),
-				                matrix4_translation_for_vec3( -aabb.origin )
+				                rotation,
+				                matrix4_multiplied_by_matrix4(
+				                    matrix4_scale_for_vec3( Vector3( scale, scale, scale ) ),
+				                    matrix4_translation_for_vec3( -aabb.origin )
+				                )
 				            )
 				        );
 				instance->parent()->transformChangedLocal();
@@ -664,6 +1047,10 @@ private:
 
 void EntityBrowser_render(){
 	g_EntityBrowser.validate();
+	const bool hoverChanged = g_EntityBrowser.updateHoverAnimation();
+	if ( hoverChanged ) {
+		g_EntityBrowser.forEachEntityInstance( entities_set_transforms() );
+	}
 
 	const int W = g_EntityBrowser.m_width;
 	const int H = g_EntityBrowser.m_height;
@@ -829,6 +1216,27 @@ void EntityBrowser_render(){
 			gl().glDisable( GL_DEPTH_TEST );
 			gl().glLineWidth( 1 );
 		}
+		{	// hover outline
+			const int hoverId = g_EntityBrowser.hoverEntityId();
+			if ( hoverId >= 0 ) {
+				const CellPos cellPos = g_EntityBrowser.constructCellPos();
+				const Vector3 origin = cellPos.getOrigin( hoverId );
+				const float cellSize = cellPos.getCellSize() * g_EntityBrowser.hoverScale();
+				const float minx = origin.x() - cellSize;
+				const float maxx = origin.x() + cellSize;
+				const float minz = origin.z() - cellSize;
+				const float maxz = origin.z() + cellSize;
+				gl().glLineWidth( 2 );
+				gl().glColor4f( 1.f, 0.9f, 0.2f, 1.f );
+				gl().glBegin( GL_LINE_LOOP );
+				gl().glVertex3f( minx, 0, maxz );
+				gl().glVertex3f( minx, 0, minz );
+				gl().glVertex3f( maxx, 0, minz );
+				gl().glVertex3f( maxx, 0, maxz );
+				gl().glEnd();
+				gl().glLineWidth( 1 );
+			}
+		}
 		{	// render entity class names
 			CellPos cellPos = g_EntityBrowser.constructCellPos();
 			for( const EntityClass* eclass : g_EntityBrowser.visibleClasses() ){
@@ -854,6 +1262,7 @@ class EntityBrowserGLWidget : public QOpenGLWidget
 	QPoint m_dragStart;
 public:
 	EntityBrowserGLWidget( EntityBrowser& entityBrowser ) : QOpenGLWidget(), m_entBro( entityBrowser ){
+		setMouseTracking( true );
 	}
 
 	~EntityBrowserGLWidget() override {
@@ -907,6 +1316,11 @@ protected:
 		}
 	}
 	void mouseMoveEvent( QMouseEvent *event ) override {
+		if ( event->buttons() == Qt::MouseButton::NoButton ) {
+			const QPoint localPos = mouseEventLocalPos( event );
+			m_entBro.updateHover( localPos.x() * m_scale, localPos.y() * m_scale );
+			return;
+		}
 		if ( !( event->buttons() & Qt::MouseButton::LeftButton ) ) {
 			return;
 		}
@@ -924,9 +1338,19 @@ protected:
 		mimeData->setData( kEntityBrowserMimeType, QByteArray( eclass->name() ) );
 		mimeData->setText( eclass->name() );
 
+		m_entBro.tracking_MouseUp();
 		auto* drag = new QDrag( this );
 		drag->setMimeData( mimeData );
+		const QPixmap pixmap = EntityBrowser_dragPixmap( m_entBro );
+		if ( !pixmap.isNull() ) {
+			drag->setPixmap( pixmap );
+			drag->setHotSpot( pixmap.rect().center() );
+		}
 		drag->exec( Qt::CopyAction );
+	}
+	void leaveEvent( QEvent *event ) override {
+		m_entBro.clearHover();
+		QOpenGLWidget::leaveEvent( event );
 	}
 	void mouseReleaseEvent( QMouseEvent *event ) override {
 		const auto release = m_mouse.release( event );
@@ -955,7 +1379,7 @@ static void EntityBrowser_selectCategory( const QString& name ){
 
 		if ( scene::Traversable* traversable = Node_getTraversable( g_entityGraph->root() ) ) {
 			for ( EntityClass* eclass : g_EntityBrowser.visibleClasses() ) {
-				NodeSmartReference node( GlobalEntityCreator().createEntity( eclass ) );
+				NodeSmartReference node( EntityBrowser_createPreviewNode( eclass ) );
 				traversable->insert( node );
 			}
 		}

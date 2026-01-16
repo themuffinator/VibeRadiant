@@ -27,6 +27,7 @@
 const QKeySequence& GlobalShortcuts_insert( const char* name, const QKeySequence& accelerator = {} );
 void GlobalShortcuts_register( const char* name, int type ); // 1 = command, 2 = toggle
 void GlobalShortcuts_reportUnregistered();
+void GlobalShortcuts_reportDuplicates();
 
 void GlobalCommands_insert( const char* name, const Callback<void()>& callback, const QKeySequence& accelerator = {} );
 const Command& GlobalCommands_find( const char* name );

@@ -710,12 +710,6 @@ void EntityInspector_ToggleShow(){
 	GroupDialog_showPage( g_page_entity );
 }
 
-QWidget* g_page_models;
-
-void ModelBrowser_ToggleShow(){
-	GroupDialog_showPage( g_page_models );
-}
-
 QWidget* g_page_layers;
 
 void LayersBrowser_ToggleShow(){
@@ -949,7 +943,6 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 	if ( AssetBrowser_isEnabled() && ( ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) || g_Layout_builtInGroupDialog.m_value ) ) {
 		create_menu_item_with_mnemonic( menu, "Asset Browser", "ToggleTextures" );
 	}
-	create_menu_item_with_mnemonic( menu, "Model Browser", "ToggleModelBrowser" );
 	create_menu_item_with_mnemonic( menu, "Entity Inspector", "ToggleEntityInspector" );
 	create_menu_item_with_mnemonic( menu, "Layers Browser", "ToggleLayersBrowser" );
 	create_menu_item_with_mnemonic( menu, "&Surface Inspector", "SurfaceInspector" );
@@ -970,6 +963,7 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 		create_menu_item_with_mnemonic( submenu, "Far Clip Plane Out", "CubicClipZoomOut" );
 		submenu->addSeparator();
 		create_menu_item_with_mnemonic( submenu, "Toggle Lighting Preview", "TogglePreview" );
+		create_check_menu_item_with_mnemonic( submenu, "Animate Shaders", "AnimateShaders" );
 		submenu->addSeparator();
 		create_menu_item_with_mnemonic( submenu, "Next leak spot", "NextLeakSpot" );
 		create_menu_item_with_mnemonic( submenu, "Previous leak spot", "PrevLeakSpot" );
@@ -1015,6 +1009,7 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 		create_check_menu_item_with_mnemonic( submenu, "Show Light Radiuses", "ShowLightRadiuses" );
 		create_check_menu_item_with_mnemonic( submenu, "Show Entity Boxes", "ShowBboxes" );
 		create_check_menu_item_with_mnemonic( submenu, "Show Entity Connections", "ShowConnections" );
+		create_check_menu_item_with_mnemonic( submenu, "Thick Connection Lines", "ShowConnectionsThick" );
 
 		submenu->addSeparator();
 
@@ -1068,6 +1063,7 @@ void create_selection_menu( QMenuBar *menubar ){
 
 		submenu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
 
+		create_check_menu_item_with_mnemonic( submenu, "&Primitives", "SelectPrimitives" );
 		create_check_menu_item_with_mnemonic( submenu, "&Edges", "DragEdges" );
 		create_check_menu_item_with_mnemonic( submenu, "&Vertices", "DragVertices" );
 		create_check_menu_item_with_mnemonic( submenu, "&Faces", "DragFaces" );
@@ -1178,7 +1174,6 @@ void create_misc_menu( QMenuBar *menubar ){
 
 	create_menu_item_with_mnemonic( menu, "Find brush...", "FindBrush" );
 	create_menu_item_with_mnemonic( menu, "Map Info...", "MapInfo" );
-	create_menu_item_with_mnemonic( menu, "&Refresh models", "RefreshReferences" );
 	create_menu_item_with_mnemonic( menu, "Set 2D &Background image...", makeCallbackF( WXY_SetBackgroundImage ) );
 	create_menu_item_with_mnemonic( menu, "Fullscreen", "Fullscreen" );
 	create_menu_item_with_mnemonic( menu, "Maximize view", "MaximizeView" );
@@ -1369,6 +1364,7 @@ void CSG_constructToolbar( QToolBar* toolbar ){
 }
 
 void ComponentModes_constructToolbar( QToolBar* toolbar ){
+	toolbar_append_toggle_button( toolbar, "Select Primitives", "select.png", "SelectPrimitives" );
 	toolbar_append_toggle_button( toolbar, "Select Vertices", "modify_vertices.png", "DragVertices" );
 	toolbar_append_toggle_button( toolbar, "Select Edges", "modify_edges.png", "DragEdges" );
 	toolbar_append_toggle_button( toolbar, "Select Faces", "modify_faces.png", "DragFaces" );
@@ -1482,7 +1478,12 @@ void create_main_statusbar( QStatusBar *statusbar, QLabel *pStatusLabel[c_status
 		}
 		else{
 			auto *label = new QLabel;
-			if( i == c_status_grid ){
+			if( i == c_status_brushsize ){
+				statusbar->addPermanentWidget( label, 0 );
+				label->setMinimumWidth( label->fontMetrics().horizontalAdvance( "9999x9999x9999" ) );
+				label->setToolTip( "Selection size (X x Y x Z)" );
+			}
+			else if( i == c_status_grid ){
 				statusbar->addPermanentWidget( label, 0 );
 				label->setToolTip( " <b>G</b>: <u>G</u>rid size<br> <b>F</b>: map <u>F</u>ormat<br> <b>C</b>: camera <u>C</u>lip distance <br> <b>L</b>: texture <u>L</u>ock" );
 			}
@@ -1718,8 +1719,6 @@ void MainFrame::Create(){
 		}
 	}
 
-	g_page_models = GroupDialog_addPage( "Models", ModelBrowser_constructWindow( GroupDialog_getWindow() ), RawStringExportCaller( "Models" ) );
-
 	g_page_layers = GroupDialog_addPage( "Layers", LayersBrowser_constructWindow( GroupDialog_getWindow() ), RawStringExportCaller( "Layers" ) );
 
 	window->show();
@@ -1910,6 +1909,7 @@ void MainFrame::Create(){
 
 	UpdateManager_MaybeAutoCheck();
 
+	GlobalShortcuts_reportDuplicates();
 	//GlobalShortcuts_reportUnregistered();
 }
 
@@ -2120,7 +2120,6 @@ void MainFrame_Construct(){
 
 	GlobalCommands_insert( "ToggleConsole", makeCallbackF( Console_ToggleShow ), QKeySequence( "O" ) );
 	GlobalCommands_insert( "ToggleEntityInspector", makeCallbackF( EntityInspector_ToggleShow ), QKeySequence( "N" ) );
-	GlobalCommands_insert( "ToggleModelBrowser", makeCallbackF( ModelBrowser_ToggleShow ), QKeySequence( "/" ) );
 	GlobalCommands_insert( "ToggleLayersBrowser", makeCallbackF( LayersBrowser_ToggleShow ), QKeySequence( "L" ) );
 	GlobalCommands_insert( "ToggleEntityList", makeCallbackF( EntityList_toggleShown ), QKeySequence( "Shift+L" ) );
 

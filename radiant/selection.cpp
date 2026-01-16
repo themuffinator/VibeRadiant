@@ -23,6 +23,7 @@
 
 #include "debugging/debugging.h"
 
+#include <algorithm>
 #include <map>
 #include <list>
 #include <set>
@@ -55,6 +56,22 @@
 typedef Vector2 DeviceVector;
 
 int g_SELECT_EPSILON = 12;
+float g_manipulator_size = 64.0f;
+float g_arrowhead_length = 16.0f;
+float g_arrowhead_radius = 4.0f;
+constexpr float c_manipulator_size_min = 16.0f;
+constexpr float c_manipulator_size_max = 256.0f;
+constexpr float c_manipulator_size_step = 8.0f;
+
+inline float clamp_manipulator_size( float size ){
+	return std::clamp( size, c_manipulator_size_min, c_manipulator_size_max );
+}
+
+inline void update_manipulator_size_globals( float size ){
+	g_manipulator_size = clamp_manipulator_size( size );
+	g_arrowhead_length = std::max( 4.0f, g_manipulator_size * 0.25f );
+	g_arrowhead_radius = std::max( 1.0f, g_arrowhead_length * 0.25f );
+}
 
 struct Pivot2World
 {
@@ -119,9 +136,7 @@ inline Vector3 ray_intersect_ray( const Ray& ray, const Ray& other ){
 }
 
 const Vector3 g_origin( 0, 0, 0 );
-const float g_radius = 64;
-
-inline Vector3 point_on_sphere( const Matrix4& device2object, const DeviceVector xy, const float radius = g_radius ){
+inline Vector3 point_on_sphere( const Matrix4& device2object, const DeviceVector xy, const float radius ){
 	return sphere_intersect_ray( g_origin,
 	                             radius,
 	                             ray_for_device_point( device2object, xy ) );
@@ -246,11 +261,11 @@ public:
 		: m_rotatable( rotatable ){
 	}
 	void Construct( const Matrix4& device2manip, const DeviceVector device_point, const AABB& bounds, const Vector3& transform_origin ) override {
-		m_start = point_on_sphere( device2manip, device_point );
+		m_start = point_on_sphere( device2manip, device_point, g_manipulator_size );
 		vector3_normalise( m_start );
 	}
 	void Transform( const Matrix4& manip2object, const Matrix4& device2manip, const DeviceVector device_point ) override {
-		Vector3 current = point_on_sphere( device2manip, device_point );
+		Vector3 current = point_on_sphere( device2manip, device_point, g_manipulator_size );
 		vector3_normalise( current );
 
 		if( g_modifiers.shift() )
@@ -274,7 +289,7 @@ class RotateAxis : public Manipulatable
 	Rotatable& m_rotatable;
 public:
 	RotateAxis( Rotatable& rotatable )
-		: m_radius( g_radius ), m_rotatable( rotatable ){
+		: m_radius( g_manipulator_size ), m_rotatable( rotatable ){
 	}
 	void Construct( const Matrix4& device2manip, const DeviceVector device_point, const AABB& bounds, const Vector3& transform_origin ) override {
 		const float dot = vector3_dot( m_axis, m_view->fill()? vector3_normalised( m_view->getViewer() - transform_origin ) : m_view->getViewDir() );
@@ -1997,6 +2012,8 @@ class RotateManipulator : public Manipulator, public ManipulatorSelectionChangea
 
 	RotateFree m_free;
 	RotateAxis m_axis;
+	std::size_t m_segments;
+	float m_radius;
 	Vector3 m_axis_screen;
 	RenderableSemiCircle m_circle_x;
 	RenderableSemiCircle m_circle_y;
@@ -2021,17 +2038,25 @@ public:
 	RotateManipulator( Rotatable& rotatable, std::size_t segments, float radius ) :
 		m_free( rotatable ),
 		m_axis( rotatable ),
+		m_segments( segments ),
+		m_radius( radius ),
 		m_circle_x( ( segments << 2 ) + 1 ),
 		m_circle_y( ( segments << 2 ) + 1 ),
 		m_circle_z( ( segments << 2 ) + 1 ),
 		m_circle_screen( segments << 3 ),
 		m_circle_sphere( segments << 3 ){
-		draw_semicircle( segments, radius, m_circle_x.m_vertices.data(), RemapYZX() );
-		draw_semicircle( segments, radius, m_circle_y.m_vertices.data(), RemapZXY() );
-		draw_semicircle( segments, radius, m_circle_z.m_vertices.data(), RemapXYZ() );
+		setRadius( radius );
+	}
 
-		draw_circle( segments, radius * 1.15f, m_circle_screen.m_vertices.data(), RemapXYZ() );
-		draw_circle( segments, radius, m_circle_sphere.m_vertices.data(), RemapXYZ() );
+	void setRadius( float radius ){
+		m_radius = radius;
+		m_axis.SetRadius( radius );
+		draw_semicircle( m_segments, radius, m_circle_x.m_vertices.data(), RemapYZX() );
+		draw_semicircle( m_segments, radius, m_circle_y.m_vertices.data(), RemapZXY() );
+		draw_semicircle( m_segments, radius, m_circle_z.m_vertices.data(), RemapXYZ() );
+
+		draw_circle( m_segments, radius * 1.15f, m_circle_screen.m_vertices.data(), RemapXYZ() );
+		draw_circle( m_segments, radius, m_circle_sphere.m_vertices.data(), RemapXYZ() );
 	}
 
 
@@ -2218,13 +2243,10 @@ public:
 Shader* RotateManipulator::m_state_outer;
 
 
-const float arrowhead_length = 16;
-const float arrowhead_radius = 4;
-
 inline void draw_arrowline( const float length, PointVertex* line, const std::size_t axis ){
 	( *line++ ).vertex = vertex3f_identity;
 	( *line ).vertex = vertex3f_identity;
-	vertex3f_to_array( ( *line ).vertex )[axis] = length - arrowhead_length;
+	vertex3f_to_array( ( *line ).vertex )[axis] = length - g_arrowhead_length;
 }
 
 template<typename VertexRemap, typename NormalRemap>
@@ -2235,10 +2257,10 @@ inline void draw_arrowhead( const std::size_t segments, const float length, Flat
 	{
 		{
 			FlatShadedVertex& point = vertices[i * 6 + 0];
-			VertexRemap::x( point.vertex ) = length - arrowhead_length;
-			VertexRemap::y( point.vertex ) = arrowhead_radius * cos( i * head_segment );
-			VertexRemap::z( point.vertex ) = arrowhead_radius * sin( i * head_segment );
-			NormalRemap::x( point.normal ) = arrowhead_radius / arrowhead_length;
+			VertexRemap::x( point.vertex ) = length - g_arrowhead_length;
+			VertexRemap::y( point.vertex ) = g_arrowhead_radius * cos( i * head_segment );
+			VertexRemap::z( point.vertex ) = g_arrowhead_radius * sin( i * head_segment );
+			NormalRemap::x( point.normal ) = g_arrowhead_radius / g_arrowhead_length;
 			NormalRemap::y( point.normal ) = cos( i * head_segment );
 			NormalRemap::z( point.normal ) = sin( i * head_segment );
 		}
@@ -2247,23 +2269,23 @@ inline void draw_arrowhead( const std::size_t segments, const float length, Flat
 			VertexRemap::x( point.vertex ) = length;
 			VertexRemap::y( point.vertex ) = 0;
 			VertexRemap::z( point.vertex ) = 0;
-			NormalRemap::x( point.normal ) = arrowhead_radius / arrowhead_length;
+			NormalRemap::x( point.normal ) = g_arrowhead_radius / g_arrowhead_length;
 			NormalRemap::y( point.normal ) = cos( ( i + 0.5 ) * head_segment );
 			NormalRemap::z( point.normal ) = sin( ( i + 0.5 ) * head_segment );
 		}
 		{
 			FlatShadedVertex& point = vertices[i * 6 + 2];
-			VertexRemap::x( point.vertex ) = length - arrowhead_length;
-			VertexRemap::y( point.vertex ) = arrowhead_radius * cos( ( i + 1 ) * head_segment );
-			VertexRemap::z( point.vertex ) = arrowhead_radius * sin( ( i + 1 ) * head_segment );
-			NormalRemap::x( point.normal ) = arrowhead_radius / arrowhead_length;
+			VertexRemap::x( point.vertex ) = length - g_arrowhead_length;
+			VertexRemap::y( point.vertex ) = g_arrowhead_radius * cos( ( i + 1 ) * head_segment );
+			VertexRemap::z( point.vertex ) = g_arrowhead_radius * sin( ( i + 1 ) * head_segment );
+			NormalRemap::x( point.normal ) = g_arrowhead_radius / g_arrowhead_length;
 			NormalRemap::y( point.normal ) = cos( ( i + 1 ) * head_segment );
 			NormalRemap::z( point.normal ) = sin( ( i + 1 ) * head_segment );
 		}
 
 		{
 			FlatShadedVertex& point = vertices[i * 6 + 3];
-			VertexRemap::x( point.vertex ) = length - arrowhead_length;
+			VertexRemap::x( point.vertex ) = length - g_arrowhead_length;
 			VertexRemap::y( point.vertex ) = 0;
 			VertexRemap::z( point.vertex ) = 0;
 			NormalRemap::x( point.normal ) = -1;
@@ -2272,18 +2294,18 @@ inline void draw_arrowhead( const std::size_t segments, const float length, Flat
 		}
 		{
 			FlatShadedVertex& point = vertices[i * 6 + 4];
-			VertexRemap::x( point.vertex ) = length - arrowhead_length;
-			VertexRemap::y( point.vertex ) = arrowhead_radius * cos( i * head_segment );
-			VertexRemap::z( point.vertex ) = arrowhead_radius * sin( i * head_segment );
+			VertexRemap::x( point.vertex ) = length - g_arrowhead_length;
+			VertexRemap::y( point.vertex ) = g_arrowhead_radius * cos( i * head_segment );
+			VertexRemap::z( point.vertex ) = g_arrowhead_radius * sin( i * head_segment );
 			NormalRemap::x( point.normal ) = -1;
 			NormalRemap::y( point.normal ) = 0;
 			NormalRemap::z( point.normal ) = 0;
 		}
 		{
 			FlatShadedVertex& point = vertices[i * 6 + 5];
-			VertexRemap::x( point.vertex ) = length - arrowhead_length;
-			VertexRemap::y( point.vertex ) = arrowhead_radius * cos( ( i + 1 ) * head_segment );
-			VertexRemap::z( point.vertex ) = arrowhead_radius * sin( ( i + 1 ) * head_segment );
+			VertexRemap::x( point.vertex ) = length - g_arrowhead_length;
+			VertexRemap::y( point.vertex ) = g_arrowhead_radius * cos( ( i + 1 ) * head_segment );
+			VertexRemap::z( point.vertex ) = g_arrowhead_radius * sin( ( i + 1 ) * head_segment );
 			NormalRemap::x( point.normal ) = -1;
 			NormalRemap::y( point.normal ) = 0;
 			NormalRemap::z( point.normal ) = 0;
@@ -2392,6 +2414,8 @@ class TranslateManipulator : public Manipulator, public ManipulatorSelectionChan
 
 	TranslateFree m_free;
 	TranslateAxis m_axis;
+	std::size_t m_segments;
+	float m_length;
 	RenderableArrowLine m_arrow_x;
 	RenderableArrowLine m_arrow_y;
 	RenderableArrowLine m_arrow_z;
@@ -2411,17 +2435,24 @@ public:
 	TranslateManipulator( Translatable& translatable, std::size_t segments, float length ) :
 		m_free( translatable ),
 		m_axis( translatable ),
+		m_segments( segments ),
+		m_length( length ),
 		m_arrow_head_x( 3 * 2 * ( segments << 3 ) ),
 		m_arrow_head_y( 3 * 2 * ( segments << 3 ) ),
 		m_arrow_head_z( 3 * 2 * ( segments << 3 ) ){
-		draw_arrowline( length, m_arrow_x.m_line, 0 );
-		draw_arrowhead( segments, length, m_arrow_head_x.m_vertices.data(), TripleRemapXYZ<Vertex3f>(), TripleRemapXYZ<Normal3f>() );
-		draw_arrowline( length, m_arrow_y.m_line, 1 );
-		draw_arrowhead( segments, length, m_arrow_head_y.m_vertices.data(), TripleRemapYZX<Vertex3f>(), TripleRemapYZX<Normal3f>() );
-		draw_arrowline( length, m_arrow_z.m_line, 2 );
-		draw_arrowhead( segments, length, m_arrow_head_z.m_vertices.data(), TripleRemapZXY<Vertex3f>(), TripleRemapZXY<Normal3f>() );
+		setLength( length );
 
 		draw_quad( 16, m_quad_screen.m_quad );
+	}
+
+	void setLength( float length ){
+		m_length = length;
+		draw_arrowline( length, m_arrow_x.m_line, 0 );
+		draw_arrowhead( m_segments, length, m_arrow_head_x.m_vertices.data(), TripleRemapXYZ<Vertex3f>(), TripleRemapXYZ<Normal3f>() );
+		draw_arrowline( length, m_arrow_y.m_line, 1 );
+		draw_arrowhead( m_segments, length, m_arrow_head_y.m_vertices.data(), TripleRemapYZX<Vertex3f>(), TripleRemapYZX<Normal3f>() );
+		draw_arrowline( length, m_arrow_z.m_line, 2 );
+		draw_arrowhead( m_segments, length, m_arrow_head_z.m_vertices.data(), TripleRemapZXY<Vertex3f>(), TripleRemapZXY<Normal3f>() );
 	}
 
 	void UpdateColours(){
@@ -2613,6 +2644,7 @@ class ScaleManipulator : public Manipulator, public ManipulatorSelectionChangeab
 
 	ScaleFree m_free;
 	ScaleAxis m_axis;
+	float m_length;
 	RenderableArrow m_arrow_x;
 	RenderableArrow m_arrow_y;
 	RenderableArrow m_arrow_z;
@@ -2625,12 +2657,18 @@ class ScaleManipulator : public Manipulator, public ManipulatorSelectionChangeab
 public:
 	ScaleManipulator( Scalable& scalable, std::size_t segments, float length ) :
 		m_free( scalable ),
-		m_axis( scalable ){
+		m_axis( scalable ),
+		m_length( length ){
+		setLength( length );
+
+		draw_quad( 16, m_quad_screen.m_quad );
+	}
+
+	void setLength( float length ){
+		m_length = length;
 		draw_arrowline( length, m_arrow_x.m_line, 0 );
 		draw_arrowline( length, m_arrow_y.m_line, 1 );
 		draw_arrowline( length, m_arrow_z.m_line, 2 );
-
-		draw_quad( 16, m_quad_screen.m_quad );
 	}
 
 	void UpdateColours(){
@@ -2792,6 +2830,7 @@ class SkewManipulator : public Manipulator, public ManipulatorSelectionChangeabl
 	ScaleAxis m_scaleAxis;
 	ScaleFree m_scaleFree;
 	RotateAxis m_rotateAxis;
+	std::size_t m_segments;
 	AABB m_bounds_draw;
 	const AABB& m_bounds;
 	Matrix4& m_pivot2world;
@@ -2831,6 +2870,7 @@ public:
 		m_scaleAxis( scalable ),
 		m_scaleFree( scalable ),
 		m_rotateAxis( rotatable ),
+		m_segments( segments ),
 		m_bounds( bounds ),
 		m_pivot2world( pivot2world ),
 		m_pivotIsCustom( pivotIsCustom ),
@@ -2851,9 +2891,17 @@ public:
 				xy_[y] = x_y_[y] = -1;
 			}
 		}
-		draw_arrowhead( segments, 0, m_arrow.m_vertices.data(), TripleRemapXYZ<Vertex3f>(), TripleRemapXYZ<Normal3f>() );
+		setArrowSize();
 		m_arrow.setColour( g_colour_selected );
 		m_point.setColour( g_colour_selected );
+	}
+
+	void setArrowSize(){
+		draw_arrowhead( m_segments, 0, m_arrow.m_vertices.data(), TripleRemapXYZ<Vertex3f>(), TripleRemapXYZ<Normal3f>() );
+	}
+
+	void setRotateRadius( float radius ){
+		m_rotateAxis.SetRadius( radius );
 	}
 
 	void UpdateColours() {
@@ -3012,8 +3060,8 @@ public:
 								//globalOutputStream() << "radius " << ( vector3_length( point ) - g_SELECT_EPSILON / 2.0 - 1.0 ) << '\n';
 							}
 							else{
-								m_rotateAxis.SetRadius( g_radius );
-								//globalOutputStream() << "g_radius\n";
+								m_rotateAxis.SetRadius( g_manipulator_size );
+								//globalOutputStream() << "g_manipulator_size\n";
 							}
 						}
 		}
@@ -6975,9 +7023,9 @@ public:
 		m_componentmode( eDefault ),
 		m_count_primitive( SelectionChangedCaller( *this ) ),
 		m_count_component( SelectionChangedCaller( *this ) ),
-		m_translate_manipulator( *this, 2, 64 ),
-		m_rotate_manipulator( *this, 8, 64 ),
-		m_scale_manipulator( *this, 0, 64 ),
+		m_translate_manipulator( *this, 2, g_manipulator_size ),
+		m_rotate_manipulator( *this, 8, g_manipulator_size ),
+		m_scale_manipulator( *this, 0, g_manipulator_size ),
 		m_skew_manipulator( *this, *this, *this, *this, *this, m_bounds, m_pivot2world, m_pivotIsCustom ),
 		m_drag_manipulator( *this, *this ),
 		m_clip_manipulator( m_pivot2world, m_bounds ),
@@ -7003,6 +7051,16 @@ public:
 
 	const AABB& getBoundsSelected() const override {
 		return m_lazy_bounds.getBounds();
+	}
+
+	void setManipulatorSize( float size ){
+		update_manipulator_size_globals( size );
+		m_translate_manipulator.setLength( g_manipulator_size );
+		m_rotate_manipulator.setRadius( g_manipulator_size );
+		m_scale_manipulator.setLength( g_manipulator_size );
+		m_skew_manipulator.setArrowSize();
+		m_skew_manipulator.setRotateRadius( g_manipulator_size );
+		SceneChangeNotify();
 	}
 
 	void SetMode( EMode mode ) override {
@@ -8244,8 +8302,34 @@ void RadiantSelectionSystem::renderSolid( Renderer& renderer, const VolumeTest& 
 #include "preferencesystem.h"
 #include "preferences.h"
 
+void ManipulatorSizeImport( float value ){
+	getSelectionSystem().setManipulatorSize( value );
+}
+typedef FreeCaller<void(float), ManipulatorSizeImport> ManipulatorSizeImportCaller;
+
+void ManipulatorSizeExport( const FloatImportCallback& importer ){
+	importer( g_manipulator_size );
+}
+typedef FreeCaller<void(const FloatImportCallback&), ManipulatorSizeExport> ManipulatorSizeExportCaller;
+
+void ManipulatorSizeImportString( const char* string ){
+	float value = g_manipulator_size;
+	Float_importString( value, string );
+	getSelectionSystem().setManipulatorSize( value );
+}
+typedef FreeCaller<void(const char*), ManipulatorSizeImportString> ManipulatorSizeImportStringCaller;
+
+void ManipulatorSizeExportString( const StringImportCallback& importer ){
+	Float_exportString( g_manipulator_size, importer );
+}
+typedef FreeCaller<void(const StringImportCallback&), ManipulatorSizeExportString> ManipulatorSizeExportStringCaller;
+
 void SelectionSystem_constructPreferences( PreferencesPage& page ){
 	page.appendSpinner( "Selector size (pixels)", g_SELECT_EPSILON, 2, 64 );
+	page.appendSpinner( "Manipulator size (units)", c_manipulator_size_min, c_manipulator_size_max,
+	                    FloatImportCallback( ManipulatorSizeImportCaller() ),
+	                    FloatExportCallback( ManipulatorSizeExportCaller() ),
+	                    0 );
 	page.appendCheckBox( "", "Prefer point entities in 2D", getSelectionSystem().m_bPreferPointEntsIn2D );
 	page.appendCheckBox( "", "Create brushes in 3D", g_3DCreateBrushes );
 	{
@@ -8271,6 +8355,13 @@ void SelectionSystem_connectTransformsCallbacks( const std::array<Callback<void(
 	getSelectionSystem().m_repeatableTransforms.m_changedCallbacks = callbacks;
 }
 
+void SelectionSystem_ChangeManipulatorSize( int direction ){
+	if ( direction == 0 ) {
+		return;
+	}
+	getSelectionSystem().setManipulatorSize( g_manipulator_size + static_cast<float>( direction ) * c_manipulator_size_step );
+}
+
 
 void SelectionSystem_OnBoundsChanged(){
 	getSelectionSystem().pivotChanged();
@@ -8288,6 +8379,11 @@ void SelectionSystem_Construct(){
 	GlobalShaderCache().attachRenderable( getSelectionSystem() );
 
 	GlobalPreferenceSystem().registerPreference( "SELECT_EPSILON", IntImportStringCaller( g_SELECT_EPSILON ), IntExportStringCaller( g_SELECT_EPSILON ) );
+	GlobalPreferenceSystem().registerPreference(
+	    "ManipulatorSize",
+	    StringImportCallback( ManipulatorSizeImportStringCaller() ),
+	    StringExportCallback( ManipulatorSizeExportStringCaller() )
+	);
 	GlobalPreferenceSystem().registerPreference( "PreferPointEntsIn2D", BoolImportStringCaller( getSelectionSystem().m_bPreferPointEntsIn2D ), BoolExportStringCaller( getSelectionSystem().m_bPreferPointEntsIn2D ) );
 	GlobalPreferenceSystem().registerPreference( "3DCreateBrushes", BoolImportStringCaller( g_3DCreateBrushes ), BoolExportStringCaller( g_3DCreateBrushes ) );
 	GlobalPreferenceSystem().registerPreference( "3DMoveStyle", IntImportStringCaller( TranslateFreeXY_Z::m_viewdependent ), IntExportStringCaller( TranslateFreeXY_Z::m_viewdependent ) );

@@ -119,6 +119,18 @@ td.formatted_questions ol { margin-top: 0px; margin-bottom: 0px; }
 	<p>Ctrl-Alt-E now selects the parent entity, too. Useful for duplicating the entity, as opposed to just its brushes.</p>
 
 
+	<h2 id="Multi-vertex-selection">Multi-vertex selection<a href="#Multi-vertex-selection" class="wiki-anchor">&para;</a></h2>
+
+
+	<p>Enter vertex mode (<code>V</code> or the vertex toolbar button), then hold Shift to add/remove vertices. Shift-drag draws a selection box so you can grab many vertices at once. Use the translate/rotate/scale manipulators to move the combined selection.</p>
+
+
+	<h2 id="Parent-selection">Parent selection<a href="#Parent-selection" class="wiki-anchor">&para;</a></h2>
+
+
+	<p>Select the brushes first, then select the destination entity last, and use Edit &gt; Parent. The last-selected entity becomes the new parent.</p>
+
+
 	<h2 id="Targeting-lines">Targeting lines<a href="#Targeting-lines" class="wiki-anchor">&para;</a></h2>
 
 
@@ -158,10 +170,19 @@ td.formatted_questions ol { margin-top: 0px; margin-bottom: 0px; }
 	<h2 id="Linked-duplicates">Linked duplicates<a href="#Linked-duplicates" class="wiki-anchor">&para;</a></h2>
 
 
-	<p>"Create Linked Duplicate" creates a linked copy of the selected group. Linked groups stay synchronized: edits to one instance (entity keys, brushes, or patch changes) propagate to all linked copies.</p>
+	<p>"Create Linked Duplicate" works on groups only (primitive mode). Select exactly one group and it will create a clone linked to the original. If the source group is not already linked, a new link id is assigned.</p>
 
 
-	<p>Transform changes (move, rotate, scale, skew) are tracked per group and are applied consistently across linked copies. To manage links, use "Select Linked Groups" to grab all instances or "Separate Linked Groups" to break the link for the selected copies.</p>
+	<p>Linked groups are identified by the group entity key <code>_tb_linked_group_id</code>. A per-instance transform is stored in <code>_tb_transformation</code> as a 4x4 matrix. Moving, rotating, scaling, or skewing a linked group updates only that group's transform key; the other instances keep their own transforms.</p>
+
+
+	<p>Content edits propagate from the group you modify: changes to child brushes, patches, or entity keys inside the group are cloned to the other linked groups when the command finishes. The stored transforms are applied as a delta so each instance keeps its own placement and rotation.</p>
+
+
+	<p>Avoid editing multiple linked groups in the same command; if more than one linked group in a set is modified at once, synchronization is skipped to prevent conflicts.</p>
+
+
+	<p>Use "Select Linked Groups" to select all instances sharing the same link id. "Separate Linked Groups" clears the link for the selected groups; selecting multiple linked groups will split them into a new linked set, while leaving the rest intact.</p>
 
 
 	<h2 id="The-clip-line">The clip line<a href="#The-clip-line" class="wiki-anchor">&para;</a></h2>
@@ -183,6 +204,48 @@ td.formatted_questions ol { margin-top: 0px; margin-bottom: 0px; }
 
 
 	<p>The Help/Keyboard shortcuts dialog now allows changing the shortcuts, so you can e.g. enable previously unbound features.</p>
+
+
+	<h2 id="Build-menu-XML-format">Build menu XML format<a href="#Build-menu-XML-format" class="wiki-anchor">&para;</a></h2>
+
+
+	<p>The build menu is fully customizable; use Build &gt; Customize to edit the XML file.</p>
+
+
+	<p>Menu commands are shell commands. You can add multiple commands to a single menu item and they run in sequence. Commands contain variables in <code>[Name]</code> form which are substituted when executed.</p>
+
+
+	<p>Example command:</p>
+
+
+	<pre>[q2map] -bsp "[MapFile]"</pre>
+
+
+	<p>Example expansion:</p>
+
+
+	<pre>"C:\Program Files\GtkRadiant 1.5.0\q2map" -fs_basepath "c:\quake2" -bsp "c:\quake2\baseq2\maps\blah.map"</pre>
+
+
+	<p>This uses the predefined <code>MapFile</code> variable and a custom <code>q2map</code> variable defined in the XML file.</p>
+
+
+	<p>Custom variable example:</p>
+
+
+	<pre>&lt;var name="arghrad"&gt;"[RadiantPath]arghrad"&lt;/var&gt;</pre>
+
+
+	<p>Custom variables can only be added by editing the XML file.</p>
+
+
+	<p>Usage:</p>
+
+
+	<pre>[arghrad] "[MapFile]"</pre>
+
+
+	<p>Note: <code>MapFile</code> is quoted because paths may contain spaces.</p>
 
 
 	<h2 id="Portable-VibeRadiant">Portable VibeRadiant<a href="#Portable-VibeRadiant" class="wiki-anchor">&para;</a></h2>

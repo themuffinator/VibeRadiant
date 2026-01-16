@@ -120,6 +120,20 @@ void QE_brushCountChange(){
 			sprintf( buffer, "%zu", counts[i] );
 		g_pParentWnd->SetStatusText( c_status_brushcount + i, buffer );
 	}
+	{
+		const bool hasSelection = GlobalSelectionSystem().countSelected() != 0;
+		if ( hasSelection ) {
+			const AABB bounds = GlobalSelectionSystem().getBoundsSelected();
+			const Vector3 size = vector3_scaled( bounds.extents, 2.0f );
+			const auto status = StringStream<64>( FloatFormat( size[0], 0, 1 ), "x",
+			                                    FloatFormat( size[1], 0, 1 ), "x",
+			                                    FloatFormat( size[2], 0, 1 ) );
+			g_pParentWnd->SetStatusText( c_status_brushsize, status );
+		}
+		else{
+			g_pParentWnd->SetStatusText( c_status_brushsize, "" );
+		}
+	}
 }
 
 IdleDraw g_idle_scene_counts_update = IdleDraw( FreeCaller<void(), QE_brushCountChange>() );
@@ -264,7 +278,7 @@ void RunBSP( size_t buildIdx ){
 
 void Sys_SetTitle( const char *text, bool modified ){
 	StringOutputStream title( 256 );
-	title << "Vibe Radiant - ";
+	title << "VibeRadiant - ";
 	if ( text != nullptr && text[0] != '\0' ) {
 		title << PathFilename( text );
 	}

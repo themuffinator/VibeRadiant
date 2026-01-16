@@ -816,6 +816,30 @@ void Scene_BrushConstructPrefab( scene::Graph& graph, EBrushPrefab type, std::si
 	}
 }
 
+scene::Node* Scene_BrushCreate_Cuboid( const AABB& bounds, const char* shader ){
+	scene::Node& worldspawn = Map_FindOrInsertWorldspawn( g_map );
+	scene::Traversable* traversable = Node_getTraversable( worldspawn );
+	if ( traversable == nullptr ) {
+		return nullptr;
+	}
+
+	NodeSmartReference node( GlobalBrushCreator().createBrush() );
+	traversable->insert( node );
+
+	Brush* brush = Node_getBrush( node.get() );
+	if ( brush == nullptr ) {
+		traversable->erase( node.get() );
+		return nullptr;
+	}
+
+	const char* useShader = ( shader == nullptr || shader[0] == '\0' )
+	                      ? texdef_name_default()
+	                      : shader;
+	Brush_ConstructCuboid( *brush, bounds, useShader, TextureTransform_getDefault() );
+	SceneChangeNotify();
+	return node.get_pointer();
+}
+
 #include "filterbar.h"
 extern bool g_brush_always_caulk;
 

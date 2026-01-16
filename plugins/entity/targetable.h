@@ -34,6 +34,7 @@
 #include "entitylib.h"
 #include "eclasslib.h"
 #include "stringio.h"
+#include "entity.h"
 
 class Targetable
 {
@@ -173,13 +174,51 @@ void TargetingEntities_forEach( const TargetingEntities& targetingEntities, cons
 	}
 }
 
+class RenderableTargetLines : public OpenGLRenderable
+{
+	RenderablePointVector m_points;
+public:
+	RenderableTargetLines()
+		: m_points( GL_LINES ){
+	}
+
+	void render( RenderStateFlags state ) const override {
+		if ( g_showConnectionsThick ) {
+			GLfloat previous = 1.0f;
+			gl().glGetFloatv( GL_LINE_WIDTH, &previous );
+			gl().glLineWidth( 2.0f );
+			m_points.render( state );
+			gl().glLineWidth( previous );
+		}
+		else {
+			m_points.render( state );
+		}
+	}
+
+	std::size_t size() const {
+		return m_points.size();
+	}
+	bool empty() const {
+		return m_points.empty();
+	}
+	void clear(){
+		m_points.clear();
+	}
+	void reserve( std::size_t size ){
+		m_points.reserve( size );
+	}
+	void push_back( const PointVertex& point ){
+		m_points.push_back( point );
+	}
+};
+
 class TargetLinesPushBack
 {
-	RenderablePointVector& m_targetLines;
+	class RenderableTargetLines& m_targetLines;
 	const Vector3& m_worldPosition;
 	const VolumeTest& m_volume;
 public:
-	TargetLinesPushBack( RenderablePointVector& targetLines, const Vector3& worldPosition, const VolumeTest& volume ) :
+	TargetLinesPushBack( RenderableTargetLines& targetLines, const Vector3& worldPosition, const VolumeTest& volume ) :
 		m_targetLines( targetLines ), m_worldPosition( worldPosition ), m_volume( volume ){
 	}
 	void operator()( const Vector3& worldPosition ) const {
@@ -317,12 +356,12 @@ public:
 class RenderableTargetingEntities
 {
 	const TargetingEntities& m_targets;
-	mutable RenderablePointVector m_target_lines;
+	mutable RenderableTargetLines m_target_lines;
 public:
 //static Shader* m_state;
 
 	RenderableTargetingEntities( const TargetingEntities& targets )
-		: m_targets( targets ), m_target_lines( GL_LINES ){
+		: m_targets( targets ){
 	}
 	void compile( const VolumeTest& volume, const Vector3& world_position ) const {
 		m_target_lines.clear();
@@ -414,8 +453,6 @@ public:
 		return m_targeting.get();
 	}
 };
-
-#include "entity.h"
 
 class RenderableConnectionLines : public Renderable
 {

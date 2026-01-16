@@ -34,16 +34,21 @@
 #include "igl.h"
 #include "moduleobserver.h"
 
+#include <algorithm>
 #include <set>
 #include <vector>
+#include <cmath>
 
 #include <QActionGroup>
 #include <QApplication>
 #include <QClipboard>
+#include <QDrag>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QItemDelegate>
+#include <QImage>
 #include <QLineEdit>
+#include <QEvent>
 #include <QListWidget>
 #include <QListWidgetItem>
 #if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
@@ -51,7 +56,9 @@
 #endif
 #include <QMenu>
 #include <QMetaProperty>
+#include <QMimeData>
 #include <QOpenGLWidget>
+#include <QPixmap>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStandardItemModel>
@@ -66,10 +73,12 @@
 #include "os/path.h"
 #include "shaderlib.h"
 #include "signal/signal.h"
+#include "timer.h"
 #include "stream/stringstream.h"
 #include "string/string.h"
 #include "texturelib.h"
 #include "textures.h"
+#include "stringio.h"
 
 #include "gtkutil/cursor.h"
 #include "gtkutil/glwidget.h"
@@ -83,6 +92,7 @@
 #include "commands.h"
 #include "error.h"
 #include "findtexturedialog.h"
+#include "assetdrop.h"
 #include "assetbrowser.h"
 #include "groupdialog.h"
 #include "gtkdlgs.h"
@@ -194,6 +204,180 @@ const char *TextureBrowser_getContentFlagName(std::size_t bit) {
 }
 } // namespace
 
+namespace {
+enum TextureScaleMode {
+  eTextureScaleGameDefault = 0,
+  eTextureScaleCustom = 1,
+};
+
+bool g_textureScaleModeImported = false;
+
+std::size_t TextureBrowser_getGameDefaultScale() {
+  const char *brushTypes =
+      GlobalRadiant().getRequiredGameDescriptionKeyValue("brushtypes");
+  return string_equal(brushTypes, "quake2") ? 200 : 100;
+}
+
+constexpr float kTextureBrowserHoverScale = 1.05f;
+constexpr float kTextureBrowserHoverLerp = 0.2f;
+constexpr float kTextureBrowserHoverEpsilon = 0.001f;
+
+float TextureBrowser_approachHoverScale(float current, float target) {
+  return current + (target - current) * kTextureBrowserHoverLerp;
+}
+
+QImage applyOpacity(QImage image, float opacity) {
+  if (image.isNull()) {
+    return image;
+  }
+  image = image.convertToFormat(QImage::Format_ARGB32);
+  const int alphaScale =
+      std::clamp(static_cast<int>(opacity * 255.0f), 0, 255);
+  for (int y = 0; y < image.height(); ++y) {
+    auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+    for (int x = 0; x < image.width(); ++x) {
+      const int alpha = qAlpha(line[x]);
+      line[x] = qRgba(qRed(line[x]), qGreen(line[x]), qBlue(line[x]),
+                      (alpha * alphaScale) / 255);
+    }
+  }
+  return image;
+}
+
+GLenum TextureBrowser_convertBlendFactor(BlendFactor factor) {
+  switch (factor) {
+  case BLEND_ZERO:
+    return GL_ZERO;
+  case BLEND_ONE:
+    return GL_ONE;
+  case BLEND_SRC_COLOUR:
+    return GL_SRC_COLOR;
+  case BLEND_ONE_MINUS_SRC_COLOUR:
+    return GL_ONE_MINUS_SRC_COLOR;
+  case BLEND_SRC_ALPHA:
+    return GL_SRC_ALPHA;
+  case BLEND_ONE_MINUS_SRC_ALPHA:
+    return GL_ONE_MINUS_SRC_ALPHA;
+  case BLEND_DST_COLOUR:
+    return GL_DST_COLOR;
+  case BLEND_ONE_MINUS_DST_COLOUR:
+    return GL_ONE_MINUS_DST_COLOR;
+  case BLEND_DST_ALPHA:
+    return GL_DST_ALPHA;
+  case BLEND_ONE_MINUS_DST_ALPHA:
+    return GL_ONE_MINUS_DST_ALPHA;
+  case BLEND_SRC_ALPHA_SATURATE:
+    return GL_SRC_ALPHA_SATURATE;
+  }
+  return GL_ZERO;
+}
+
+GLenum TextureBrowser_convertAlphaFunc(ShaderStageAlphaFunc func) {
+  switch (func) {
+  case eStageAlphaGT0:
+    return GL_GREATER;
+  case eStageAlphaLT128:
+    return GL_LESS;
+  case eStageAlphaGE128:
+    return GL_GEQUAL;
+  case eStageAlphaNone:
+  default:
+    break;
+  }
+  return GL_ALWAYS;
+}
+
+void TextureBrowser_drawStage(const ShaderStage &stage, bool enableAlpha,
+                              bool useDefaultBlend) {
+  const GLint texture = stage.texture != nullptr ? stage.texture->texture_number : 0;
+  gl().glActiveTexture(GL_TEXTURE0);
+  gl().glClientActiveTexture(GL_TEXTURE0);
+
+  if (enableAlpha && (stage.hasBlendFunc || useDefaultBlend)) {
+    gl().glEnable(GL_BLEND);
+    if (stage.hasBlendFunc) {
+      gl().glBlendFunc(TextureBrowser_convertBlendFactor(stage.blendFunc.m_src),
+                       TextureBrowser_convertBlendFactor(stage.blendFunc.m_dst));
+    } else {
+      gl().glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+  } else {
+    gl().glDisable(GL_BLEND);
+  }
+
+  if (enableAlpha && stage.alphaFunc != eStageAlphaNone) {
+    gl().glEnable(GL_ALPHA_TEST);
+    gl().glAlphaFunc(TextureBrowser_convertAlphaFunc(stage.alphaFunc),
+                     stage.alphaRef);
+  } else {
+    gl().glDisable(GL_ALPHA_TEST);
+  }
+
+  gl().glBindTexture(GL_TEXTURE_2D, texture);
+  gl().glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                       stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+  gl().glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                       stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+
+  bool texgenEnabled = false;
+  if (stage.tcGen == eTcGenEnvironment || stage.tcGen == eTcGenVector) {
+    gl().glEnable(GL_TEXTURE_GEN_S);
+    gl().glEnable(GL_TEXTURE_GEN_T);
+    if (stage.tcGen == eTcGenEnvironment) {
+      gl().glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP);
+      gl().glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP);
+    } else {
+      const float planeS[4] = {stage.tcGenVec0.x(), stage.tcGenVec0.y(),
+                               stage.tcGenVec0.z(), 0.0f};
+      const float planeT[4] = {stage.tcGenVec1.x(), stage.tcGenVec1.y(),
+                               stage.tcGenVec1.z(), 0.0f};
+      gl().glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+      gl().glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+      gl().glTexGenfv(GL_S, GL_OBJECT_PLANE, planeS);
+      gl().glTexGenfv(GL_T, GL_OBJECT_PLANE, planeT);
+    }
+    texgenEnabled = true;
+  } else {
+    gl().glDisable(GL_TEXTURE_GEN_S);
+    gl().glDisable(GL_TEXTURE_GEN_T);
+  }
+
+  bool texMatrixPushed = false;
+  if (stage.texMatrix != g_matrix4_identity) {
+    gl().glMatrixMode(GL_TEXTURE);
+    gl().glPushMatrix();
+    gl().glLoadMatrixf(reinterpret_cast<const float *>(&stage.texMatrix));
+    gl().glMatrixMode(GL_MODELVIEW);
+    texMatrixPushed = true;
+  }
+
+  gl().glColor4f(stage.colour[0], stage.colour[1], stage.colour[2],
+                 enableAlpha ? stage.colour[3] : 1.0f);
+
+  gl().glBegin(GL_QUADS);
+  gl().glTexCoord2f(0, 0);
+  gl().glVertex2f(0, 1);
+  gl().glTexCoord2f(1, 0);
+  gl().glVertex2f(1, 1);
+  gl().glTexCoord2f(1, 1);
+  gl().glVertex2f(1, 0);
+  gl().glTexCoord2f(0, 1);
+  gl().glVertex2f(0, 0);
+  gl().glEnd();
+
+  if (texMatrixPushed) {
+    gl().glMatrixMode(GL_TEXTURE);
+    gl().glPopMatrix();
+    gl().glMatrixMode(GL_MODELVIEW);
+  }
+  if (texgenEnabled) {
+    gl().glDisable(GL_TEXTURE_GEN_S);
+    gl().glDisable(GL_TEXTURE_GEN_T);
+  }
+  gl().glDisable(GL_ALPHA_TEST);
+}
+} // namespace
+
 class TextureBrowser {
   int m_originy;
   int m_nTotalHeight;
@@ -202,6 +386,7 @@ public:
   int m_width, m_height;
 
   CopiedString m_shader; // current shader
+  CopiedString m_hoverShader;
 
   QWidget *m_parent;
   QOpenGLWidget *m_gl_widget;
@@ -249,6 +434,12 @@ public:
   // the increment step we use against the wheel mouse
   int m_mouseWheelScrollIncrement;
   std::size_t m_textureScale;
+  int m_textureScaleMode;
+  float m_hoverScale;
+  float m_hoverScaleTarget;
+  Timer m_hoverTimer;
+  int m_hoverLastFrameMs;
+  bool m_hoverShaderAnimated;
 
   bool m_showShaders;
   bool m_showTextures;
@@ -298,6 +489,9 @@ public:
         }),
         m_color_textureback(0.25f, 0.25f, 0.25f),
         m_mouseWheelScrollIncrement(64), m_textureScale(50),
+        m_textureScaleMode(eTextureScaleGameDefault), m_hoverScale(1.0f),
+        m_hoverScaleTarget(1.0f), m_hoverLastFrameMs(0),
+        m_hoverShaderAnimated(false),
         m_showShaders(true), m_showTextures(true), m_showTextureScrollbar(true),
         m_startupShaders(STARTUPSHADERS_NONE), m_hideUnused(false),
         m_searchedTags(false), m_tags(false), m_move_started(false),
@@ -307,6 +501,8 @@ public:
     if (m_gl_widget != nullptr)
       widget_queue_draw(*m_gl_widget);
   }
+  void updateHover(int x, int y);
+  void clearHover();
   void draw();
   void setOriginY(int originy) {
     m_originy = originy;
@@ -321,6 +517,7 @@ private:
     m_originy = std::clamp(m_originy, minOrigin, 0);
   }
   void evaluateHeight();
+  void updateHoverAnimation();
   int totalHeight() {
     evaluateHeight();
     return m_nTotalHeight;
@@ -951,6 +1148,141 @@ IShader *Texture_At(TextureBrowser &textureBrowser, int mx, int my) {
   return 0;
 }
 
+static bool TextureBrowser_shaderRect(TextureBrowser &textureBrowser,
+                                      const char *shaderName, QRect &outRect) {
+  if (string_empty(shaderName)) {
+    return false;
+  }
+
+  TextureLayout layout;
+  for (QERApp_ActiveShaders_IteratorBegin();
+       !QERApp_ActiveShaders_IteratorAtEnd();
+       QERApp_ActiveShaders_IteratorIncrement()) {
+    IShader *shader = QERApp_ActiveShaders_IteratorCurrent();
+
+    if (!Texture_IsShown(shader, textureBrowser)) {
+      continue;
+    }
+
+    const auto [x, y] = layout.nextPos(textureBrowser, shader->getTexture());
+    qtexture_t *q = shader->getTexture();
+    if (!q) {
+      break;
+    }
+
+    if (!shader_equal(shaderName, shader->getName())) {
+      continue;
+    }
+
+    const auto [nWidth, nHeight] = textureBrowser.getTextureWH(q);
+    const float drawX = x;
+    const float drawY = y - TextureBrowser_fontHeight();
+    const int rectX = float_to_integer(drawX);
+    const int rectY =
+        float_to_integer(textureBrowser.getOriginY() - drawY);
+    const int rectW = float_to_integer(nWidth);
+    const int rectH = float_to_integer(nHeight);
+    outRect = QRect(rectX, rectY, rectW, rectH);
+    return !outRect.isEmpty();
+  }
+
+  return false;
+}
+
+static QPixmap TextureBrowser_dragPixmap(TextureBrowser &textureBrowser,
+                                         const char *shaderName) {
+  if (textureBrowser.m_gl_widget == nullptr || string_empty(shaderName)) {
+    return QPixmap();
+  }
+
+  QRect rect;
+  if (!TextureBrowser_shaderRect(textureBrowser, shaderName, rect)) {
+    return QPixmap();
+  }
+
+  QImage frame = textureBrowser.m_gl_widget->grabFramebuffer();
+  rect = rect.intersected(frame.rect());
+  if (rect.isEmpty()) {
+    return QPixmap();
+  }
+
+  QImage tile = applyOpacity(frame.copy(rect), 0.6f);
+  QPixmap pixmap = QPixmap::fromImage(tile);
+  pixmap.setDevicePixelRatio(textureBrowser.m_gl_widget->devicePixelRatioF());
+  return pixmap;
+}
+
+void TextureBrowser::updateHover(int x, int y) {
+  IShader *shader = Texture_At(*this, x, y);
+  if (shader != nullptr) {
+    const char *name = shader->getName();
+    const bool changed = !shader_equal(m_hoverShader.c_str(), name);
+    if (changed) {
+      m_hoverShader = name;
+      m_hoverScale = 1.0f;
+      m_hoverTimer.start();
+      m_hoverLastFrameMs = 0;
+      m_hoverShaderAnimated = shader->isAnimated();
+    }
+    if (changed || m_hoverScaleTarget != kTextureBrowserHoverScale) {
+      m_hoverScaleTarget = kTextureBrowserHoverScale;
+      queueDraw();
+    }
+    return;
+  }
+
+  if (!m_hoverShader.empty() && m_hoverScaleTarget != 1.0f) {
+    m_hoverScaleTarget = 1.0f;
+    queueDraw();
+  }
+}
+
+void TextureBrowser::clearHover() {
+  if (!m_hoverShader.empty() && m_hoverScaleTarget != 1.0f) {
+    m_hoverScaleTarget = 1.0f;
+    queueDraw();
+  }
+  m_hoverShaderAnimated = false;
+  m_hoverLastFrameMs = 0;
+}
+
+void TextureBrowser::updateHoverAnimation() {
+  if (m_hoverShader.empty()) {
+    m_hoverScale = 1.0f;
+    m_hoverScaleTarget = 1.0f;
+    m_hoverShaderAnimated = false;
+    m_hoverLastFrameMs = 0;
+    return;
+  }
+
+  m_hoverScale =
+      TextureBrowser_approachHoverScale(m_hoverScale, m_hoverScaleTarget);
+  if (std::fabs(m_hoverScale - m_hoverScaleTarget) <
+      kTextureBrowserHoverEpsilon) {
+    m_hoverScale = m_hoverScaleTarget;
+  } else {
+    queueDraw();
+  }
+
+  if (m_hoverScaleTarget <= 1.0f + kTextureBrowserHoverEpsilon &&
+      m_hoverScale <= 1.0f + kTextureBrowserHoverEpsilon) {
+    m_hoverScale = 1.0f;
+    m_hoverScaleTarget = 1.0f;
+    m_hoverShader = "";
+    m_hoverShaderAnimated = false;
+    m_hoverLastFrameMs = 0;
+    return;
+  }
+
+  if (m_hoverShaderAnimated) {
+    const int elapsed = m_hoverTimer.elapsed_msec();
+    if (elapsed - m_hoverLastFrameMs >= 16) {
+      m_hoverLastFrameMs = elapsed;
+      queueDraw();
+    }
+  }
+}
+
 /*
    ==============
    SelectTexture
@@ -1021,6 +1353,23 @@ void TextureBrowser_ViewShader(TextureBrowser &textureBrowser,
   }
 }
 
+void TextureBrowser_OpenShaderEditor() {
+  const char *shaderName = TextureBrowser_GetSelectedShader();
+  if (string_empty(shaderName)) {
+    globalWarningStream() << "No shader selected.\n";
+    return;
+  }
+  IShader *shader = QERApp_Shader_ForName(shaderName);
+  if (shader->IsDefault()) {
+    globalWarningStream()
+        << shader->getName() << " is not a shader, it's a texture.\n";
+    shader->DecRef();
+    return;
+  }
+  DoShaderPreviewEditor(shader->getShaderFileName(), shader->getName());
+  shader->DecRef();
+}
+
 /*
    ============================================================================
 
@@ -1041,6 +1390,10 @@ void TextureBrowser::draw() {
   const int fontHeight = TextureBrowser_fontHeight();
   const int fontDescent = GlobalOpenGL().m_font->getPixelDescent();
   const int originy = getOriginY();
+  updateHoverAnimation();
+  const bool hoverActive = !m_hoverShader.empty();
+  const float hoverScale = m_hoverScale;
+  const char *hoverShaderName = hoverActive ? m_hoverShader.c_str() : nullptr;
 
   gl().glClearColor(m_color_textureback[0], m_color_textureback[1],
                     m_color_textureback[2], 0);
@@ -1057,8 +1410,11 @@ void TextureBrowser::draw() {
   } else {
     gl().glDisable(GL_BLEND);
   }
+  gl().glDisable(GL_ALPHA_TEST);
 
   gl().glOrtho(0, m_width, originy - m_height, originy, -100, 100);
+  gl().glMatrixMode(GL_MODELVIEW);
+  gl().glLoadIdentity();
   gl().glEnable(GL_TEXTURE_2D);
 
   gl().glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
@@ -1080,17 +1436,27 @@ void TextureBrowser::draw() {
     }
 
     const auto [nWidth, nHeight] = getTextureWH(q);
+    const bool isHover =
+        hoverActive && shader_equal(hoverShaderName, shader->getName());
+    const float drawScale = isHover ? hoverScale : 1.0f;
+    const float drawWidth = nWidth * drawScale;
+    const float drawHeight = nHeight * drawScale;
+    const float xOffset = (drawWidth - nWidth) * 0.5f;
+    const float yOffset = (drawHeight - nHeight) * 0.5f;
+    const float drawX = x - xOffset;
+    const float drawY = y - fontHeight + yOffset;
 
     // Is this texture visible?
-    if ((y - nHeight - fontHeight < originy) && (y > originy - m_height)) {
+    if ((y - drawHeight - fontHeight < originy) &&
+        (y > originy - m_height)) {
       gl().glLineWidth(1);
       gl().glDisable(GL_TEXTURE_2D);
-      const float xf = x;
-      const float yf = y - fontHeight;
-      float xfMax = xf + 1.5 + nWidth;
-      float xfMin = xf - 1.5;
-      float yfMax = yf + 1.5;
-      float yfMin = yf - nHeight - 1.5;
+      const float xf = drawX;
+      const float yf = drawY;
+      float xfMax = xf + 1.5f + drawWidth;
+      float xfMin = xf - 1.5f;
+      float yfMax = yf + 1.5f;
+      float yfMin = yf - drawHeight - 1.5f;
 #define TEXBRO_RENDER_BORDER                                                   \
   gl().glBegin(GL_LINE_LOOP);                                                  \
   gl().glVertex2f(xfMin, yfMax);                                               \
@@ -1128,41 +1494,66 @@ void TextureBrowser::draw() {
         TEXBRO_RENDER_BORDER
         gl().glDisable(GL_LINE_STIPPLE);
       }
+      // hover highlight
+      if (isHover) {
+        gl().glLineWidth(2);
+        gl().glColor3f(1, 0.9f, 0.2f);
+        TEXBRO_RENDER_BORDER
+      }
 
       // draw checkerboard for transparent textures
       if (g_TextureBrowser_enableAlpha) {
+        const int checkerWidth = float_to_integer(drawWidth);
+        const int checkerHeight = float_to_integer(drawHeight);
         gl().glBegin(GL_QUADS);
-        for (int i = 0; i < nHeight; i += 8)
-          for (int j = 0; j < nWidth; j += 8) {
+        for (int i = 0; i < checkerHeight; i += 8)
+          for (int j = 0; j < checkerWidth; j += 8) {
             const unsigned char color = (i + j) / 8 % 2 ? 0x66 : 0x99;
             gl().glColor3ub(color, color, color);
-            const int left = j;
-            const int right = std::min(j + 8, nWidth);
-            const int top = i;
-            const int bottom = std::min(i + 8, nHeight);
-            gl().glVertex2i(x + right, y - nHeight - fontHeight + top);
-            gl().glVertex2i(x + left, y - nHeight - fontHeight + top);
-            gl().glVertex2i(x + left, y - nHeight - fontHeight + bottom);
-            gl().glVertex2i(x + right, y - nHeight - fontHeight + bottom);
+            const float left = drawX + j;
+            const float right = drawX + std::min(j + 8, checkerWidth);
+            const float top = drawY - i;
+            const float bottom = drawY - std::min(i + 8, checkerHeight);
+            gl().glVertex2f(right, top);
+            gl().glVertex2f(left, top);
+            gl().glVertex2f(left, bottom);
+            gl().glVertex2f(right, bottom);
           }
         gl().glEnd();
       }
 
-      // Draw the texture
+      // Draw the texture (shader stages when available)
       gl().glEnable(GL_TEXTURE_2D);
-      gl().glBindTexture(GL_TEXTURE_2D, q->texture_number);
+      if (shader->hasStages()) {
+        gl().glPushMatrix();
+        gl().glTranslatef(drawX, drawY - drawHeight, 0.0f);
+        gl().glScalef(drawWidth, drawHeight, 1.0f);
+        const float stageTime =
+            isHover ? static_cast<float>(m_hoverTimer.elapsed_sec()) : 0.0f;
+        struct StageDraw {
+          bool enableAlpha;
+          void operator()(const ShaderStage &stage) const {
+            TextureBrowser_drawStage(stage, enableAlpha, false);
+          }
+        } draw{g_TextureBrowser_enableAlpha};
+        shader->forEachStage(stageTime, makeCallback(draw));
+        gl().glPopMatrix();
+      } else {
+        gl().glBindTexture(GL_TEXTURE_2D, q->texture_number);
+        GlobalOpenGL_debugAssertNoErrors();
+        gl().glColor3f(1, 1, 1);
+        gl().glBegin(GL_QUADS);
+        gl().glTexCoord2f(0, 0);
+        gl().glVertex2f(drawX, drawY);
+        gl().glTexCoord2f(1, 0);
+        gl().glVertex2f(drawX + drawWidth, drawY);
+        gl().glTexCoord2f(1, 1);
+        gl().glVertex2f(drawX + drawWidth, drawY - drawHeight);
+        gl().glTexCoord2f(0, 1);
+        gl().glVertex2f(drawX, drawY - drawHeight);
+        gl().glEnd();
+      }
       GlobalOpenGL_debugAssertNoErrors();
-      gl().glColor3f(1, 1, 1);
-      gl().glBegin(GL_QUADS);
-      gl().glTexCoord2i(0, 0);
-      gl().glVertex2i(x, y - fontHeight);
-      gl().glTexCoord2i(1, 0);
-      gl().glVertex2i(x + nWidth, y - fontHeight);
-      gl().glTexCoord2i(1, 1);
-      gl().glVertex2i(x + nWidth, y - fontHeight - nHeight);
-      gl().glTexCoord2i(0, 1);
-      gl().glVertex2i(x, y - fontHeight - nHeight);
-      gl().glEnd();
 
       // draw the texture name
       //			gl().glDisable( GL_TEXTURE_2D );
@@ -2009,12 +2400,17 @@ static QMenu *TextureBrowser_buildFlagMenu(TextureBrowser &textureBrowser,
 
 class TexWndGLWidget : public QOpenGLWidget {
   TextureBrowser &m_texBro;
-  qreal m_scale;
+  qreal m_scale = 1.0;
   MousePresses m_mouse;
+  QPoint m_dragStart;
+  CopiedString m_dragShader;
+  bool m_skipRelease = false;
 
 public:
   TexWndGLWidget(TextureBrowser &textureBrowser)
-      : QOpenGLWidget(), m_texBro(textureBrowser) {}
+      : QOpenGLWidget(), m_texBro(textureBrowser) {
+    setMouseTracking(true);
+  }
 
   ~TexWndGLWidget() override { glwidget_context_destroyed(); }
 
@@ -2047,6 +2443,12 @@ protected:
     } else if (press == MousePresses::Left || press == MousePresses::Middle) {
       if (!event->modifiers().testFlag(Qt::KeyboardModifier::ShiftModifier)) {
         const QPoint localPos = mouseEventLocalPos(event);
+        if (press == MousePresses::Left) {
+          m_dragStart = localPos;
+          IShader *shader = Texture_At(m_texBro, localPos.x() * m_scale,
+                                       localPos.y() * m_scale);
+          m_dragShader = shader != nullptr ? shader->getName() : "";
+        }
         SelectTexture(m_texBro, localPos.x() * m_scale, localPos.y() * m_scale,
                       press == MousePresses::Middle);
       }
@@ -2061,6 +2463,10 @@ protected:
   }
   void mouseReleaseEvent(QMouseEvent *event) override {
     const auto release = m_mouse.release(event);
+    if (m_skipRelease) {
+      m_skipRelease = false;
+      return;
+    }
     if (release == MousePresses::Right) {
       TextureBrowser_Tracking_MouseUp(m_texBro);
       if (m_texBro.m_move_amount < 16)
@@ -2073,6 +2479,47 @@ protected:
                                 localPos.x() * m_scale,
                                 localPos.y() * m_scale);
     }
+  }
+  void mouseMoveEvent(QMouseEvent *event) override {
+    if (event->buttons() & Qt::MouseButton::LeftButton) {
+      if (event->modifiers().testFlag(Qt::KeyboardModifier::ShiftModifier)) {
+        return;
+      }
+      const QPoint localPos = mouseEventLocalPos(event);
+      if ((localPos - m_dragStart).manhattanLength() <
+          QApplication::startDragDistance()) {
+        return;
+      }
+      if (m_dragShader.empty()) {
+        return;
+      }
+
+      auto *mimeData = new QMimeData;
+      mimeData->setData(kTextureBrowserMimeType,
+                        QByteArray(m_dragShader.c_str()));
+      mimeData->setText(m_dragShader.c_str());
+
+      auto *drag = new QDrag(this);
+      drag->setMimeData(mimeData);
+      const QPixmap pixmap =
+          TextureBrowser_dragPixmap(m_texBro, m_dragShader.c_str());
+      if (!pixmap.isNull()) {
+        drag->setPixmap(pixmap);
+        drag->setHotSpot(pixmap.rect().center());
+      }
+      m_skipRelease = true;
+      drag->exec(Qt::CopyAction);
+      return;
+    }
+    if (event->buttons() != Qt::MouseButton::NoButton) {
+      return;
+    }
+    const QPoint localPos = mouseEventLocalPos(event);
+    m_texBro.updateHover(localPos.x() * m_scale, localPos.y() * m_scale);
+  }
+  void leaveEvent(QEvent *event) override {
+    m_texBro.clearHover();
+    QOpenGLWidget::leaveEvent(event);
   }
   void wheelEvent(QWheelEvent *event) override {
     setFocus();
@@ -2141,6 +2588,9 @@ QWidget *TextureBrowser_constructWindow(QWidget *toplevel) {
 
     toolbar_append_button(toolbar, "Flush & Reload Shaders",
                           "texbro_refresh.png", "RefreshShaders");
+
+    toolbar_append_button(toolbar, "Shader Editor", "shadernotex.png",
+                          "TextureBrowserShaderEditor");
   }
   { // filter bar
     auto *filterBar = new QWidget;
@@ -2410,21 +2860,65 @@ void TextureBrowser_exportTitle(const StringImportCallback &importer) {
   importer(buffer);
 }
 
+void TextureScaleModeImport(TextureBrowser &textureBrowser, int value) {
+  textureBrowser.m_textureScaleMode = value;
+  g_textureScaleModeImported = true;
+  if (textureBrowser.m_textureScaleMode == eTextureScaleGameDefault) {
+    TextureBrowser_setScale(textureBrowser, TextureBrowser_getGameDefaultScale());
+  }
+}
+typedef ReferenceCaller<TextureBrowser, void(int), TextureScaleModeImport>
+    TextureScaleModeImportCaller;
+
+void TextureScaleModeExport(TextureBrowser &textureBrowser,
+                            const IntImportCallback &importer) {
+  importer(textureBrowser.m_textureScaleMode);
+}
+typedef ReferenceCaller<TextureBrowser, void(const IntImportCallback &),
+                        TextureScaleModeExport>
+    TextureScaleModeExportCaller;
+
+void TextureScalePreferenceImport(TextureBrowser &textureBrowser,
+                                  std::size_t value) {
+  const std::size_t gameDefault = TextureBrowser_getGameDefaultScale();
+  if (!g_textureScaleModeImported) {
+    textureBrowser.m_textureScaleMode =
+        (value == gameDefault) ? eTextureScaleGameDefault : eTextureScaleCustom;
+  }
+  const std::size_t scale = (textureBrowser.m_textureScaleMode ==
+                             eTextureScaleGameDefault)
+                                ? gameDefault
+                                : value;
+  TextureBrowser_setScale(textureBrowser, scale);
+}
+typedef ReferenceCaller<TextureBrowser, void(std::size_t),
+                        TextureScalePreferenceImport>
+    TextureScalePreferenceImportCaller;
+
 void TextureScaleImport(TextureBrowser &textureBrowser, int value) {
   switch (value) {
   case 0:
-    TextureBrowser_setScale(textureBrowser, 10);
+    textureBrowser.m_textureScaleMode = eTextureScaleGameDefault;
+    TextureBrowser_setScale(textureBrowser, TextureBrowser_getGameDefaultScale());
     break;
   case 1:
-    TextureBrowser_setScale(textureBrowser, 25);
+    textureBrowser.m_textureScaleMode = eTextureScaleCustom;
+    TextureBrowser_setScale(textureBrowser, 10);
     break;
   case 2:
-    TextureBrowser_setScale(textureBrowser, 50);
+    textureBrowser.m_textureScaleMode = eTextureScaleCustom;
+    TextureBrowser_setScale(textureBrowser, 25);
     break;
   case 3:
-    TextureBrowser_setScale(textureBrowser, 100);
+    textureBrowser.m_textureScaleMode = eTextureScaleCustom;
+    TextureBrowser_setScale(textureBrowser, 50);
     break;
   case 4:
+    textureBrowser.m_textureScaleMode = eTextureScaleCustom;
+    TextureBrowser_setScale(textureBrowser, 100);
+    break;
+  case 5:
+    textureBrowser.m_textureScaleMode = eTextureScaleCustom;
     TextureBrowser_setScale(textureBrowser, 200);
     break;
   }
@@ -2434,21 +2928,25 @@ typedef ReferenceCaller<TextureBrowser, void(int), TextureScaleImport>
 
 void TextureScaleExport(TextureBrowser &textureBrowser,
                         const IntImportCallback &importer) {
+  if (textureBrowser.m_textureScaleMode == eTextureScaleGameDefault) {
+    importer(0);
+    return;
+  }
   switch (textureBrowser.m_textureScale) {
   case 10:
-    importer(0);
-    break;
-  case 25:
     importer(1);
     break;
-  case 50:
+  case 25:
     importer(2);
     break;
-  case 100:
+  case 50:
     importer(3);
     break;
-  case 200:
+  case 100:
     importer(4);
+    break;
+  case 200:
+    importer(5);
     break;
   }
 }
@@ -2475,7 +2973,8 @@ void TextureBrowser_constructPreferences(PreferencesPage &page) {
                       TextureBrowserImportShowScrollbarCaller(g_TexBro),
                       BoolExportCaller(g_TexBro.m_showTextureScrollbar));
   {
-    const char *texture_scale[] = {"10%", "25%", "50%", "100%", "200%"};
+    const char *texture_scale[] = {"Game default", "10%", "25%", "50%",
+                                   "100%", "200%"};
     page.appendCombo("Texture Thumbnail Scale", StringArrayRange(texture_scale),
                      IntImportCallback(TextureScaleImportCaller(g_TexBro)),
                      IntExportCallback(TextureScaleExportCaller(g_TexBro)));
@@ -2520,6 +3019,9 @@ void TextureClipboard_textureSelected(const char *shader);
 
 void TextureBrowser_Construct() {
   g_TexBro.m_shader = texdef_name_default();
+  g_textureScaleModeImported = false;
+  g_TexBro.m_textureScaleMode = eTextureScaleGameDefault;
+  g_TexBro.m_textureScale = TextureBrowser_getGameDefaultScale();
 
   GlobalShaderSystem().setActiveShadersChangedNotify(
       ReferenceCaller<TextureBrowser, void(),
@@ -2549,6 +3051,8 @@ void TextureBrowser_Construct() {
   GlobalCommands_insert("TagCopy", makeCallbackF(TextureBrowser_copyTag));
   GlobalCommands_insert("TagPaste", makeCallbackF(TextureBrowser_pasteTag));
   GlobalCommands_insert("RefreshShaders", makeCallbackF(RefreshShaders));
+  GlobalCommands_insert("TextureBrowserShaderEditor",
+                        makeCallbackF(TextureBrowser_OpenShaderEditor));
   GlobalToggles_insert(
       "ShowInUse", makeCallbackF(TextureBrowser_ToggleHideUnused),
       ToggleItem::AddCallbackCaller(g_TexBro.m_hideunused_item),
@@ -2586,8 +3090,12 @@ void TextureBrowser_Construct() {
       ToggleItem::AddCallbackCaller(g_TexBro.m_filter_searchFromStart_item));
 
   GlobalPreferenceSystem().registerPreference(
+      "TextureScaleMode",
+      makeIntStringImportCallback(TextureScaleModeImportCaller(g_TexBro)),
+      makeIntStringExportCallback(TextureScaleModeExportCaller(g_TexBro)));
+  GlobalPreferenceSystem().registerPreference(
       "TextureScale",
-      makeSizeStringImportCallback(TextureBrowserSetScaleCaller(g_TexBro)),
+      makeSizeStringImportCallback(TextureScalePreferenceImportCaller(g_TexBro)),
       SizeExportStringCaller(g_TexBro.m_textureScale));
   GlobalPreferenceSystem().registerPreference(
       "UniformTextureSize",

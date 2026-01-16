@@ -65,7 +65,7 @@ const Vector3& Camera_getViewVector( CamWnd& camwnd );
 struct camwindow_globals_t
 {
 	Vector3 color_cameraback = { 0.25f, 0.25f, 0.25f };
-	Vector3 color_selbrushes3d = { 1.0f, 0.627451f, 0.0f };
+	Vector3 color_selbrushes3d = { 1.0f, 0.0f, 0.0f };
 
 	int m_nCubicScale = 14;
 

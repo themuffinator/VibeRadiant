@@ -8,12 +8,17 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QBuffer>
 #include <QDrag>
+#include <QEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLineEdit>
+#include <QMediaPlayer>
 #include <QMimeData>
 #include <QOpenGLWidget>
+#include <QPixmap>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStandardItemModel>
@@ -21,13 +26,17 @@
 #include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
+#include <QUrl>
 
 #include "assetdrop.h"
+#include "iarchive.h"
+#include "idatastream.h"
 #include "ifiletypes.h"
 #include "ifilesystem.h"
 #include "igl.h"
 #include "mainframe.h"
 #include "math/vector.h"
+#include "os/file.h"
 #include "string/string.h"
 #include "stream/stringstream.h"
 #include "view.h"
@@ -43,6 +52,10 @@
 #include "gtkutil/toolbar.h"
 #include "gtkutil/widget.h"
 
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+#include <QAudioOutput>
+#endif
+
 namespace {
 bool string_contains_nocase( const char* haystack, const char* needle ){
 	if ( string_empty( needle ) ) {
@@ -56,6 +69,31 @@ bool string_contains_nocase( const char* haystack, const char* needle ){
 		}
 	}
 	return false;
+}
+
+constexpr float kAssetBrowserHoverScale = 1.05f;
+constexpr float kAssetBrowserHoverLerp = 0.2f;
+constexpr float kAssetBrowserHoverEpsilon = 0.001f;
+
+float AssetBrowser_approachHoverScale( float current, float target ){
+	return current + ( target - current ) * kAssetBrowserHoverLerp;
+}
+
+QImage applyOpacity( QImage image, float opacity ){
+	if ( image.isNull() ) {
+		return image;
+	}
+	image = image.convertToFormat( QImage::Format_ARGB32 );
+	const int alphaScale = std::clamp( static_cast<int>( opacity * 255.0f ), 0, 255 );
+	for ( int y = 0; y < image.height(); ++y ) {
+		auto* line = reinterpret_cast<QRgb*>( image.scanLine( y ) );
+		for ( int x = 0; x < image.width(); ++x ) {
+			const int alpha = qAlpha( line[x] );
+			line[x] = qRgba( qRed( line[x] ), qGreen( line[x] ), qBlue( line[x] ),
+			                 ( alpha * alphaScale ) / 255 );
+		}
+	}
+	return image;
 }
 } // namespace
 
@@ -168,6 +206,16 @@ public:
 	DeferredAdjustment m_scrollAdjustment;
 	int m_cellSize = 80;
 	int m_currentSoundId = -1;
+	int m_hoverSoundId = -1;
+	float m_hoverScale = 1.0f;
+	float m_hoverScaleTarget = 1.0f;
+
+	QMediaPlayer* m_player = nullptr;
+	QBuffer* m_soundBuffer = nullptr;
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+	QAudioOutput* m_audioOutput = nullptr;
+#endif
+	int m_playingSoundId = -1;
 
 	CellPos constructCellPos() const {
 		return CellPos( m_width, m_cellSize, GlobalOpenGL().m_font->getPixelHeight() );
@@ -177,13 +225,202 @@ public:
 		if( m_currentSoundId >= static_cast<int>( m_visibleFiles.size() ) )
 			m_currentSoundId = -1;
 	}
+	void updateHover( int x, int z ){
+		setHoverId( constructCellPos().testSelect( x, z - m_originZ ) );
+	}
+	void clearHover(){
+		setHoverId( -1 );
+	}
+	int hoverSoundId() const {
+		return m_hoverSoundId;
+	}
+	float hoverScale() const {
+		return m_hoverScale;
+	}
+	float hoverScaleForIndex( int index ) const {
+		return index == m_hoverSoundId ? m_hoverScale : 1.0f;
+	}
+	float hoverAlpha() const {
+		if ( m_hoverSoundId < 0 ) {
+			return 0.0f;
+		}
+		return std::clamp( ( m_hoverScale - 1.0f ) / ( kAssetBrowserHoverScale - 1.0f ), 0.0f, 1.0f );
+	}
+	bool updateHoverAnimation(){
+		if ( m_hoverSoundId < 0 ) {
+			m_hoverScale = 1.0f;
+			m_hoverScaleTarget = 1.0f;
+			return false;
+		}
+		if ( m_hoverSoundId >= static_cast<int>( m_visibleFiles.size() ) ) {
+			m_hoverSoundId = -1;
+			m_hoverScale = 1.0f;
+			m_hoverScaleTarget = 1.0f;
+			return false;
+		}
+		const float previous = m_hoverScale;
+		m_hoverScale = AssetBrowser_approachHoverScale( m_hoverScale, m_hoverScaleTarget );
+		if ( std::fabs( m_hoverScale - m_hoverScaleTarget ) < kAssetBrowserHoverEpsilon ) {
+			m_hoverScale = m_hoverScaleTarget;
+		}
+		else{
+			queueDraw();
+		}
+		if ( m_hoverScaleTarget <= 1.0f + kAssetBrowserHoverEpsilon
+		  && m_hoverScale <= 1.0f + kAssetBrowserHoverEpsilon ) {
+			m_hoverScale = 1.0f;
+			m_hoverScaleTarget = 1.0f;
+			m_hoverSoundId = -1;
+		}
+		return std::fabs( m_hoverScale - previous ) > kAssetBrowserHoverEpsilon;
+	}
 	CopiedString currentSoundPath() const {
-		if ( m_currentSoundId < 0 || m_currentSoundId >= static_cast<int>( m_visibleFiles.size() ) ) {
+		return soundPathForIndex( m_currentSoundId );
+	}
+	CopiedString soundPathForIndex( int index ) const {
+		if ( index < 0 || index >= static_cast<int>( m_visibleFiles.size() ) ) {
 			return CopiedString( "" );
 		}
-		return CopiedString( StringStream<256>( "sound/", m_currentFolderPath, m_visibleFiles[m_currentSoundId].c_str() ) );
+		return CopiedString( StringStream<256>( "sound/", m_currentFolderPath, m_visibleFiles[index].c_str() ) );
+	}
+	bool isPlayingIndex( int index ) const {
+		return index >= 0 && index == m_playingSoundId;
+	}
+	void stopPlayback(){
+		if ( m_player == nullptr ) {
+			return;
+		}
+		m_player->stop();
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+		m_player->setSource( QUrl() );
+		m_player->setSourceDevice( nullptr, QUrl() );
+#else
+		m_player->setMedia( QMediaContent() );
+#endif
+		if ( m_soundBuffer != nullptr ) {
+			m_soundBuffer->close();
+			delete m_soundBuffer;
+			m_soundBuffer = nullptr;
+		}
+		m_playingSoundId = -1;
+		queueDraw();
+	}
+	bool playSoundForIndex( int index ){
+		if ( index < 0 || index >= static_cast<int>( m_visibleFiles.size() ) ) {
+			return false;
+		}
+		ensureAudio();
+		stopPlayback();
+		const CopiedString soundPath = soundPathForIndex( index );
+		if ( soundPath.empty() || !loadSound( soundPath.c_str() ) ) {
+			return false;
+		}
+		m_playingSoundId = index;
+		queueDraw();
+		m_player->play();
+		return true;
 	}
 private:
+	void ensureAudio(){
+		if ( m_player != nullptr ) {
+			return;
+		}
+		m_player = new QMediaPlayer( m_parent );
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+		m_audioOutput = new QAudioOutput( m_parent );
+		m_player->setAudioOutput( m_audioOutput );
+#else
+		m_player->setVolume( 100 );
+#endif
+		QObject::connect( m_player, &QMediaPlayer::mediaStatusChanged, [this]( QMediaPlayer::MediaStatus status ){
+			if ( status == QMediaPlayer::EndOfMedia || status == QMediaPlayer::InvalidMedia ) {
+				m_playingSoundId = -1;
+				queueDraw();
+			}
+		} );
+	}
+	bool loadSound( const char* soundPath ){
+		const char* root = GlobalFileSystem().findFile( soundPath );
+		if ( !string_empty( root ) ) {
+			const auto absolute = StringStream<512>( root, soundPath );
+			if ( file_exists( absolute ) ) {
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+				m_player->setSource( QUrl::fromLocalFile( QString::fromLatin1( absolute.c_str() ) ) );
+#else
+				m_player->setMedia( QUrl::fromLocalFile( QString::fromLatin1( absolute.c_str() ) ) );
+#endif
+				return true;
+			}
+		}
+
+		ArchiveFile* file = GlobalFileSystem().openFile( soundPath );
+		if ( file == nullptr ) {
+			return false;
+		}
+
+		const std::size_t size = file->size();
+		QByteArray data;
+		if ( size > 0 ) {
+			data.resize( static_cast<int>( size ) );
+			InputStream& stream = file->getInputStream();
+			std::size_t total = 0;
+			while ( total < size ) {
+				const std::size_t read = stream.read( reinterpret_cast<InputStream::byte_type*>( data.data() + total ), size - total );
+				if ( read == 0 ) {
+					break;
+				}
+				total += read;
+			}
+			if ( total < size ) {
+				data.truncate( static_cast<int>( total ) );
+			}
+		}
+		file->release();
+		if ( data.isEmpty() ) {
+			return false;
+		}
+
+		if ( m_soundBuffer != nullptr ) {
+			m_soundBuffer->close();
+			delete m_soundBuffer;
+			m_soundBuffer = nullptr;
+		}
+		m_soundBuffer = new QBuffer( m_player );
+		m_soundBuffer->setData( data );
+		if ( !m_soundBuffer->open( QIODevice::ReadOnly ) ) {
+			delete m_soundBuffer;
+			m_soundBuffer = nullptr;
+			return false;
+		}
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+		m_player->setSourceDevice( m_soundBuffer, QUrl( QString::fromLatin1( soundPath ) ) );
+#else
+		m_player->setMedia( QUrl( QString::fromLatin1( soundPath ) ), m_soundBuffer );
+#endif
+		return true;
+	}
+	void setHoverId( int hoverId ){
+		if ( hoverId >= static_cast<int>( m_visibleFiles.size() ) ) {
+			hoverId = -1;
+		}
+		if ( hoverId < 0 ) {
+			if ( m_hoverSoundId >= 0 && m_hoverScaleTarget != 1.0f ) {
+				m_hoverScaleTarget = 1.0f;
+				queueDraw();
+			}
+			return;
+		}
+
+		const bool idChanged = hoverId != m_hoverSoundId;
+		if ( idChanged ) {
+			m_hoverSoundId = hoverId;
+			m_hoverScale = 1.0f;
+		}
+		if ( idChanged || m_hoverScaleTarget != kAssetBrowserHoverScale ) {
+			m_hoverScaleTarget = kAssetBrowserHoverScale;
+			queueDraw();
+		}
+	}
 	int totalHeight() const {
 		return constructCellPos().totalHeight( m_height, m_visibleFiles.size() );
 	}
@@ -260,6 +497,8 @@ SoundBrowser g_SoundBrowser;
 static void SoundBrowser_updateVisibleFiles(){
 	g_SoundBrowser.m_visibleFiles.clear();
 	g_SoundBrowser.m_currentSoundId = -1;
+	g_SoundBrowser.stopPlayback();
+	g_SoundBrowser.clearHover();
 	if ( g_SoundBrowser.m_currentFolder == nullptr ) {
 		g_SoundBrowser.queueDraw();
 		return;
@@ -275,8 +514,38 @@ static void SoundBrowser_updateVisibleFiles(){
 	g_SoundBrowser.queueDraw();
 }
 
-static void SoundBrowser_drawSpeaker( const Vector3& origin, const CellPos& cellPos, bool selected ){
-	const float size = cellPos.getCellSize() * 0.7f;
+static QRect SoundBrowser_cellRectPixels( const SoundBrowser& browser, int index ){
+	const CellPos cellPos = browser.constructCellPos();
+	const Vector3 origin = cellPos.getOrigin( index );
+	const float cellSize = cellPos.getCellSize();
+	const float minx = origin.x() - cellSize;
+	const float maxx = origin.x() + cellSize;
+	const float minz = origin.z() - cellSize;
+	const float maxz = origin.z() + cellSize;
+	const int x = float_to_integer( minx );
+	const int y = float_to_integer( browser.m_originZ - maxz );
+	const int w = float_to_integer( maxx - minx );
+	const int h = float_to_integer( maxz - minz );
+	return QRect( x, y, w, h );
+}
+
+static QPixmap SoundBrowser_dragPixmap( SoundBrowser& browser ){
+	if ( browser.m_gl_widget == nullptr || browser.m_currentSoundId < 0 ) {
+		return QPixmap();
+	}
+	QImage frame = browser.m_gl_widget->grabFramebuffer();
+	QRect rect = SoundBrowser_cellRectPixels( browser, browser.m_currentSoundId ).intersected( frame.rect() );
+	if ( rect.isEmpty() ) {
+		return QPixmap();
+	}
+	QImage tile = applyOpacity( frame.copy( rect ), 0.6f );
+	QPixmap pixmap = QPixmap::fromImage( tile );
+	pixmap.setDevicePixelRatio( browser.m_gl_widget->devicePixelRatioF() );
+	return pixmap;
+}
+
+static void SoundBrowser_drawSpeaker( const Vector3& origin, const CellPos& cellPos, bool selected, bool playing, float scale ){
+	const float size = cellPos.getCellSize() * 0.7f * scale;
 	const float half = size * 0.5f;
 	const float bodyWidth = size * 0.35f;
 	const float bodyHalf = size * 0.35f;
@@ -289,29 +558,46 @@ static void SoundBrowser_drawSpeaker( const Vector3& origin, const CellPos& cell
 	const float coneBaseX = bodyMaxX + size * 0.05f;
 	const float coneTipX = origin.x() + half;
 
-	if ( selected ) {
-		gl().glColor4f( 1.f, 0.9f, 0.2f, 1.f );
+	if ( playing ) {
+		gl().glColor4f( 0.9f, 0.2f, 0.2f, 1.f );
 	}
 	else{
-		gl().glColor4f( 0.9f, 0.9f, 0.9f, 1.f );
+		if ( selected ) {
+			gl().glColor4f( 1.f, 0.9f, 0.2f, 1.f );
+		}
+		else{
+			gl().glColor4f( 0.9f, 0.9f, 0.9f, 1.f );
+		}
 	}
 
-	gl().glBegin( GL_QUADS );
-	gl().glVertex3f( bodyMinX, 0, bodyMaxZ );
-	gl().glVertex3f( bodyMinX, 0, bodyMinZ );
-	gl().glVertex3f( bodyMaxX, 0, bodyMinZ );
-	gl().glVertex3f( bodyMaxX, 0, bodyMaxZ );
-	gl().glEnd();
+	if ( playing ) {
+		const float stopHalf = size * 0.3f;
+		gl().glBegin( GL_QUADS );
+		gl().glVertex3f( origin.x() - stopHalf, 0, origin.z() + stopHalf );
+		gl().glVertex3f( origin.x() - stopHalf, 0, origin.z() - stopHalf );
+		gl().glVertex3f( origin.x() + stopHalf, 0, origin.z() - stopHalf );
+		gl().glVertex3f( origin.x() + stopHalf, 0, origin.z() + stopHalf );
+		gl().glEnd();
+	}
+	else{
+		gl().glBegin( GL_QUADS );
+		gl().glVertex3f( bodyMinX, 0, bodyMaxZ );
+		gl().glVertex3f( bodyMinX, 0, bodyMinZ );
+		gl().glVertex3f( bodyMaxX, 0, bodyMinZ );
+		gl().glVertex3f( bodyMaxX, 0, bodyMaxZ );
+		gl().glEnd();
 
-	gl().glBegin( GL_TRIANGLES );
-	gl().glVertex3f( coneBaseX, 0, bodyMinZ );
-	gl().glVertex3f( coneBaseX, 0, bodyMaxZ );
-	gl().glVertex3f( coneTipX, 0, origin.z() );
-	gl().glEnd();
+		gl().glBegin( GL_TRIANGLES );
+		gl().glVertex3f( coneBaseX, 0, bodyMinZ );
+		gl().glVertex3f( coneBaseX, 0, bodyMaxZ );
+		gl().glVertex3f( coneTipX, 0, origin.z() );
+		gl().glEnd();
+	}
 }
 
 void SoundBrowser_render(){
 	g_SoundBrowser.validate();
+	g_SoundBrowser.updateHoverAnimation();
 
 	const int W = g_SoundBrowser.m_width;
 	const int H = g_SoundBrowser.m_height;
@@ -413,9 +699,33 @@ void SoundBrowser_render(){
 			for ( const CopiedString& file : g_SoundBrowser.m_visibleFiles ) {
 				(void)file;
 				const Vector3 origin = cellPos.getOrigin();
-				SoundBrowser_drawSpeaker( origin, cellPos, index == g_SoundBrowser.m_currentSoundId );
+				const bool selected = index == g_SoundBrowser.m_currentSoundId;
+				const bool playing = g_SoundBrowser.isPlayingIndex( index );
+				const float scale = g_SoundBrowser.hoverScaleForIndex( index );
+				SoundBrowser_drawSpeaker( origin, cellPos, selected, playing, scale );
 				++cellPos;
 				++index;
+			}
+		}
+		{	// hover outline
+			const int hoverId = g_SoundBrowser.hoverSoundId();
+			if ( hoverId >= 0 ) {
+				const CellPos cellPos = g_SoundBrowser.constructCellPos();
+				const Vector3 origin = cellPos.getOrigin( hoverId );
+				const float cellSize = cellPos.getCellSize() * g_SoundBrowser.hoverScale();
+				const float minx = origin.x() - cellSize;
+				const float maxx = origin.x() + cellSize;
+				const float minz = origin.z() - cellSize;
+				const float maxz = origin.z() + cellSize;
+				gl().glLineWidth( 2 );
+				gl().glColor4f( 1.f, 0.9f, 0.2f, 1.f );
+				gl().glBegin( GL_LINE_LOOP );
+				gl().glVertex3f( minx, 0, maxz );
+				gl().glVertex3f( minx, 0, minz );
+				gl().glVertex3f( maxx, 0, minz );
+				gl().glVertex3f( maxx, 0, maxz );
+				gl().glEnd();
+				gl().glLineWidth( 1 );
 			}
 		}
 
@@ -445,6 +755,7 @@ class SoundBrowserGLWidget : public QOpenGLWidget
 	QPoint m_dragStart;
 public:
 	SoundBrowserGLWidget( SoundBrowser& soundBrowser ) : QOpenGLWidget(), m_sndBro( soundBrowser ){
+		setMouseTracking( true );
 	}
 
 	~SoundBrowserGLWidget() override {
@@ -487,9 +798,16 @@ protected:
 	void mousePressEvent( QMouseEvent *event ) override {
 		setFocus();
 		const auto press = m_mouse.press( event );
+		if ( press == MousePresses::Left2x ) {
+			const QPoint localPos = mouseEventLocalPos( event );
+			m_sndBro.testSelect( localPos.x() * m_scale, localPos.y() * m_scale );
+			m_sndBro.playSoundForIndex( m_sndBro.m_currentSoundId );
+			return;
+		}
 		if ( press == MousePresses::Left || press == MousePresses::Right ) {
 			m_sndBro.tracking_MouseDown();
 			if ( press == MousePresses::Left ) {
+				m_sndBro.stopPlayback();
 				const QPoint localPos = mouseEventLocalPos( event );
 				m_dragStart = localPos;
 				m_sndBro.testSelect( localPos.x() * m_scale, localPos.y() * m_scale );
@@ -497,6 +815,11 @@ protected:
 		}
 	}
 	void mouseMoveEvent( QMouseEvent *event ) override {
+		if ( event->buttons() == Qt::MouseButton::NoButton ) {
+			const QPoint localPos = mouseEventLocalPos( event );
+			m_sndBro.updateHover( localPos.x() * m_scale, localPos.y() * m_scale );
+			return;
+		}
 		if ( !( event->buttons() & Qt::MouseButton::LeftButton ) ) {
 			return;
 		}
@@ -510,13 +833,23 @@ protected:
 			return;
 		}
 
+		m_sndBro.tracking_MouseUp();
 		auto* mimeData = new QMimeData;
 		mimeData->setData( kSoundBrowserMimeType, QByteArray( soundPath.c_str() ) );
 		mimeData->setText( soundPath.c_str() );
 
 		auto* drag = new QDrag( this );
 		drag->setMimeData( mimeData );
+		const QPixmap pixmap = SoundBrowser_dragPixmap( m_sndBro );
+		if ( !pixmap.isNull() ) {
+			drag->setPixmap( pixmap );
+			drag->setHotSpot( pixmap.rect().center() );
+		}
 		drag->exec( Qt::CopyAction );
+	}
+	void leaveEvent( QEvent *event ) override {
+		m_sndBro.clearHover();
+		QOpenGLWidget::leaveEvent( event );
 	}
 	void mouseReleaseEvent( QMouseEvent *event ) override {
 		const auto release = m_mouse.release( event );
@@ -739,6 +1072,7 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 }
 
 void SoundBrowser_destroyWindow(){
+	g_SoundBrowser.stopPlayback();
 	g_SoundBrowser.m_gl_widget = nullptr;
 }
 
@@ -746,4 +1080,5 @@ void SoundBrowser_Construct(){
 }
 
 void SoundBrowser_Destroy(){
+	g_SoundBrowser.stopPlayback();
 }

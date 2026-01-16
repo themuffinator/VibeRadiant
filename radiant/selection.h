@@ -40,6 +40,7 @@ public:
 SelectionSystemWindowObserver* NewWindowObserver();
 
 void SelectionSystem_connectTransformsCallbacks( const std::array<Callback<void(const char*)>, 4>& callbacks );
+void SelectionSystem_ChangeManipulatorSize( int direction );
 
 #include "math/vectorfwd.h"
 

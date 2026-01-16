@@ -22,4 +22,6 @@
 #pragma once
 
 void ShaderCache_setBumpEnabled( bool enabled );
+void ShaderCache_setShaderAnimation( bool enabled );
+bool ShaderCache_getShaderAnimation();
 void ShaderCache_extensionsInitialised();

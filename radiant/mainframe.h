@@ -40,9 +40,10 @@ const int c_status_position = 1;
 const int c_status_brushcount = 2;
 const int c_status_patchcount = 3;
 const int c_status_entitycount = 4;
-const int c_status_texture = 5;
-const int c_status_grid = 6;
-const int c_status__count = 7;
+const int c_status_brushsize = 5;
+const int c_status_texture = 6;
+const int c_status_grid = 7;
+const int c_status__count = 8;
 
 class MainFrame
 {

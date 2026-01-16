@@ -65,6 +65,7 @@
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QMimeData>
+#include <QTimer>
 
 #include <QApplication>
 
@@ -169,6 +170,7 @@ struct camwindow_globals_private_t
 	int m_MSAA = 8;
 	bool m_bShowWorkzone = true;
 	bool m_bShowSize = true;
+	bool m_bAnimateShaders = true;
 	bool m_bNoStippleInObjectMode = false;
 };
 
@@ -954,6 +956,7 @@ class CamWnd
 public:
 	QWidget* m_gl_widget;
 	QWidget* m_parent;
+	QTimer* m_shaderAnimTimer;
 
 	SelectionSystemWindowObserver* m_window_observer;
 	XORRectangle m_XORRectangle;
@@ -975,6 +978,20 @@ public:
 		}
 		//globalOutputStream() << "queue... ";
 		m_deferredDraw.draw();
+	}
+	void setShaderAnimationEnabled( bool enabled ){
+		if ( m_shaderAnimTimer == nullptr ) {
+			return;
+		}
+		if ( enabled ) {
+			if ( !m_shaderAnimTimer->isActive() ) {
+				m_shaderAnimTimer->start();
+			}
+		}
+		else
+		{
+			m_shaderAnimTimer->stop();
+		}
 	}
 	void draw();
 
@@ -1734,7 +1751,10 @@ private:
 		if ( mimeData == nullptr ) {
 			return false;
 		}
-		return mimeData->hasFormat( kEntityBrowserMimeType ) || mimeData->hasFormat( kSoundBrowserMimeType );
+		return mimeData->hasFormat( kEntityBrowserMimeType )
+		    || mimeData->hasFormat( kSoundBrowserMimeType )
+		    || mimeData->hasFormat( kTextureBrowserMimeType )
+		    || mimeData->hasFormat( kModelBrowserMimeType );
 	}
 	bool handleDrop( const QPointF& position, const QMimeData* mimeData ) const {
 		if ( !canAcceptDrop( mimeData ) ) {
@@ -1767,6 +1787,18 @@ private:
 				return AssetDrop_handleSoundPath( payload.constData(), intersection );
 			}
 		}
+		if ( mimeData->hasFormat( kTextureBrowserMimeType ) ) {
+			const QByteArray payload = mimeData->data( kTextureBrowserMimeType );
+			if ( !payload.isEmpty() ) {
+				return AssetDrop_handleTexture( payload.constData(), intersection );
+			}
+		}
+		if ( mimeData->hasFormat( kModelBrowserMimeType ) ) {
+			const QByteArray payload = mimeData->data( kModelBrowserMimeType );
+			if ( !payload.isEmpty() ) {
+				return AssetDrop_handleModelPath( payload.constData(), intersection );
+			}
+		}
 
 		return false;
 	}
@@ -1782,9 +1814,20 @@ CamWnd::CamWnd() :
 	m_window_observer( NewWindowObserver() ),
 	m_deferredDraw( WidgetQueueDrawCaller( *m_gl_widget ) ),
 	m_deferred_motion( [this]( const QMouseEvent& event ){ selection_motion( event, m_window_observer ); } ),
+	m_shaderAnimTimer( nullptr ),
 	m_drawing( false )
 {
 	m_bFreeMove = false;
+
+	m_shaderAnimTimer = new QTimer( m_gl_widget );
+	m_shaderAnimTimer->setInterval( 33 );
+	QObject::connect( m_shaderAnimTimer, &QTimer::timeout, [this](){
+		if ( m_gl_widget != nullptr && m_gl_widget->isVisible() ) {
+			m_drawRequired = true;
+			queue_draw();
+		}
+	} );
+	setShaderAnimationEnabled( g_camwindow_globals_private.m_bAnimateShaders );
 
 	GlobalWindowObservers_add( m_window_observer );
 	GlobalWindowObservers_connectWidget( m_gl_widget );
@@ -1804,6 +1847,9 @@ CamWnd::CamWnd() :
 CamWnd::~CamWnd(){
 	if ( m_bFreeMove ) {
 		DisableFreeMove();
+	}
+	if ( m_shaderAnimTimer != nullptr ) {
+		m_shaderAnimTimer->stop();
 	}
 
 	CamWnd_Remove_Handlers_Move( *this );
@@ -2030,6 +2076,22 @@ void ShowSize3dToggle(){
 	if ( g_camwnd != 0 ) {
 		CamWnd_Update( *g_camwnd );
 	}
+}
+
+void CamWnd_AnimateShadersImport( bool value ){
+	g_camwindow_globals_private.m_bAnimateShaders = value;
+	ShaderCache_setShaderAnimation( value );
+	if ( g_camwnd != 0 ) {
+		g_camwnd->setShaderAnimationEnabled( value );
+		CamWnd_Update( *g_camwnd );
+	}
+}
+typedef FreeCaller<void(bool), CamWnd_AnimateShadersImport> CamWndAnimateShadersImportCaller;
+
+ToggleItem g_animate_shaders( BoolExportCaller( g_camwindow_globals_private.m_bAnimateShaders ) );
+void AnimateShadersToggle(){
+	CamWnd_AnimateShadersImport( !g_camwindow_globals_private.m_bAnimateShaders );
+	g_animate_shaders.update();
 }
 
 void CamWnd::Cam_Draw(){
@@ -2525,6 +2587,11 @@ void Camera_constructPreferences( PreferencesPage& page ){
 	    BoolExportCaller( g_camwindow_globals_private.m_bFaceWire )
 	);
 	page.appendCheckBox(
+	    "", "Animate shaders",
+	    CamWndAnimateShadersImportCaller(),
+	    BoolExportCaller( g_camwindow_globals_private.m_bAnimateShaders )
+	);
+	page.appendCheckBox(
 	    "", "No dots in Object mode",
 	    BoolImportCaller( g_camwindow_globals_private.m_bNoStippleInObjectMode ),
 	    BoolExportCaller( g_camwindow_globals_private.m_bNoStippleInObjectMode )
@@ -2642,10 +2709,12 @@ void CamWnd_Construct(){
 	GlobalToggles_insert( "ShowStats", makeCallbackF( ShowStatsToggle ), ToggleItem::AddCallbackCaller( g_show_stats ) );
 	GlobalToggles_insert( "ShowWorkzone3d", makeCallbackF( ShowWorkzone3dToggle ), ToggleItem::AddCallbackCaller( g_show_workzone3d ) );
 	GlobalToggles_insert( "ShowSize3d", makeCallbackF( ShowSize3dToggle ), ToggleItem::AddCallbackCaller( g_show_size3d ) );
+	GlobalToggles_insert( "AnimateShaders", makeCallbackF( AnimateShadersToggle ), ToggleItem::AddCallbackCaller( g_animate_shaders ) );
 
 	GlobalPreferenceSystem().registerPreference( "ShowStats", BoolImportStringCaller( g_camwindow_globals.m_showStats ), BoolExportStringCaller( g_camwindow_globals.m_showStats ) );
 	GlobalPreferenceSystem().registerPreference( "ShowWorkzone3d", BoolImportStringCaller( g_camwindow_globals_private.m_bShowWorkzone ), BoolExportStringCaller( g_camwindow_globals_private.m_bShowWorkzone ) );
 	GlobalPreferenceSystem().registerPreference( "ShowSize3d", BoolImportStringCaller( g_camwindow_globals_private.m_bShowSize ), BoolExportStringCaller( g_camwindow_globals_private.m_bShowSize ) );
+	GlobalPreferenceSystem().registerPreference( "CameraAnimateShaders", makeBoolStringImportCallback( CamWndAnimateShadersImportCaller() ), BoolExportStringCaller( g_camwindow_globals_private.m_bAnimateShaders ) );
 	GlobalPreferenceSystem().registerPreference( "CamMoveSpeed", IntImportStringCaller( g_camwindow_globals_private.m_nMoveSpeed ), IntExportStringCaller( g_camwindow_globals_private.m_nMoveSpeed ) );
 	GlobalPreferenceSystem().registerPreference( "CamMoveTimeToMaxSpeed", IntImportStringCaller( g_camwindow_globals_private.m_time_toMaxSpeed ), IntExportStringCaller( g_camwindow_globals_private.m_time_toMaxSpeed ) );
 	GlobalPreferenceSystem().registerPreference( "ScrollMoveSpeed", IntImportStringCaller( g_camwindow_globals_private.m_nScrollMoveSpeed ), IntExportStringCaller( g_camwindow_globals_private.m_nScrollMoveSpeed ) );

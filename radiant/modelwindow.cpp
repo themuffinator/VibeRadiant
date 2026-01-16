@@ -23,6 +23,8 @@
 
 #include <set>
 #include <deque>
+#include <algorithm>
+#include <cmath>
 #include "ifiletypes.h"
 #include "ifilesystem.h"
 #include "iarchive.h"
@@ -37,6 +39,7 @@
 #include "stringio.h"
 #include "stream/stringstream.h"
 #include "generic/callback.h"
+#include "assetdrop.h"
 
 #include "gtkutil/glwidget.h"
 #include "gtkutil/toolbar.h"
@@ -47,6 +50,7 @@
 #include "gtkutil/widget.h"
 
 #include <QWidget>
+#include <QApplication>
 #include <QToolBar>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -56,6 +60,11 @@
 #include <QStandardItemModel>
 #include <QScrollBar>
 #include <QOpenGLWidget>
+#include <QEvent>
+#include <QDrag>
+#include <QImage>
+#include <QMimeData>
+#include <QPixmap>
 
 #include "mainframe.h"
 #include "camwindow.h"
@@ -63,6 +72,34 @@
 #include "instancelib.h"
 #include "traverselib.h"
 #include "selectionlib.h"
+#include "gtkmisc.h"
+
+namespace {
+constexpr float kAssetBrowserHoverScale = 1.05f;
+constexpr float kAssetBrowserHoverLerp = 0.2f;
+constexpr float kAssetBrowserHoverEpsilon = 0.001f;
+
+float AssetBrowser_approachHoverScale( float current, float target ){
+	return current + ( target - current ) * kAssetBrowserHoverLerp;
+}
+
+QImage applyOpacity( QImage image, float opacity ){
+	if ( image.isNull() ) {
+		return image;
+	}
+	image = image.convertToFormat( QImage::Format_ARGB32 );
+	const int alphaScale = std::clamp( static_cast<int>( opacity * 255.0f ), 0, 255 );
+	for ( int y = 0; y < image.height(); ++y ) {
+		auto* line = reinterpret_cast<QRgb*>( image.scanLine( y ) );
+		for ( int x = 0; x < image.width(); ++x ) {
+			const int alpha = qAlpha( line[x] );
+			line[x] = qRgba( qRed( line[x] ), qGreen( line[x] ), qBlue( line[x] ),
+			                 ( alpha * alphaScale ) / 255 );
+		}
+	}
+	return image;
+}
+} // namespace
 
 
 /* specialized copy of class CompiledGraph */
@@ -497,6 +534,9 @@ public:
 	void operator++(){
 		++m_index;
 	}
+	int index() const {
+		return m_index;
+	}
 	Vector3 getOrigin( int index ) const { // origin of model square
 		const int x = ( index % m_cellsInRow ) * m_cellSize * 2 + m_cellSize + ( index % m_cellsInRow + 1 ) * m_plusWidth;
 		const int z = ( index / m_cellsInRow ) * m_cellSize * 2 + m_cellSize + ( index / m_cellsInRow + 1 ) * ( m_fontHeight + m_plusHeight );
@@ -557,6 +597,9 @@ public:
 	CopiedString m_currentFolderPath;
 	const ModelFS* m_currentFolder = nullptr;
 	int m_currentModelId = -1; // selected model index in m_modelInstances, m_currentFolder->m_files; these must be in sync!
+	int m_hoverModelId = -1;
+	float m_hoverScale = 1.0f;
+	float m_hoverScaleTarget = 1.0f;
 
 	CellPos constructCellPos() const {
 		return CellPos( m_width, m_cellSize, GlobalOpenGL().m_font->getPixelHeight() );
@@ -566,7 +609,78 @@ public:
 		if( m_currentModelId >= static_cast<int>( m_modelInstances.size() ) )
 			m_currentModelId = -1;
 	}
+	void updateHover( int x, int z ){
+		setHoverId( constructCellPos().testSelect( x, z - m_originZ ) );
+	}
+	void clearHover(){
+		setHoverId( -1 );
+	}
+	int hoverModelId() const {
+		return m_hoverModelId;
+	}
+	float hoverScale() const {
+		return m_hoverScale;
+	}
+	float hoverScaleForIndex( int index ) const {
+		return index == m_hoverModelId ? m_hoverScale : 1.0f;
+	}
+	float hoverAlpha() const {
+		if ( m_hoverModelId < 0 ) {
+			return 0.0f;
+		}
+		return std::clamp( ( m_hoverScale - 1.0f ) / ( kAssetBrowserHoverScale - 1.0f ), 0.0f, 1.0f );
+	}
+	bool updateHoverAnimation(){
+		if ( m_hoverModelId < 0 ) {
+			m_hoverScale = 1.0f;
+			m_hoverScaleTarget = 1.0f;
+			return false;
+		}
+		if ( m_hoverModelId >= static_cast<int>( m_modelInstances.size() ) ) {
+			m_hoverModelId = -1;
+			m_hoverScale = 1.0f;
+			m_hoverScaleTarget = 1.0f;
+			return false;
+		}
+		const float previous = m_hoverScale;
+		m_hoverScale = AssetBrowser_approachHoverScale( m_hoverScale, m_hoverScaleTarget );
+		if ( std::fabs( m_hoverScale - m_hoverScaleTarget ) < kAssetBrowserHoverEpsilon ) {
+			m_hoverScale = m_hoverScaleTarget;
+		}
+		else{
+			queueDraw();
+		}
+		if ( m_hoverScaleTarget <= 1.0f + kAssetBrowserHoverEpsilon
+		  && m_hoverScale <= 1.0f + kAssetBrowserHoverEpsilon ) {
+			m_hoverScale = 1.0f;
+			m_hoverScaleTarget = 1.0f;
+			m_hoverModelId = -1;
+		}
+		return std::fabs( m_hoverScale - previous ) > kAssetBrowserHoverEpsilon;
+	}
 private:
+	void setHoverId( int hoverId ){
+		if ( hoverId >= static_cast<int>( m_modelInstances.size() ) ) {
+			hoverId = -1;
+		}
+		if ( hoverId < 0 ) {
+			if ( m_hoverModelId >= 0 && m_hoverScaleTarget != 1.0f ) {
+				m_hoverScaleTarget = 1.0f;
+				queueDraw();
+			}
+			return;
+		}
+
+		const bool idChanged = hoverId != m_hoverModelId;
+		if ( idChanged ) {
+			m_hoverModelId = hoverId;
+			m_hoverScale = 1.0f;
+		}
+		if ( idChanged || m_hoverScaleTarget != kAssetBrowserHoverScale ) {
+			m_hoverScaleTarget = kAssetBrowserHoverScale;
+			queueDraw();
+		}
+	}
 	int totalHeight() const {
 		return constructCellPos().totalHeight( m_height, m_modelInstances.size() );
 	}
@@ -666,6 +780,36 @@ public:
 
 ModelBrowser g_ModelBrowser;
 
+static QRect ModelBrowser_cellRectPixels( const ModelBrowser& browser, int index ){
+	const CellPos cellPos = browser.constructCellPos();
+	const Vector3 origin = cellPos.getOrigin( index );
+	const float cellSize = cellPos.getCellSize();
+	const float minx = origin.x() - cellSize;
+	const float maxx = origin.x() + cellSize;
+	const float minz = origin.z() - cellSize;
+	const float maxz = origin.z() + cellSize;
+	const int x = float_to_integer( minx );
+	const int y = float_to_integer( browser.m_originZ - maxz );
+	const int w = float_to_integer( maxx - minx );
+	const int h = float_to_integer( maxz - minz );
+	return QRect( x, y, w, h );
+}
+
+static QPixmap ModelBrowser_dragPixmap( ModelBrowser& browser ){
+	if ( browser.m_gl_widget == nullptr || browser.m_currentModelId < 0 ) {
+		return QPixmap();
+	}
+	QImage frame = browser.m_gl_widget->grabFramebuffer();
+	QRect rect = ModelBrowser_cellRectPixels( browser, browser.m_currentModelId ).intersected( frame.rect() );
+	if ( rect.isEmpty() ) {
+		return QPixmap();
+	}
+	QImage tile = applyOpacity( frame.copy( rect ), 0.6f );
+	QPixmap pixmap = QPixmap::fromImage( tile );
+	pixmap.setDevicePixelRatio( browser.m_gl_widget->devicePixelRatioF() );
+	return pixmap;
+}
+
 
 
 
@@ -678,12 +822,11 @@ public:
 		if( TransformNode *transformNode = Node_getTransformNode( instance->path().parent() ) ){
 			if( Bounded *bounded = Instance_getBounded( *instance ) ){
 				AABB aabb = bounded->localAABB();
-				const float scale = m_cellPos.getCellSize() / aabb.extents[ vector3_max_abs_component_index( aabb.extents ) ];
-				aabb.extents.z() *= 2; // prioritize Z for orientation
-				const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees(
-				                             vector3_min_abs_component_index( aabb.extents ) == 0? Vector3( 0, 0, -90 )
-				                             : vector3_min_abs_component_index( aabb.extents ) == 2? Vector3( 90, 0, 0 )
-				                             : g_vector3_identity );
+				const float max_extent = std::max( { aabb.extents[0], aabb.extents[1], aabb.extents[2] } );
+				const int index = m_cellPos.index();
+				const float baseScale = max_extent > 0.0f ? m_cellPos.getCellSize() / max_extent : 1.0f;
+				const float scale = baseScale * g_ModelBrowser.hoverScaleForIndex( index );
+				const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( Vector3( 45, 0, 45 ) );
 				const_cast<Matrix4&>( transformNode->localToParent() ) =
 				        matrix4_multiplied_by_matrix4(
 				            matrix4_translation_for_vec3( m_cellPos.getOrigin() ),
@@ -760,6 +903,10 @@ origin -----> +x
 */
 void ModelBrowser_render(){
 	g_ModelBrowser.validate();
+	const bool hoverChanged = g_ModelBrowser.updateHoverAnimation();
+	if ( hoverChanged ) {
+		g_ModelBrowser.forEachModelInstance( models_set_transforms() );
+	}
 
 	const int W = g_ModelBrowser.m_width;
 	const int H = g_ModelBrowser.m_height;
@@ -936,6 +1083,27 @@ void ModelBrowser_render(){
 			gl().glDisable( GL_DEPTH_TEST );
 			gl().glLineWidth( 1 );
 		}
+		{	// hover outline
+			const int hoverId = g_ModelBrowser.hoverModelId();
+			if ( hoverId >= 0 ) {
+				const CellPos cellPos = g_ModelBrowser.constructCellPos();
+				const Vector3 origin = cellPos.getOrigin( hoverId );
+				const float cellSize = cellPos.getCellSize() * g_ModelBrowser.hoverScale();
+				const float minx = origin.x() - cellSize;
+				const float maxx = origin.x() + cellSize;
+				const float minz = origin.z() - cellSize;
+				const float maxz = origin.z() + cellSize;
+				gl().glLineWidth( 2 );
+				gl().glColor4f( 1.f, 0.9f, 0.2f, 1.f );
+				gl().glBegin( GL_LINE_LOOP );
+				gl().glVertex3f( minx, 0, maxz );
+				gl().glVertex3f( minx, 0, minz );
+				gl().glVertex3f( maxx, 0, minz );
+				gl().glVertex3f( maxx, 0, maxz );
+				gl().glEnd();
+				gl().glLineWidth( 1 );
+			}
+		}
 		{	// render model file names
 			CellPos cellPos = g_ModelBrowser.constructCellPos();
 			for( const CopiedString& string : g_ModelBrowser.m_currentFolder->m_files ){
@@ -959,11 +1127,14 @@ class ModelBrowserGLWidget : public QOpenGLWidget
 {
 	ModelBrowser& m_modBro;
 	FBO *m_fbo{};
-	qreal m_scale;
+	qreal m_scale = 1.0;
 	MousePresses m_mouse;
+	QPoint m_dragStart;
+	bool m_skipRelease = false;
 public:
 	ModelBrowserGLWidget( ModelBrowser& modelBrowser ) : QOpenGLWidget(), m_modBro( modelBrowser )
 	{
+		setMouseTracking( true );
 	}
 
 	~ModelBrowserGLWidget() override {
@@ -1014,9 +1185,47 @@ protected:
 			m_modBro.tracking_MouseDown();
 			if ( press == MousePresses::Left ) {
 				const QPoint localPos = mouseEventLocalPos( event );
+				m_dragStart = localPos;
 				m_modBro.testSelect( localPos.x() * m_scale, localPos.y() * m_scale );
 			}
 		}
+	}
+	void mouseMoveEvent( QMouseEvent *event ) override {
+		if ( event->buttons() == Qt::MouseButton::NoButton ) {
+			const QPoint localPos = mouseEventLocalPos( event );
+			m_modBro.updateHover( localPos.x() * m_scale, localPos.y() * m_scale );
+			return;
+		}
+		if ( !( event->buttons() & Qt::MouseButton::LeftButton ) ) {
+			return;
+		}
+		const QPoint localPos = mouseEventLocalPos( event );
+		if ( ( localPos - m_dragStart ).manhattanLength() < QApplication::startDragDistance() ) {
+			return;
+		}
+		if ( m_modBro.m_currentFolder == nullptr || m_modBro.m_currentModelId < 0 ) {
+			return;
+		}
+
+		const auto sstream = StringStream<128>( m_modBro.m_currentFolderPath, std::next( m_modBro.m_currentFolder->m_files.begin(), m_modBro.m_currentModelId )->c_str() );
+		auto* mimeData = new QMimeData;
+		mimeData->setData( kModelBrowserMimeType, QByteArray( sstream.c_str() ) );
+		mimeData->setText( sstream.c_str() );
+
+		m_modBro.tracking_MouseUp();
+		auto* drag = new QDrag( this );
+		drag->setMimeData( mimeData );
+		const QPixmap pixmap = ModelBrowser_dragPixmap( m_modBro );
+		if ( !pixmap.isNull() ) {
+			drag->setPixmap( pixmap );
+			drag->setHotSpot( pixmap.rect().center() );
+		}
+		m_skipRelease = true;
+		drag->exec( Qt::CopyAction );
+	}
+	void leaveEvent( QEvent *event ) override {
+		m_modBro.clearHover();
+		QOpenGLWidget::leaveEvent( event );
 	}
 	void mouseDoubleClick(){
 		/* create misc_model */
@@ -1050,6 +1259,10 @@ protected:
 	}
 	void mouseReleaseEvent( QMouseEvent *event ) override {
 		const auto release = m_mouse.release( event );
+		if ( m_skipRelease ) {
+			m_skipRelease = false;
+			return;
+		}
 		if ( release == MousePresses::Left || release == MousePresses::Right ) {
 			m_modBro.tracking_MouseUp();
 		}
@@ -1299,6 +1512,7 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		toolbar->setIconSize( QSize( iconSize, iconSize ) );
 
 		toolbar_append_button( toolbar, "Reload Model Folders Tree View", "refresh_modelstree.png", FreeCaller<void(), ModelBrowser_constructTree>() );
+		toolbar_append_button( toolbar, "Refresh Models", "refresh_models.png", "RefreshReferences" );
 	}
 	{	// TreeView
 		g_ModelBrowser.m_treeView = new TexBro_QTreeView;

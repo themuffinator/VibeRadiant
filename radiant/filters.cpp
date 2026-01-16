@@ -186,6 +186,9 @@ void Filters_constructMenu( QMenu* menu ){
 	create_check_menu_item_with_mnemonic( menu, "Details", "FilterDetails" );
 	create_check_menu_item_with_mnemonic( menu, "Hints", "FilterHintsSkips" );
 	create_check_menu_item_with_mnemonic( menu, "Models", "FilterModels" );
+	if ( g_pGameDescription->mGameType == "doom3" ) {
+		create_check_menu_item_with_mnemonic( menu, "Spline Movers", "FilterSplineMovers" );
+	}
 	create_check_menu_item_with_mnemonic( menu, "Triggers", "FilterTriggers" );
 	if ( g_pGameDescription->mGameType != "doom3" ) {
 		create_check_menu_item_with_mnemonic( menu, "Botclips", "FilterBotClips" );
@@ -236,6 +239,9 @@ void ConstructFilters(){
 	add_filter_command( EXCLUDE_DETAILS, "FilterDetails", QKeySequence( "Ctrl+D" ) );
 	add_filter_command( EXCLUDE_HINTSSKIPS, "FilterHintsSkips", QKeySequence( "Ctrl+Shift+H" ) );
 	add_filter_command( EXCLUDE_MODELS, "FilterModels", QKeySequence( "Shift+M" ) );
+	if ( g_pGameDescription->mGameType == "doom3" ) {
+		add_filter_command( EXCLUDE_SPLINEMOVERS, "FilterSplineMovers" );
+	}
 	add_filter_command( EXCLUDE_TRIGGERS, "FilterTriggers", QKeySequence( "Ctrl+Shift+T" ) );
 	if ( g_pGameDescription->mGameType != "doom3" ) {
 		add_filter_command( EXCLUDE_BOTCLIP, "FilterBotClips", QKeySequence( "Alt+M" ) );

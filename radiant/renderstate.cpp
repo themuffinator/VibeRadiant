@@ -95,6 +95,8 @@ std::size_t g_count_prims;
 std::size_t g_count_states;
 std::size_t g_count_transforms;
 Timer g_timer;
+Timer g_shaderAnimationTimer;
+bool g_shaderAnimationEnabled = true;
 
 inline void count_prim(){
 	++g_count_prims;
@@ -123,6 +125,13 @@ const char* Renderer_GetStats( int frame2frame ){
 		" | msec: ", g_timer.elapsed_msec(),
 		" | f2f: ", frame2frame
 	);
+}
+
+inline float ShaderCache_getShaderTime(){
+	if ( !g_shaderAnimationEnabled ) {
+		return 0.0f;
+	}
+	return static_cast<float>( g_shaderAnimationTimer.elapsed_sec() );
 }
 
 
@@ -699,6 +708,8 @@ private:
 
 	OpenGLState m_state;
 	Renderables m_renderables;
+	const IShader* m_stageShader = 0;
+	std::size_t m_stageIndex = 0;
 
 public:
 	void addRenderable( const OpenGLRenderable& renderable, const Matrix4& modelview, const RendererLight* light = 0 ){
@@ -707,6 +718,10 @@ public:
 
 	OpenGLState& state(){
 		return m_state;
+	}
+	void setStage( const IShader* shader, std::size_t stageIndex ){
+		m_stageShader = shader;
+		m_stageIndex = stageIndex;
 	}
 
 	void render( OpenGLState& current, unsigned int globalstate, const Vector3& viewer );
@@ -1277,6 +1292,19 @@ void ShaderCache_setBumpEnabled( bool enabled ){
 	g_ShaderCache->setLightingEnabled( enabled );
 }
 
+void ShaderCache_setShaderAnimation( bool enabled ){
+	if ( g_shaderAnimationEnabled != enabled ) {
+		g_shaderAnimationEnabled = enabled;
+		if ( g_shaderAnimationEnabled ) {
+			g_shaderAnimationTimer.start();
+		}
+	}
+}
+
+bool ShaderCache_getShaderAnimation(){
+	return g_shaderAnimationEnabled;
+}
+
 
 Vector3 g_DebugShaderColours[256];
 Shader* g_defaultPointLight = 0;
@@ -1384,6 +1412,7 @@ void OpenGLState_apply( const OpenGLState& self, OpenGLState& current, unsigned 
 
 	if ( self.m_state & RENDER_OVERRIDE ) {
 		globalstate |= RENDER_FILL;
+		globalstate |= self.m_state & ( RENDER_POLYGONSTIPPLE | RENDER_BLEND );
 	}
 	if ( self.m_state & RENDER_TEXT ) {
 		globalstate |= RENDER_TEXTURE | RENDER_BLEND | RENDER_FILL | RENDER_TEXT;
@@ -1701,6 +1730,37 @@ void OpenGLState_apply( const OpenGLState& self, OpenGLState& current, unsigned 
 	GlobalOpenGL_debugAssertNoErrors();
 }
 
+class ShaderStageLookup
+{
+	std::size_t m_targetIndex;
+	std::size_t m_index;
+	ShaderStage* m_out;
+	bool m_found;
+public:
+	ShaderStageLookup( std::size_t targetIndex, ShaderStage& out ) :
+		m_targetIndex( targetIndex ),
+		m_index( 0 ),
+		m_out( &out ),
+		m_found( false ){
+	}
+	void operator()( const ShaderStage& stage ){
+		if ( m_index == m_targetIndex ) {
+			*m_out = stage;
+			m_found = true;
+		}
+		++m_index;
+	}
+	bool found() const {
+		return m_found;
+	}
+};
+
+inline bool ShaderStage_getAtIndex( const IShader& shader, float time, std::size_t index, ShaderStage& out ){
+	ShaderStageLookup lookup( index, out );
+	shader.forEachStage( time, makeCallback( lookup ) );
+	return lookup.found();
+}
+
 void Renderables_flush( OpenGLStateBucket::Renderables& renderables, OpenGLState& current, unsigned int globalstate, const Vector3& viewer ){
 	const Matrix4* transform = 0;
 	gl().glPushMatrix();
@@ -1825,7 +1885,72 @@ void OpenGLStateBucket::render( OpenGLState& current, unsigned int globalstate, 
 	}
 	else if ( !m_renderables.empty() ) {
 		OpenGLState_apply( m_state, current, globalstate );
+		bool texgenEnabled = false;
+		bool texMatrixPushed = false;
+
+		if ( m_stageShader != 0 ) {
+			ShaderStage stage;
+			if ( ShaderStage_getAtIndex( *m_stageShader, ShaderCache_getShaderTime(), m_stageIndex, stage ) ) {
+				if ( ( current.m_state & RENDER_TEXTURE ) != 0 ) {
+					const GLint texture = stage.texture != 0 ? stage.texture->texture_number : 0;
+					setTextureState( current.m_texture, texture, GL_TEXTURE0 );
+					gl().glActiveTexture( GL_TEXTURE0 );
+					gl().glClientActiveTexture( GL_TEXTURE0 );
+					gl().glBindTexture( GL_TEXTURE_2D, texture );
+					gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+					gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+				}
+
+				if ( stage.tcGen == eTcGenEnvironment || stage.tcGen == eTcGenVector ) {
+					gl().glActiveTexture( GL_TEXTURE0 );
+					gl().glClientActiveTexture( GL_TEXTURE0 );
+					gl().glEnable( GL_TEXTURE_GEN_S );
+					gl().glEnable( GL_TEXTURE_GEN_T );
+					if ( stage.tcGen == eTcGenEnvironment ) {
+						gl().glTexGeni( GL_S, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP );
+						gl().glTexGeni( GL_T, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP );
+					}
+					else
+					{
+						const float planeS[4] = { stage.tcGenVec0.x(), stage.tcGenVec0.y(), stage.tcGenVec0.z(), 0.0f };
+						const float planeT[4] = { stage.tcGenVec1.x(), stage.tcGenVec1.y(), stage.tcGenVec1.z(), 0.0f };
+						gl().glTexGeni( GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+						gl().glTexGeni( GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+						gl().glTexGenfv( GL_S, GL_OBJECT_PLANE, planeS );
+						gl().glTexGenfv( GL_T, GL_OBJECT_PLANE, planeT );
+					}
+					texgenEnabled = true;
+				}
+
+				if ( stage.texMatrix != g_matrix4_identity ) {
+					gl().glActiveTexture( GL_TEXTURE0 );
+					gl().glMatrixMode( GL_TEXTURE );
+					gl().glPushMatrix();
+					gl().glLoadMatrixf( reinterpret_cast<const float*>( &stage.texMatrix ) );
+					gl().glMatrixMode( GL_MODELVIEW );
+					texMatrixPushed = true;
+				}
+
+				if ( ( current.m_state & RENDER_COLOURWRITE ) != 0 ) {
+					gl().glColor4f( stage.colour[0], stage.colour[1], stage.colour[2], stage.colour[3] );
+					current.m_colour = stage.colour;
+				}
+			}
+		}
+
 		Renderables_flush( m_renderables, current, globalstate, viewer );
+
+		if ( texMatrixPushed ) {
+			gl().glActiveTexture( GL_TEXTURE0 );
+			gl().glMatrixMode( GL_TEXTURE );
+			gl().glPopMatrix();
+			gl().glMatrixMode( GL_MODELVIEW );
+		}
+		if ( texgenEnabled ) {
+			gl().glActiveTexture( GL_TEXTURE0 );
+			gl().glDisable( GL_TEXTURE_GEN_S );
+			gl().glDisable( GL_TEXTURE_GEN_T );
+		}
 	}
 }
 
@@ -1894,6 +2019,44 @@ inline GLenum convertBlendFactor( BlendFactor factor ){
 		return GL_SRC_ALPHA_SATURATE;
 	}
 	return GL_ZERO;
+}
+
+inline GLenum convertStageAlphaFunc( ShaderStageAlphaFunc func ){
+	switch ( func )
+	{
+	case eStageAlphaGT0:
+		return GL_GREATER;
+	case eStageAlphaLT128:
+		return GL_LESS;
+	case eStageAlphaGE128:
+		return GL_GEQUAL;
+	case eStageAlphaNone:
+	default:
+		break;
+	}
+	return GL_ALWAYS;
+}
+
+inline GLenum convertStageDepthFunc( ShaderStageDepthFunc func ){
+	switch ( func )
+	{
+	case eStageDepthLess:
+		return GL_LESS;
+	case eStageDepthLEqual:
+		return GL_LEQUAL;
+	case eStageDepthEqual:
+		return GL_EQUAL;
+	case eStageDepthGreater:
+		return GL_GREATER;
+	case eStageDepthGEqual:
+		return GL_GEQUAL;
+	case eStageDepthAlways:
+		return GL_ALWAYS;
+	case eStageDepthNone:
+	default:
+		break;
+	}
+	return GL_LEQUAL;
 }
 
 /// \todo Define special-case shaders in a data file.
@@ -2129,7 +2292,7 @@ void OpenGLShader::construct( const char* name ){
 		}
 		else if ( string_equal( name + 1, "CLIPPER_OVERLAY" ) ) {
 			state.m_colour = Vector4( g_xywindow_globals.color_clipper, 1 );
-			state.m_state = RENDER_CULLFACE | RENDER_COLOURWRITE | RENDER_DEPTHWRITE | RENDER_FILL | RENDER_POLYGONSTIPPLE;
+			state.m_state = RENDER_CULLFACE | RENDER_COLOURWRITE | RENDER_DEPTHWRITE | RENDER_FILL | RENDER_POLYGONSTIPPLE | RENDER_OVERRIDE;
 			state.m_sort = OpenGLState::eSortOverlayFirst;
 		}
 		else if ( string_equal( name + 1, "CLIPPER_VOLUME_WIRE" ) ) {
@@ -2140,7 +2303,7 @@ void OpenGLShader::construct( const char* name ){
 		}
 		else if ( string_equal( name + 1, "CLIPPER_VIBE_FILL" ) ) {
 			state.m_colour = Vector4( 1, 0, 0, 0.25f );
-			state.m_state = RENDER_COLOURWRITE | RENDER_BLEND | RENDER_FILL | RENDER_POLYGONSTIPPLE;
+			state.m_state = RENDER_COLOURWRITE | RENDER_BLEND | RENDER_FILL | RENDER_POLYGONSTIPPLE | RENDER_OVERRIDE;
 			state.m_sort = OpenGLState::eSortOverlayFirst;
 		}
 		else if ( string_equal( name + 1, "CLIPPER_VIBE_CUTLINE" ) ) {
@@ -2203,6 +2366,62 @@ void OpenGLShader::construct( const char* name ){
 			state.m_sort = OpenGLState::eSortFullbright;
 
 			state.m_program = &g_skyboxGLSL;
+		}
+		else if ( m_shader->hasStages() )
+		{
+			std::vector<ShaderStage> stages;
+			struct StageCollector
+			{
+				std::vector<ShaderStage>* m_stages;
+				void operator()( const ShaderStage& stage ){
+					m_stages->push_back( stage );
+				}
+			} collector{ &stages };
+			m_shader->forEachStage( 0.0f, makeCallback( collector ) );
+
+			if ( stages.empty() ) {
+				return;
+			}
+
+			for ( std::size_t i = 0; i < stages.size(); ++i )
+			{
+				const ShaderStage& stage = stages[i];
+				OpenGLState& pass = ( i == 0 ) ? state : appendDefaultPass();
+				OpenGLStateBucket* bucket = m_passes.back();
+				bucket->setStage( m_shader, i );
+
+				pass.m_state = RENDER_FILL | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_COLOURWRITE | RENDER_LIGHTING | RENDER_SMOOTH;
+				if ( ( m_shader->getFlags() & QER_CULL ) != 0 ) {
+					if ( m_shader->getCull() == IShader::eCullBack ) {
+						pass.m_state |= RENDER_CULLFACE;
+					}
+				}
+				else
+				{
+					pass.m_state |= RENDER_CULLFACE;
+				}
+				if ( stage.usesVertexColour ) {
+					pass.m_state |= RENDER_COLOURARRAY;
+				}
+				if ( stage.depthWrite ) {
+					pass.m_state |= RENDER_DEPTHWRITE;
+				}
+				if ( stage.hasBlendFunc ) {
+					pass.m_state |= RENDER_BLEND;
+				}
+				if ( stage.alphaFunc != eStageAlphaNone ) {
+					pass.m_state |= RENDER_ALPHATEST;
+				}
+
+				pass.m_texture = stage.texture != 0 ? stage.texture->texture_number : 0;
+				pass.m_colour = stage.colour;
+				pass.m_blend_src = convertBlendFactor( stage.blendFunc.m_src );
+				pass.m_blend_dst = convertBlendFactor( stage.blendFunc.m_dst );
+				pass.m_depthfunc = convertStageDepthFunc( stage.depthFunc );
+				pass.m_alphafunc = convertStageAlphaFunc( stage.alphaFunc );
+				pass.m_alpharef = stage.alphaRef;
+				pass.m_sort = stage.hasBlendFunc ? OpenGLState::eSortTranslucent : OpenGLState::eSortFullbright;
+			}
 		}
 		else
 		{

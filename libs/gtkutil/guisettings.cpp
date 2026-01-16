@@ -21,12 +21,55 @@
 
 #include "guisettings.h"
 
+#include <algorithm>
 #include <optional>
 #include <QSettings>
 #include <QCoreApplication>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QWidget>
 #include <QMainWindow>
 #include <QSplitter>
+
+namespace {
+QRect available_geometry_for_window( const QRect& frame ){
+	const auto screens = QGuiApplication::screens();
+	for ( const QScreen* screen : screens ) {
+		const QRect available = screen->availableGeometry();
+		if ( available.intersects( frame ) ) {
+			return available;
+		}
+	}
+	if ( const QScreen* primary = QGuiApplication::primaryScreen() ) {
+		return primary->availableGeometry();
+	}
+	return {};
+}
+
+void clamp_window_to_visible_area( QWidget* window ){
+	if ( window == nullptr ) {
+		return;
+	}
+	const QRect frame = window->frameGeometry();
+	const QRect available = available_geometry_for_window( frame );
+	if ( !available.isValid() || available.intersects( frame ) ) {
+		return;
+	}
+	QRect adjusted = frame;
+	if ( adjusted.width() > available.width() ) {
+		adjusted.setWidth( available.width() );
+	}
+	if ( adjusted.height() > available.height() ) {
+		adjusted.setHeight( available.height() );
+	}
+	const int max_x = available.right() - adjusted.width() + 1;
+	const int max_y = available.bottom() - adjusted.height() + 1;
+	const int clamped_x = std::clamp( adjusted.x(), available.left(), max_x );
+	const int clamped_y = std::clamp( adjusted.y(), available.top(), max_y );
+	adjusted.moveTo( clamped_x, clamped_y );
+	window->setGeometry( adjusted );
+}
+}
 
 class GuiSetting
 {
@@ -53,6 +96,7 @@ public:
 	WindowSetting( QWidget *window, const char *path, int w, int h, int x, int y ) : GuiSetting( path ), m_window( window ){
 		if( const QByteArray geometry = qsettings().value( m_path, QByteArray() ).toByteArray(); !geometry.isEmpty() ){
 			m_window->restoreGeometry( geometry );
+			clamp_window_to_visible_area( m_window );
 			m_wantSave = true;
 		}
 		else{

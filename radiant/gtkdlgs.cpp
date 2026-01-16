@@ -42,6 +42,8 @@
 
 #include "igl.h"
 #include "iscenegraph.h"
+#include "ishaders.h"
+#include "texturelib.h"
 
 #include <QDialog>
 #include <QVBoxLayout>
@@ -54,9 +56,16 @@
 #include <QApplication>
 #include "gtkutil/spinbox.h"
 #include "gtkutil/guisettings.h"
+#include "gtkutil/glwidget.h"
+#include "timer.h"
 #include <QPlainTextEdit>
 #include <QComboBox>
 #include <QFile>
+#include <QLabel>
+#include <QOpenGLWidget>
+#include <QSplitter>
+#include <QTimer>
+#include <algorithm>
 
 #ifdef WIN32
 #include <windows.h>
@@ -2411,7 +2420,8 @@ public:
 		m_window->raise();
 		m_window->activateWindow();
 
-		{ // scroll to shader
+		if ( !string_empty( shaderName ) ) {
+			// scroll to shader
 			const QRegularExpression::PatternOptions rxFlags = QRegularExpression::PatternOption::MultilineOption |
 			                                                   QRegularExpression::PatternOption::CaseInsensitiveOption;
 			const QRegularExpression rx( "^\\s*" + QRegularExpression::escape( shaderName ) + "(|:q3map)$", rxFlags );
@@ -2467,6 +2477,460 @@ protected:
 
 static TextEditor g_textEditor;
 
+namespace {
+GLenum ShaderPreview_convertBlendFactor( BlendFactor factor ){
+	switch ( factor )
+	{
+	case BLEND_ZERO:
+		return GL_ZERO;
+	case BLEND_ONE:
+		return GL_ONE;
+	case BLEND_SRC_COLOUR:
+		return GL_SRC_COLOR;
+	case BLEND_ONE_MINUS_SRC_COLOUR:
+		return GL_ONE_MINUS_SRC_COLOR;
+	case BLEND_SRC_ALPHA:
+		return GL_SRC_ALPHA;
+	case BLEND_ONE_MINUS_SRC_ALPHA:
+		return GL_ONE_MINUS_SRC_ALPHA;
+	case BLEND_DST_COLOUR:
+		return GL_DST_COLOR;
+	case BLEND_ONE_MINUS_DST_COLOUR:
+		return GL_ONE_MINUS_DST_COLOR;
+	case BLEND_DST_ALPHA:
+		return GL_DST_ALPHA;
+	case BLEND_ONE_MINUS_DST_ALPHA:
+		return GL_ONE_MINUS_DST_ALPHA;
+	case BLEND_SRC_ALPHA_SATURATE:
+		return GL_SRC_ALPHA_SATURATE;
+	}
+	return GL_ZERO;
+}
+
+GLenum ShaderPreview_convertAlphaFunc( ShaderStageAlphaFunc func ){
+	switch ( func )
+	{
+	case eStageAlphaGT0:
+		return GL_GREATER;
+	case eStageAlphaLT128:
+		return GL_LESS;
+	case eStageAlphaGE128:
+		return GL_GEQUAL;
+	case eStageAlphaNone:
+	default:
+		break;
+	}
+	return GL_ALWAYS;
+}
+
+void ShaderPreview_drawStage( const ShaderStage& stage, bool useDefaultBlend ){
+	const GLint texture = stage.texture != 0 ? stage.texture->texture_number : 0;
+	gl().glActiveTexture( GL_TEXTURE0 );
+	gl().glClientActiveTexture( GL_TEXTURE0 );
+
+	if ( stage.hasBlendFunc || useDefaultBlend ) {
+		gl().glEnable( GL_BLEND );
+		if ( stage.hasBlendFunc ) {
+			gl().glBlendFunc( ShaderPreview_convertBlendFactor( stage.blendFunc.m_src ),
+			                  ShaderPreview_convertBlendFactor( stage.blendFunc.m_dst ) );
+		}
+		else
+		{
+			gl().glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+		}
+	}
+	else
+	{
+		gl().glDisable( GL_BLEND );
+	}
+
+	if ( stage.alphaFunc != eStageAlphaNone ) {
+		gl().glEnable( GL_ALPHA_TEST );
+		gl().glAlphaFunc( ShaderPreview_convertAlphaFunc( stage.alphaFunc ), stage.alphaRef );
+	}
+	else
+	{
+		gl().glDisable( GL_ALPHA_TEST );
+	}
+
+	gl().glBindTexture( GL_TEXTURE_2D, texture );
+	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+
+	bool texgenEnabled = false;
+	if ( stage.tcGen == eTcGenEnvironment || stage.tcGen == eTcGenVector ) {
+		gl().glEnable( GL_TEXTURE_GEN_S );
+		gl().glEnable( GL_TEXTURE_GEN_T );
+		if ( stage.tcGen == eTcGenEnvironment ) {
+			gl().glTexGeni( GL_S, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP );
+			gl().glTexGeni( GL_T, GL_TEXTURE_GEN_MODE, GL_SPHERE_MAP );
+		}
+		else
+		{
+			const float planeS[4] = { stage.tcGenVec0.x(), stage.tcGenVec0.y(), stage.tcGenVec0.z(), 0.0f };
+			const float planeT[4] = { stage.tcGenVec1.x(), stage.tcGenVec1.y(), stage.tcGenVec1.z(), 0.0f };
+			gl().glTexGeni( GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+			gl().glTexGeni( GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+			gl().glTexGenfv( GL_S, GL_OBJECT_PLANE, planeS );
+			gl().glTexGenfv( GL_T, GL_OBJECT_PLANE, planeT );
+		}
+		texgenEnabled = true;
+	}
+	else
+	{
+		gl().glDisable( GL_TEXTURE_GEN_S );
+		gl().glDisable( GL_TEXTURE_GEN_T );
+	}
+
+	bool texMatrixPushed = false;
+	if ( stage.texMatrix != g_matrix4_identity ) {
+		gl().glMatrixMode( GL_TEXTURE );
+		gl().glPushMatrix();
+		gl().glLoadMatrixf( reinterpret_cast<const float*>( &stage.texMatrix ) );
+		gl().glMatrixMode( GL_MODELVIEW );
+		texMatrixPushed = true;
+	}
+
+	gl().glColor4f( stage.colour[0], stage.colour[1], stage.colour[2], stage.colour[3] );
+
+	gl().glBegin( GL_QUADS );
+	gl().glTexCoord2f( 0, 0 );
+	gl().glVertex2f( 0, 1 );
+	gl().glTexCoord2f( 1, 0 );
+	gl().glVertex2f( 1, 1 );
+	gl().glTexCoord2f( 1, 1 );
+	gl().glVertex2f( 1, 0 );
+	gl().glTexCoord2f( 0, 1 );
+	gl().glVertex2f( 0, 0 );
+	gl().glEnd();
+
+	if ( texMatrixPushed ) {
+		gl().glMatrixMode( GL_TEXTURE );
+		gl().glPopMatrix();
+		gl().glMatrixMode( GL_MODELVIEW );
+	}
+	if ( texgenEnabled ) {
+		gl().glDisable( GL_TEXTURE_GEN_S );
+		gl().glDisable( GL_TEXTURE_GEN_T );
+	}
+	gl().glDisable( GL_ALPHA_TEST );
+}
+} // namespace
+
+class ShaderPreviewEditor : public QObject
+{
+	QWidget *m_window = nullptr;
+	QSplitter *m_splitter = nullptr;
+	QPlainTextEdit_Shader *m_textView = nullptr;
+	QOpenGLWidget *m_previewWidget = nullptr;
+	QLabel *m_statusLabel = nullptr;
+	QPushButton *m_saveButton = nullptr;
+	QTimer *m_parseTimer = nullptr;
+	QTimer *m_animTimer = nullptr;
+	IShader *m_previewShader = nullptr;
+	CopiedString m_shaderName;
+	CopiedString m_filename;
+	Timer m_previewTimer;
+	bool m_editable = false;
+
+	class PreviewWidget : public QOpenGLWidget
+	{
+		ShaderPreviewEditor& m_editor;
+		qreal m_scale{ 1.0 };
+	public:
+		explicit PreviewWidget( ShaderPreviewEditor& editor ) : QOpenGLWidget(), m_editor( editor ){}
+		~PreviewWidget() override {
+			glwidget_context_destroyed();
+		}
+	protected:
+		void initializeGL() override {
+			glwidget_context_created( *this );
+		}
+		void resizeGL( int w, int h ) override {
+			m_scale = devicePixelRatioF();
+			m_editor.renderPreview( float_to_integer( w * m_scale ), float_to_integer( h * m_scale ) );
+		}
+		void paintGL() override {
+			m_editor.renderPreview( float_to_integer( width() * m_scale ), float_to_integer( height() * m_scale ) );
+		}
+	};
+
+	void construct(){
+		m_window = new QWidget( MainFrame_getWindow(), Qt::Dialog | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint );
+		g_guiSettings.addWindow( m_window, "ShaderPreviewEditor/geometry", 900, 600 );
+		m_window->installEventFilter( this );
+
+		auto *vbox = new QVBoxLayout( m_window );
+		vbox->setContentsMargins( 0, 0, 0, 0 );
+		vbox->setSpacing( 0 );
+
+		m_splitter = new QSplitter;
+		vbox->addWidget( m_splitter, 1 );
+
+		m_previewWidget = new PreviewWidget( *this );
+		m_splitter->addWidget( m_previewWidget );
+
+		m_textView = new QPlainTextEdit_Shader;
+		m_splitter->addWidget( m_textView );
+		m_splitter->setStretchFactor( 0, 1 );
+		m_splitter->setStretchFactor( 1, 2 );
+		g_guiSettings.addSplitter( m_splitter, "ShaderPreviewEditor/splitter", { 300, 600 } );
+
+		auto *hbox = new QHBoxLayout;
+		hbox->setContentsMargins( 6, 4, 6, 6 );
+		vbox->addLayout( hbox );
+
+		m_statusLabel = new QLabel;
+		hbox->addWidget( m_statusLabel, 1 );
+
+		m_saveButton = new QPushButton( "Save" );
+		m_saveButton->setSizePolicy( QSizePolicy::Policy::Fixed, QSizePolicy::Policy::Fixed );
+		m_saveButton->setEnabled( false );
+		hbox->addWidget( m_saveButton );
+
+		m_parseTimer = new QTimer( m_window );
+		m_parseTimer->setSingleShot( true );
+		QObject::connect( m_parseTimer, &QTimer::timeout, [this](){ updatePreview(); } );
+
+		m_animTimer = new QTimer( m_window );
+		m_animTimer->setInterval( 33 );
+		QObject::connect( m_animTimer, &QTimer::timeout, [this](){
+			if ( m_previewWidget == nullptr ) {
+				return;
+			}
+			if ( !m_previewWidget->isVisible() ) {
+				m_animTimer->stop();
+				return;
+			}
+			m_previewWidget->update();
+		} );
+
+		QObject::connect( m_textView, &QPlainTextEdit::textChanged, [this](){
+			scheduleParse();
+		} );
+		QObject::connect( m_textView->document(), &QTextDocument::modificationChanged, [this]( bool modified ){
+			m_saveButton->setEnabled( modified && m_editable );
+			m_window->setWindowTitle( StringStream( ( modified? "*" : "" ), m_filename ).c_str() );
+		} );
+		QObject::connect( m_saveButton, &QAbstractButton::clicked, [this](){ editor_save(); } );
+	}
+
+	void scheduleParse(){
+		if ( m_parseTimer != nullptr ) {
+			m_parseTimer->start( 150 );
+		}
+	}
+
+	void setPreviewShader( IShader *shader ){
+		if ( m_previewShader != nullptr ) {
+			m_previewShader->DecRef();
+		}
+		m_previewShader = shader;
+		if ( m_previewShader != nullptr ) {
+			m_previewTimer.start();
+		}
+		if ( m_animTimer != nullptr ) {
+			if ( m_previewShader != nullptr && m_previewShader->isAnimated() ) {
+				if ( !m_animTimer->isActive() ) {
+					m_animTimer->start();
+				}
+			}
+			else
+			{
+				m_animTimer->stop();
+			}
+		}
+		if ( m_previewWidget != nullptr ) {
+			m_previewWidget->update();
+		}
+	}
+
+	void updatePreview(){
+		if ( m_textView == nullptr ) {
+			return;
+		}
+		const QByteArray text = m_textView->toPlainText().toLatin1();
+		IShader *shader = GlobalShaderSystem().createShaderFromText( text.constData(), m_shaderName.c_str() );
+		if ( shader == nullptr ) {
+			m_statusLabel->setText( "Shader parse error" );
+			setPreviewShader( nullptr );
+			return;
+		}
+		m_statusLabel->clear();
+		setPreviewShader( shader );
+	}
+
+	void editor_save(){
+		if ( !m_editable ) {
+			return;
+		}
+		FILE *f = fopen( m_filename.c_str(), "wt" );
+		if ( f == nullptr ) {
+			globalErrorStream() << "Error saving file" << Quoted( m_filename ) << '\n';
+			return;
+		}
+		const auto str = m_textView->toPlainText().toLatin1();
+		fwrite( str.constData(), 1, str.length(), f );
+		fclose( f );
+		m_textView->document()->setModified( false );
+	}
+
+	bool ensure_saved(){
+		if( m_textView != nullptr && m_textView->document()->isModified() ) {
+			const auto ret = qt_MessageBox( m_window, "Document has been modified.\nSave it?", "Save", EMessageBoxType::Question,
+				EMessageBoxReturn::eIDYES | EMessageBoxReturn::eIDNO | EMessageBoxReturn::eIDCANCEL );
+			if( ret == EMessageBoxReturn::eIDYES ){
+				editor_save();
+			}
+			else if( ret == EMessageBoxReturn::eIDNO ){
+				m_textView->clear();
+			}
+			else if( ret == EMessageBoxReturn::eIDCANCEL ){
+				return false;
+			}
+		}
+		return true;
+	}
+
+public:
+	~ShaderPreviewEditor() override {
+		setPreviewShader( nullptr );
+	}
+
+	void open( const char *text, const char *shaderName, const char *filename, bool editable ){
+		if ( m_window == nullptr ) {
+			construct();
+		}
+
+		if( !ensure_saved() )
+			return;
+
+		m_shaderName = shaderName != nullptr ? shaderName : "";
+		m_filename = filename;
+		m_editable = editable;
+
+		m_textView->setReadOnly( !editable );
+		m_saveButton->setEnabled( false );
+		m_textView->setPlainText( text );
+		m_window->setWindowTitle( m_filename.c_str() );
+
+		m_window->show();
+		m_window->raise();
+		m_window->activateWindow();
+
+		{ // scroll to shader
+			const QRegularExpression::PatternOptions rxFlags = QRegularExpression::PatternOption::MultilineOption |
+			                                                   QRegularExpression::PatternOption::CaseInsensitiveOption;
+			const QRegularExpression rx( "^\\s*" + QRegularExpression::escape( shaderName ) + "(|:q3map)$", rxFlags );
+			auto *doc = m_textView->document();
+
+			for( QTextCursor cursor( doc ); cursor = doc->find( rx ), !cursor.isNull(); )
+				if( !doc->find( QRegularExpression( "^\\s*\\{", rxFlags ), cursor ).isNull() ){
+					QTextCursor cur( cursor );
+					cur.movePosition( QTextCursor::MoveOperation::NextBlock, QTextCursor::MoveMode::MoveAnchor, 99 );
+					m_textView->setTextCursor( cur );
+					m_textView->setTextCursor( cursor );
+					break;
+				}
+		}
+
+		updatePreview();
+	}
+
+	void renderPreview( int width, int height ){
+		gl().glClearColor( 0.1f, 0.1f, 0.1f, 1.0f );
+		gl().glViewport( 0, 0, width, height );
+		gl().glMatrixMode( GL_PROJECTION );
+		gl().glLoadIdentity();
+		gl().glOrtho( 0, width, 0, height, -100, 100 );
+		gl().glMatrixMode( GL_MODELVIEW );
+		gl().glLoadIdentity();
+
+		gl().glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
+		gl().glDisable( GL_DEPTH_TEST );
+		gl().glDisable( GL_MULTISAMPLE );
+		gl().glDisable( GL_ALPHA_TEST );
+		gl().glEnable( GL_TEXTURE_2D );
+
+		if ( m_previewShader == nullptr ) {
+			gl().glColor3f( 1, 1, 1 );
+			gl().glRasterPos2i( 12, height - 20 );
+			GlobalOpenGL().drawString( "Shader preview unavailable" );
+			return;
+		}
+
+		qtexture_t *texture = m_previewShader->getTexture();
+		if ( texture == nullptr ) {
+			return;
+		}
+
+		const float padding = 12.0f;
+		const float availW = std::max( 1.0f, float( width ) - padding * 2.0f );
+		const float availH = std::max( 1.0f, float( height ) - padding * 2.0f );
+		const float texW = std::max( 1.0f, float( texture->width ) );
+		const float texH = std::max( 1.0f, float( texture->height ) );
+		const float scale = std::min( availW / texW, availH / texH );
+		const float drawW = texW * scale;
+		const float drawH = texH * scale;
+		const float drawX = ( float( width ) - drawW ) * 0.5f;
+		const float drawY = ( float( height ) - drawH ) * 0.5f;
+
+		const int checkerWidth = std::max( 1, static_cast<int>( drawW ) );
+		const int checkerHeight = std::max( 1, static_cast<int>( drawH ) );
+		gl().glBegin( GL_QUADS );
+		for ( int i = 0; i < checkerHeight; i += 8 )
+			for ( int j = 0; j < checkerWidth; j += 8 ) {
+				const unsigned char color = ( i + j ) / 8 % 2 ? 0x66 : 0x99;
+				gl().glColor3ub( color, color, color );
+				const float left = drawX + j;
+				const float right = drawX + std::min( j + 8, checkerWidth );
+				const float bottom = drawY + i;
+				const float top = drawY + std::min( i + 8, checkerHeight );
+				gl().glVertex2f( right, top );
+				gl().glVertex2f( left, top );
+				gl().glVertex2f( left, bottom );
+				gl().glVertex2f( right, bottom );
+			}
+		gl().glEnd();
+
+		gl().glPushMatrix();
+		gl().glTranslatef( drawX, drawY, 0.0f );
+		gl().glScalef( drawW, drawH, 1.0f );
+		if ( m_previewShader->hasStages() ) {
+			const float time = m_previewShader->isAnimated()
+			                   ? static_cast<float>( m_previewTimer.elapsed_sec() )
+			                   : 0.0f;
+			struct StageDraw
+			{
+				void operator()( const ShaderStage& stage ) const {
+					ShaderPreview_drawStage( stage, false );
+				}
+			} draw;
+			m_previewShader->forEachStage( time, makeCallback( draw ) );
+		}
+		else
+		{
+			ShaderStage stage;
+			stage.texture = texture;
+			ShaderPreview_drawStage( stage, true );
+		}
+		gl().glPopMatrix();
+	}
+
+protected:
+	bool eventFilter( QObject *obj, QEvent *event ) override {
+		if( event->type() == QEvent::Close ) {
+			if( !ensure_saved() ){
+				event->ignore();
+				return true;
+			}
+		}
+		return QObject::eventFilter( obj, event );
+	}
+};
+
+static ShaderPreviewEditor g_shaderPreviewEditor;
+
 CopiedString g_TextEditor_editorCommand;
 
 #include "ifilesystem.h"
@@ -2507,6 +2971,28 @@ void DoShaderView( const char *shaderFileName, const char *shaderName, bool exte
 		file->release();
 
 		g_textEditor.DoGtkTextEditor( text, shaderName, pathFull, pathIsDir );
+		free( text );
+	}
+}
+
+void DoShaderPreviewEditor( const char *shaderFileName, const char *shaderName ){
+	const char* pathRoot = GlobalFileSystem().findFile( shaderFileName );
+	const bool pathEmpty = string_empty( pathRoot );
+	const bool pathIsDir = !pathEmpty && file_is_directory( pathRoot );
+
+	const auto pathFull = StringStream( pathRoot, ( pathIsDir? "" : "::" ), shaderFileName );
+
+	if( pathEmpty ){
+		globalErrorStream() << "Failed to load shader file " << shaderFileName << '\n';
+	}
+	else if( ArchiveFile* file = GlobalFileSystem().openFile( shaderFileName ) ){
+		const std::size_t size = file->size();
+		char* text = ( char* )malloc( size + 1 );
+		file->getInputStream().read( ( InputStream::byte_type* )text, size );
+		text[size] = 0;
+		file->release();
+
+		g_shaderPreviewEditor.open( text, shaderName, pathFull, pathIsDir );
 		free( text );
 	}
 }

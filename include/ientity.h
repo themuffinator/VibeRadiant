@@ -111,7 +111,7 @@ class Counter;
 class EntityCreator
 {
 public:
-	INTEGER_CONSTANT( Version, 2 );
+	INTEGER_CONSTANT( Version, 3 );
 	STRING_CONSTANT( Name, "entity" );
 
 	virtual scene::Node& createEntity( EntityClass* eclass ) = 0;
@@ -132,6 +132,8 @@ public:
 	virtual bool getShowBboxes() = 0;
 	virtual void setShowConnections( bool showConnections ) = 0;
 	virtual bool getShowConnections() = 0;
+	virtual void setShowConnectionsThick( bool showConnectionsThick ) = 0;
+	virtual bool getShowConnectionsThick() = 0;
 	virtual void setShowNamesDist( int dist ) = 0;
 	virtual int getShowNamesDist() = 0;
 	virtual void setShowNamesRatio( int ratio ) = 0;

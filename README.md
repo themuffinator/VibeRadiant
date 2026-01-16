@@ -17,6 +17,7 @@ Build the most overclocked, vibe-drenched Radiant experience on the planet: ligh
 - 🧠🔗 TrenchBroom-style linked duplicates for synchronized group transforms.
 - 🧭📏 Z-bar vertical ruler plus full interaction parity in 2D view.
 - 🎛️🔍 Refreshed texture browser with unified filters and fast search.
+- ✨🧪 Quake 3 shader pipeline rendering with accurate multi-stage previews, hover animation, a live shader editor preview, and a 3D view animation toggle.
 - 🧲🔊 Asset browser tabs for entities and sounds with drag-and-drop placement.
 - ✂️🟥 Clipper preview style options, including the loud VIBE red-dash mode.
 - 🧱🧲 "Drop Entities to Floor" command for fast placement cleanup.
@@ -34,6 +35,11 @@ Grab fresh builds from [Releases](../../releases). 🎉💿
 
 ## Build It 🛠️⚙️
 See [COMPILING](COMPILING) for platform-by-platform build instructions. 🔧🧪
+
+<p align="center">
+  <img src="docs/vibe-o-meter.png" alt="Vibe-O-Meter">
+</p>
+
 
 ## Docs & Deep Dives 📚🔍
 - 🧾📜 [CHANGES_FROM_NRC.md](CHANGES_FROM_NRC.md) - VibeRadiant vs NRC change log.

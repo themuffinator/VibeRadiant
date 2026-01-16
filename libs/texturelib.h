@@ -29,7 +29,16 @@ class LoadImageCallback;
 // describes a GL texture
 struct qtexture_t
 {
-	qtexture_t( const LoadImageCallback& load, const char* name ) : load( load ), name( name ){
+	qtexture_t( const LoadImageCallback& load, const char* name )
+		: load( load ),
+		  name( name ),
+		  width( 1 ),
+		  height( 1 ),
+		  texture_number( 0 ),
+		  color( 1.0f, 1.0f, 1.0f ),
+		  surfaceFlags( 0 ),
+		  contentFlags( 0 ),
+		  value( 0 ){
 	}
 	const LoadImageCallback& load;
 	const char* name;

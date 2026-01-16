@@ -157,6 +157,19 @@ void LoadTextureRGBA( qtexture_t* q, unsigned char* pPixels, int nWidth, int nHe
 	float total[3];
 	int nCount = nWidth * nHeight;
 
+	if ( q == nullptr ) {
+		return;
+	}
+
+	q->texture_number = 0;
+	q->width = 1;
+	q->height = 1;
+	q->color = Colour3( 1.0f, 1.0f, 1.0f );
+
+	if ( pPixels == nullptr || nWidth <= 0 || nHeight <= 0 ) {
+		return;
+	}
+
 	if ( fGamma != g_texture_globals.fGamma ) {
 		fGamma = g_texture_globals.fGamma;
 		ResampleGamma( fGamma );
@@ -325,17 +338,32 @@ typedef std::pair<LoadImageCallback, CopiedString> TextureKey;
 
 void qtexture_realise( qtexture_t& texture, const TextureKey& key ){
 	texture.texture_number = 0;
+	texture.width = 1;
+	texture.height = 1;
+	texture.color = Colour3( 1.0f, 1.0f, 1.0f );
+	texture.surfaceFlags = 0;
+	texture.contentFlags = 0;
+	texture.value = 0;
 	if ( !key.second.empty() ) {
 		if( !key.first.m_skybox ){
 			Image* image = key.first.loadImage( key.second.c_str() );
 			if ( image != 0 ) {
-				LoadTextureRGBA( &texture, image->getRGBAPixels(), image->getWidth(), image->getHeight() );
-				texture.surfaceFlags = image->getSurfaceFlags();
-				texture.contentFlags = image->getContentFlags();
-				texture.value = image->getValue();
+				const unsigned int width = image->getWidth();
+				const unsigned int height = image->getHeight();
+				byte* pixels = image->getRGBAPixels();
+				if ( pixels != nullptr && width > 0 && height > 0 ) {
+					LoadTextureRGBA( &texture, pixels, static_cast<int>( width ), static_cast<int>( height ) );
+					texture.surfaceFlags = image->getSurfaceFlags();
+					texture.contentFlags = image->getContentFlags();
+					texture.value = image->getValue();
+					globalOutputStream() << "Loaded Texture: " << Quoted( key.second ) << '\n';
+					GlobalOpenGL_debugAssertNoErrors();
+				}
+				else
+				{
+					globalErrorStream() << "Texture load failed: " << Quoted( key.second ) << " (invalid image data)\n";
+				}
 				image->release();
-				globalOutputStream() << "Loaded Texture: " << Quoted( key.second ) << '\n';
-				GlobalOpenGL_debugAssertNoErrors();
 			}
 			else
 			{
@@ -349,7 +377,13 @@ void qtexture_realise( qtexture_t& texture, const TextureKey& key ){
 			for( int i = 0; i < 6; ++i ){
 				images[i] = key.first.loadImage( StringStream<64>( key.second, suffixes[i] ) );
 			}
-			if( std::ranges::all_of( images, std::identity{} ) ){
+			const bool imagesValid = std::ranges::all_of( images, []( const Image* img ){
+				return img != nullptr
+					&& img->getWidth() > 0
+					&& img->getHeight() > 0
+					&& img->getRGBAPixels() != nullptr;
+			} );
+			if( imagesValid ){
 				gl().glGenTextures( 1, &texture.texture_number );
 				gl().glBindTexture( GL_TEXTURE_CUBE_MAP, texture.texture_number );
 				gl().glTexParameteri( GL_TEXTURE_CUBE_MAP, GL_GENERATE_MIPMAP, GL_FALSE );
@@ -383,7 +417,7 @@ void qtexture_realise( qtexture_t& texture, const TextureKey& key ){
 			}
 			else
 			{
-				globalErrorStream() << "Skybox load failed: " << Quoted( key.second ) << '\n';
+				globalErrorStream() << "Skybox load failed: " << Quoted( key.second ) << " (invalid image data)\n";
 			}
 
 			std::for_each_n( images, std::size( images ), []( Image *img ){ if( img != nullptr ) img->release(); } );
@@ -396,6 +430,7 @@ void qtexture_unrealise( qtexture_t& texture ){
 		gl().glDeleteTextures( 1, &texture.texture_number );
 		GlobalOpenGL_debugAssertNoErrors();
 	}
+	texture.texture_number = 0;
 }
 
 class TextureKeyEqualNoCase

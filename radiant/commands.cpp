@@ -24,7 +24,9 @@
 #include "debugging/debugging.h"
 
 #include <map>
+#include <vector>
 #include "string/string.h"
+#include "stream/stringstream.h"
 #include "versionlib.h"
 #include "gtkutil/accelerator.h"
 #include "gtkutil/messagebox.h"
@@ -62,6 +64,37 @@ void GlobalShortcuts_reportUnregistered(){
 	for ( const auto& [name, shortcut] : g_shortcuts )
 		if ( !shortcut.accelerator.isEmpty() && shortcut.type == 0 )
 			globalWarningStream() << "shortcut not registered: " << name << '\n';
+}
+
+void GlobalShortcuts_reportDuplicates(){
+	std::map<QString, std::vector<CopiedString>> bindings;
+	for ( const auto& [name, shortcut] : g_shortcuts ){
+		if ( shortcut.type == 0 ) {
+			continue;
+		}
+		if ( shortcut.accelerator.isEmpty() || !QKeySequence_valid( shortcut.accelerator ) ) {
+			continue;
+		}
+		const QString key = shortcut.accelerator.toString( QKeySequence::PortableText );
+		if ( key.isEmpty() ) {
+			continue;
+		}
+		bindings[key].push_back( name );
+	}
+
+	for ( const auto& [key, names] : bindings ){
+		if ( names.size() < 2 ) {
+			continue;
+		}
+		StringOutputStream list( 128 );
+		for ( std::size_t i = 0; i < names.size(); ++i ){
+			if ( i != 0 ) {
+				list << ", ";
+			}
+			list << names[i].c_str();
+		}
+		globalWarningStream() << "duplicate shortcut " << Quoted( key.toLatin1().constData() ) << ": " << list.c_str() << '\n';
+	}
 }
 
 typedef std::map<CopiedString, Command> Commands;
@@ -115,7 +148,6 @@ const KeyEvent& GlobalKeyEvents_find( const char* name ){
 #include "mainframe.h"
 
 #include "stream/textfilestream.h"
-#include "stream/stringstream.h"
 #include <QDialog>
 #include <QTreeWidget>
 #include <QGridLayout>

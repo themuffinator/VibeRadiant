@@ -251,15 +251,16 @@ int XYWnd_getMSAA();
 
 struct xywindow_globals_t
 {
-	Vector3 color_gridback = { .225803f, .225803f, .225803f };
-	Vector3 color_gridminor = { .254902f, .254902f, .254902f };
-	Vector3 color_gridmajor = { .294118f, .294118f, .294118f };
+	Vector3 color_gridback = { 0.77f, 0.77f, 0.77f };
+	Vector3 color_gridback_coarse = { 0.70f, 0.70f, 0.70f };
+	Vector3 color_gridminor = { 0.83f, 0.83f, 0.83f };
+	Vector3 color_gridmajor = { 0.89f, 0.89f, 0.89f };
 	Vector3 color_gridblock = { 1, 1, 1 };
-	Vector3 color_gridtext = { .972549f, .972549f, .972549f };
+	Vector3 color_gridtext = { 0.0f, 0.0f, 0.0f };
 	Vector3 color_brushes = { 0, 0, 0 };
-	Vector3 color_selbrushes = { 1.0f, 0.627451f, 0.0f };
+	Vector3 color_selbrushes = { 1.0f, 0.0f, 0.0f };
 	Vector3 color_clipper = { 0, 0, 1 };
-	Vector3 color_viewname = { 0.516136f, 0.516136f, 0.516136f };
+	Vector3 color_viewname = { 0.5f, 0.0f, 0.75f };
 	Vector3 color_camera = { 0, 0, 1 };
 
 	bool m_bNoStipple = true;

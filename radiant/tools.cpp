@@ -23,11 +23,15 @@
 
 #include "iscenegraph.h"
 #include "iselection.h"
+#include "selection.h"
 #include "mainframe.h"
 #include "commands.h"
 #include "generic/callback.h"
 #include "signal/isignal.h"
 #include "gtkutil/widget.h"
+#include "preferences.h"
+#include "preferencesystem.h"
+#include "stringio.h"
 
 
 void ModeChangeNotify(){
@@ -38,6 +42,7 @@ typedef void ( *ToolMode )();
 ToolMode g_currentToolMode = 0;
 bool g_currentToolModeSupportsComponentEditing = false;
 ToolMode g_defaultToolMode = 0;
+int g_defaultToolModeIndex = 0;
 
 
 
@@ -51,6 +56,10 @@ void SelectionSystem_DefaultMode(){
 bool EdgeMode(){
 	return GlobalSelectionSystem().Mode() == SelectionSystem::eComponent
 	    && GlobalSelectionSystem().ComponentMode() == SelectionSystem::eEdge;
+}
+
+bool PrimitiveMode(){
+	return GlobalSelectionSystem().Mode() == SelectionSystem::ePrimitive;
 }
 
 bool VertexMode(){
@@ -77,6 +86,11 @@ EdgeModeApplyCaller g_edgeMode_button_caller;
 BoolExportCallback g_edgeMode_button_callback( g_edgeMode_button_caller );
 ToggleItem g_edgeMode_button( g_edgeMode_button_callback );
 
+typedef FreeCaller<void(const BoolImportCallback&), &BoolFunctionExport<PrimitiveMode>::apply> PrimitiveModeApplyCaller;
+PrimitiveModeApplyCaller g_primitiveMode_button_caller;
+BoolExportCallback g_primitiveMode_button_callback( g_primitiveMode_button_caller );
+ToggleItem g_primitiveMode_button( g_primitiveMode_button_callback );
+
 typedef FreeCaller<void(const BoolImportCallback&), &BoolFunctionExport<VertexMode>::apply> VertexModeApplyCaller;
 VertexModeApplyCaller g_vertexMode_button_caller;
 BoolExportCallback g_vertexMode_button_callback( g_vertexMode_button_caller );
@@ -88,6 +102,7 @@ BoolExportCallback g_faceMode_button_callback( g_faceMode_button_caller );
 ToggleItem g_faceMode_button( g_faceMode_button_callback );
 
 void ComponentModeChanged(){
+	g_primitiveMode_button.update();
 	g_edgeMode_button.update();
 	g_vertexMode_button.update();
 	g_faceMode_button.update();
@@ -122,6 +137,12 @@ void SelectEdgeMode(){
 
 	ComponentModeChanged();
 
+	ModeChangeNotify();
+}
+
+void SelectPrimitiveMode(){
+	SelectionSystem_DefaultMode();
+	ComponentModeChanged();
 	ModeChangeNotify();
 }
 
@@ -416,9 +437,72 @@ void ToggleDragSkewModes(){
 	return g_currentToolMode == DragMode? SkewMode() : DragMode();
 }
 
+void ManipulatorSizeIncrease(){
+	SelectionSystem_ChangeManipulatorSize( 1 );
+}
+
+void ManipulatorSizeDecrease(){
+	SelectionSystem_ChangeManipulatorSize( -1 );
+}
+
+constexpr ToolMode c_defaultToolModes[] = {
+	DragMode,
+	TranslateMode,
+	RotateMode,
+	ScaleMode,
+	SkewMode,
+};
+
+constexpr const char* c_defaultToolModeLabels[] = {
+	"Drag",
+	"Translate",
+	"Rotate",
+	"Scale",
+	"Transform",
+};
+
+void DefaultToolModeImport( int value ){
+	const int maxIndex = static_cast<int>( sizeof( c_defaultToolModes ) / sizeof( c_defaultToolModes[0] ) ) - 1;
+	if ( value < 0 ) {
+		value = 0;
+	}
+	else if ( value > maxIndex ) {
+		value = maxIndex;
+	}
+	g_defaultToolModeIndex = value;
+	g_defaultToolMode = c_defaultToolModes[g_defaultToolModeIndex];
+}
+typedef FreeCaller<void(int), DefaultToolModeImport> DefaultToolModeImportCaller;
+
+void DefaultToolModeExport( const IntImportCallback& importer ){
+	importer( g_defaultToolModeIndex );
+}
+typedef FreeCaller<void(const IntImportCallback&), DefaultToolModeExport> DefaultToolModeExportCaller;
+
+void Tools_constructPreferences( PreferencesPage& page ){
+	page.appendCombo(
+	    "Default tool mode",
+	    StringArrayRange( c_defaultToolModeLabels ),
+	    IntImportCallback( DefaultToolModeImportCaller() ),
+	    IntExportCallback( DefaultToolModeExportCaller() )
+	);
+}
+
+void Tools_registerPreferences(){
+	PreferencesDialog_addInterfacePreferences( makeCallbackF( Tools_constructPreferences ) );
+}
+
 
 
 void Tools_registerCommands(){
+	GlobalPreferenceSystem().registerPreference(
+	    "DefaultToolMode",
+	    makeIntStringImportCallback( DefaultToolModeImportCaller() ),
+	    makeIntStringExportCallback( DefaultToolModeExportCaller() )
+	);
+	Tools_registerPreferences();
+
+	GlobalToggles_insert( "SelectPrimitives", makeCallbackF( SelectPrimitiveMode ), ToggleItem::AddCallbackCaller( g_primitiveMode_button ), QKeySequence( "Ctrl+Space" ) );
 	GlobalToggles_insert( "DragVertices", makeCallbackF( SelectVertexMode ), ToggleItem::AddCallbackCaller( g_vertexMode_button ), QKeySequence( "V" ) );
 	GlobalToggles_insert( "DragEdges", makeCallbackF( SelectEdgeMode ), ToggleItem::AddCallbackCaller( g_edgeMode_button ), QKeySequence( "E" ) );
 	GlobalToggles_insert( "DragFaces", makeCallbackF( SelectFaceMode ), ToggleItem::AddCallbackCaller( g_faceMode_button ), QKeySequence( "F" ) );
@@ -434,9 +518,13 @@ void Tools_registerCommands(){
 	GlobalToggles_insert( "MouseUV", makeCallbackF( UVMode ), ToggleItem::AddCallbackCaller( g_uv_button ), QKeySequence( "G" ) );
 	GlobalCommands_insert( "MouseRotateOrScale", makeCallbackF( ToggleRotateScaleModes ) );
 	GlobalCommands_insert( "MouseDragOrTransform", makeCallbackF( ToggleDragSkewModes ), QKeySequence( "Q" ) );
+	GlobalCommands_insert( "ManipulatorSizeIncrease", makeCallbackF( ManipulatorSizeIncrease ), QKeySequence( "+" ) );
+	GlobalCommands_insert( "ManipulatorSizeDecrease", makeCallbackF( ManipulatorSizeDecrease ), QKeySequence( "-" ) );
 
 	GlobalSelectionSystem().addSelectionChangeCallback( FreeCaller<void(const Selectable&), ComponentMode_SelectionChanged>() );
 
-	g_defaultToolMode = DragMode;
+	if ( g_defaultToolMode == nullptr ) {
+		DefaultToolModeImport( g_defaultToolModeIndex );
+	}
 	g_defaultToolMode();
 }

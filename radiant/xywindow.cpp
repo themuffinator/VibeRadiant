@@ -117,6 +117,16 @@ int XYWnd_getMSAA(){
 	return g_xywindow_globals_private.m_MSAA;
 }
 
+inline bool XYWnd_useCoarseGridBackground( float scale ){
+	return XYWnd_showGrid() && ( GetGridSize() * scale ) <= 4.0f;
+}
+
+inline const Vector3& XYWnd_gridBackground( float scale ){
+	return XYWnd_useCoarseGridBackground( scale )
+	     ? g_xywindow_globals.color_gridback_coarse
+	     : g_xywindow_globals.color_gridback;
+}
+
 const unsigned int RAD_NONE =    0x00;
 const unsigned int RAD_SHIFT =   0x01;
 const unsigned int RAD_ALT =     0x02;
@@ -593,7 +603,10 @@ private:
 		if ( mimeData == nullptr ) {
 			return false;
 		}
-		return mimeData->hasFormat( kEntityBrowserMimeType ) || mimeData->hasFormat( kSoundBrowserMimeType );
+		return mimeData->hasFormat( kEntityBrowserMimeType )
+		    || mimeData->hasFormat( kSoundBrowserMimeType )
+		    || mimeData->hasFormat( kTextureBrowserMimeType )
+		    || mimeData->hasFormat( kModelBrowserMimeType );
 	}
 	bool handleDrop( const QPointF& position, const QMimeData* mimeData ) const {
 		if ( !canAcceptDrop( mimeData ) ) {
@@ -616,6 +629,18 @@ private:
 			const QByteArray payload = mimeData->data( kSoundBrowserMimeType );
 			if ( !payload.isEmpty() ) {
 				return AssetDrop_handleSoundPath( payload.constData(), point );
+			}
+		}
+		if ( mimeData->hasFormat( kTextureBrowserMimeType ) ) {
+			const QByteArray payload = mimeData->data( kTextureBrowserMimeType );
+			if ( !payload.isEmpty() ) {
+				return AssetDrop_handleTexture( payload.constData(), point );
+			}
+		}
+		if ( mimeData->hasFormat( kModelBrowserMimeType ) ) {
+			const QByteArray payload = mimeData->data( kModelBrowserMimeType );
+			if ( !payload.isEmpty() ) {
+				return AssetDrop_handleModelPath( payload.constData(), point );
 			}
 		}
 
@@ -1276,7 +1301,16 @@ void BackgroundImage::set( const VIEWTYPE viewtype ){
 			}
 			else{
 				qtexture_t* qtex = (qtexture_t*)malloc( sizeof( qtexture_t ) ); /* srs hack :E */
-				LoadTextureRGBA( qtex, image->getRGBAPixels(), image->getWidth(), image->getHeight() );
+				const unsigned int width = image->getWidth();
+				const unsigned int height = image->getHeight();
+				unsigned char* pixels = image->getRGBAPixels();
+				if ( pixels == nullptr || width == 0 || height == 0 ) {
+					globalErrorStream() << "Could not load texture " << filename_noext << " (invalid image data)\n";
+					image->release();
+					free( qtex );
+					return;
+				}
+				LoadTextureRGBA( qtex, pixels, static_cast<int>( width ), static_cast<int>( height ) );
 				if( qtex->texture_number > 0 ){
 					globalOutputStream() << "Loaded background texture " << filename << '\n';
 					_tex = qtex->texture_number;
@@ -1405,11 +1439,12 @@ void XYWnd::XY_DrawGrid() {
 	// djbob
 	// draw minor blocks
 	if ( g_xywindow_globals_private.d_showgrid /*|| a < 1.0f*/ ) {
+		const Vector3& gridback = XYWnd_gridBackground( m_fScale );
 		if ( a < 1.0f ) {
 			gl().glEnable( GL_BLEND );
 		}
 
-		if ( g_xywindow_globals.color_gridminor != g_xywindow_globals.color_gridback ) {
+		if ( g_xywindow_globals.color_gridminor != gridback ) {
 			gl().glColor4fv( vector4_to_array( Vector4( g_xywindow_globals.color_gridminor, a ) ) );
 
 			gl().glBegin( GL_LINES );
@@ -1458,7 +1493,7 @@ void XYWnd::XY_DrawGrid() {
 
 			gl().glEnable( GL_BLEND );
 			// draw minor blocks
-			if ( g_xywindow_globals.color_gridminor != g_xywindow_globals.color_gridback ) {
+			if ( g_xywindow_globals.color_gridminor != gridback ) {
 				gl().glColor4fv( vector4_to_array( Vector4( g_xywindow_globals.color_gridminor, .5f ) ) );
 
 				gl().glBegin( GL_LINES );
@@ -1873,15 +1908,16 @@ void XYWnd::updateModelview(){
 
 void XYWnd::XY_Draw(){
 //		globalOutputStream() << "XY_Draw()\n";
+	const Vector3& gridback = XYWnd_gridBackground( m_fScale );
 	/* workaround poorly visible white lights on bright background */
-	GlobalEntityCreator().setLightColorize( vector3_min_component( g_xywindow_globals.color_gridback ) < .9f );
+	GlobalEntityCreator().setLightColorize( vector3_min_component( gridback ) < .9f );
 	//
 	// clear
 	//
 	gl().glViewport( 0, 0, m_nWidth, m_nHeight );
-	gl().glClearColor( g_xywindow_globals.color_gridback[0],
-	                   g_xywindow_globals.color_gridback[1],
-	                   g_xywindow_globals.color_gridback[2], 0 );
+	gl().glClearColor( gridback[0],
+	                   gridback[1],
+	                   gridback[2], 0 );
 	gl().glClear( GL_COLOR_BUFFER_BIT );
 
 	extern void Renderer_ResetStats();
@@ -2164,6 +2200,18 @@ void ShowConnectionsToggle(){
 	UpdateAllWindows();
 }
 
+void ShowConnectionsThickExport( const BoolImportCallback& importer ){
+	importer( GlobalEntityCreator().getShowConnectionsThick() );
+}
+typedef FreeCaller<void(const BoolImportCallback&), ShowConnectionsThickExport> ShowConnectionsThickExportCaller;
+ShowConnectionsThickExportCaller g_show_connections_thick_caller;
+ToggleItem g_show_connections_thick( g_show_connections_thick_caller );
+void ShowConnectionsThickToggle(){
+	GlobalEntityCreator().setShowConnectionsThick( !GlobalEntityCreator().getShowConnectionsThick() );
+	g_show_connections_thick.update();
+	UpdateAllWindows();
+}
+
 void ShowAnglesExport( const BoolImportCallback& importer ){
 	importer( GlobalEntityCreator().getShowAngles() );
 }
@@ -2302,6 +2350,7 @@ void XYShow_registerCommands(){
 	GlobalToggles_insert( "ShowNames", makeCallbackF( ShowNamesToggle ), ToggleItem::AddCallbackCaller( g_show_names ) );
 	GlobalToggles_insert( "ShowBboxes", makeCallbackF( ShowBboxesToggle ), ToggleItem::AddCallbackCaller( g_show_bboxes ) );
 	GlobalToggles_insert( "ShowConnections", makeCallbackF( ShowConnectionsToggle ), ToggleItem::AddCallbackCaller( g_show_connections ) );
+	GlobalToggles_insert( "ShowConnectionsThick", makeCallbackF( ShowConnectionsThickToggle ), ToggleItem::AddCallbackCaller( g_show_connections_thick ) );
 	GlobalToggles_insert( "ShowBlocks", makeCallbackF( ShowBlocksToggle ), ToggleItem::AddCallbackCaller( g_show_blocks ) );
 	GlobalToggles_insert( "ShowCoordinates", makeCallbackF( ShowCoordinatesToggle ), ToggleItem::AddCallbackCaller( g_show_coordinates ) );
 	GlobalToggles_insert( "ShowWindowOutline", makeCallbackF( ShowOutlineToggle ), ToggleItem::AddCallbackCaller( g_show_outline ) );
@@ -2375,6 +2424,7 @@ void XYWindow_Construct(){
 	GlobalPreferenceSystem().registerPreference( "ColorAxisY", Colour4bImportStringCaller( g_colour_y ), Colour4bExportStringCaller( g_colour_y ) );
 	GlobalPreferenceSystem().registerPreference( "ColorAxisZ", Colour4bImportStringCaller( g_colour_z ), Colour4bExportStringCaller( g_colour_z ) );
 	GlobalPreferenceSystem().registerPreference( "ColorGridBackground", Vector3ImportStringCaller( g_xywindow_globals.color_gridback ), Vector3ExportStringCaller( g_xywindow_globals.color_gridback ) );
+	GlobalPreferenceSystem().registerPreference( "ColorGridBackgroundCoarse", Vector3ImportStringCaller( g_xywindow_globals.color_gridback_coarse ), Vector3ExportStringCaller( g_xywindow_globals.color_gridback_coarse ) );
 	GlobalPreferenceSystem().registerPreference( "ColorGridMinor", Vector3ImportStringCaller( g_xywindow_globals.color_gridminor ), Vector3ExportStringCaller( g_xywindow_globals.color_gridminor ) );
 	GlobalPreferenceSystem().registerPreference( "ColorGridMajor", Vector3ImportStringCaller( g_xywindow_globals.color_gridmajor ), Vector3ExportStringCaller( g_xywindow_globals.color_gridmajor ) );
 	GlobalPreferenceSystem().registerPreference( "ColorGridBlocks", Vector3ImportStringCaller( g_xywindow_globals.color_gridblock ), Vector3ExportStringCaller( g_xywindow_globals.color_gridblock ) );

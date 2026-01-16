@@ -626,7 +626,10 @@ void Scene_PatchTileTexture_Selected( scene::Graph& graph, float s, float t ){
 
 
 void Scene_PatchInsertRemove_Selected( scene::Graph& graph, bool bInsert, bool bColumn, bool bFirst ){
-	Scene_forEachVisibleSelectedPatch( [bInsert, bColumn, bFirst]( Patch& patch ){ patch.InsertRemove( bInsert, bColumn, bFirst ); } );
+	Scene_forEachVisibleSelectedPatchInstance( [bInsert, bColumn, bFirst]( PatchInstance& instance ){
+		const std::size_t selectedPos = instance.selectedRowOrColumn( bColumn );
+		instance.getPatch().InsertRemove( bInsert, bColumn, bFirst, selectedPos );
+	} );
 }
 
 void Scene_PatchInvert_Selected( scene::Graph& graph ){

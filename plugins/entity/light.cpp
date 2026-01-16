@@ -1945,7 +1945,25 @@ public:
 			//globalOutputStream() << getTranslation() << '\n';
 			if ( g_lightType == LIGHTTYPE_DOOM3 ) {
 				m_dragPlanes.m_bounds = m_contained.aabb();
-				m_contained.setLightRadius( m_dragPlanes.evaluateResize( getTranslation(), rotation() ) );
+				const Matrix4& rotationMatrix = rotation();
+				const Vector3 localTranslation = translation_to_local( getTranslation(), rotationMatrix );
+				Vector3 extents = m_dragPlanes.m_bounds.extents;
+				const auto& selectables = m_dragPlanes.getSelectables();
+				for ( std::size_t axis = 0; axis < 3; ++axis ) {
+					const bool positive = selectables[axis * 2].isSelected();
+					const bool negative = selectables[axis * 2 + 1].isSelected();
+					if ( positive != negative ) {
+						float delta = localTranslation[axis];
+						if ( negative ) {
+							delta = -delta;
+						}
+						extents[axis] += delta;
+						if ( extents[axis] < 0.0f ) {
+							extents[axis] = 0.0f;
+						}
+					}
+				}
+				m_contained.setLightRadius( AABB( m_dragPlanes.m_bounds.origin, extents ) );
 			}
 			else{
 				m_contained.transformLightRadii( m_scaleRadius.evaluateResize( getTranslation() ) );

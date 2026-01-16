@@ -123,9 +123,10 @@ bool DEntity::LoadFromPrt( char *filename ){
 
 		for ( unsigned int j = 0; j < portals.node[i].portal_count; ++j )
 		{
+			vec3_t normal = {0.0f, 0.0f, 0.0f};
 			for ( unsigned int k = 0; k < portals.node[i].portal[j].point_count - 2; ++k )
 			{
-				vec3_t v1, v2, normal, n;
+				vec3_t v1, v2, n;
 				VectorSubtract( portals.node[i].portal[j].point[k + 2].p, portals.node[i].portal[j].point[k + 1].p, v1 );
 				VectorSubtract( portals.node[i].portal[j].point[k].p, portals.node[i].portal[j].point[k + 1].p, v2 );
 				CrossProduct( v1, v2, n );

@@ -511,16 +511,17 @@ void Entity_createFromSelection( const char* name, const Vector3& origin ){
 	                     || ( GlobalSelectionSystem().countSelected() == 0 && classname_equal( name, "func_static" ) && g_pGameDescription->mGameType == "doom3" );
 
 	const bool brushesSelected = Scene_countSelectedBrushes( GlobalSceneGraph() ) != 0;
+	const bool worldBrushesSelected = Scene_countSelectedWorldBrushes( GlobalSceneGraph() ) != 0;
 
 	//is important to have retexturing here; if doing in the end, undo doesn't succeed;
-	if ( string_compare_nocase_n( name, "trigger_", 8 ) == 0 && brushesSelected && !entityClass->fixedsize ){
+	if ( string_compare_nocase_n( name, "trigger_", 8 ) == 0 && worldBrushesSelected && !entityClass->fixedsize ){
 		//const char* shader = GetCommonShader( "trigger" ).c_str();
 		Scene_PatchSetShader_Selected( GlobalSceneGraph(), GetCommonShader( "trigger" ).c_str() );
 		Scene_BrushSetShader_Selected( GlobalSceneGraph(), GetCommonShader( "trigger" ).c_str() );
 	}
 
-	if ( !( entityClass->fixedsize || isModel ) && !brushesSelected ) {
-		globalErrorStream() << "failed to create a group entity - no brushes are selected\n";
+	if ( !( entityClass->fixedsize || isModel ) && !worldBrushesSelected ) {
+		globalErrorStream() << "failed to create a group entity - no world brushes are selected\n";
 		return;
 	}
 
@@ -537,7 +538,7 @@ void Entity_createFromSelection( const char* name, const Vector3& origin ){
 
 	Entity* entity = Node_getEntity( node );
 
-	if ( entityClass->fixedsize || ( isModel && !brushesSelected ) ) {
+	if ( entityClass->fixedsize || ( isModel && !worldBrushesSelected ) ) {
 		//Select_Delete();
 
 		Transformable* transform = Instance_getTransformable( instance );
@@ -557,7 +558,7 @@ void Entity_createFromSelection( const char* name, const Vector3& origin ){
 			entity->setKeyValue( "model", entity->getKeyValue( "name" ) );
 		}
 
-		Scene_parentSelectedBrushesToEntity( GlobalSceneGraph(), node );
+		Scene_parentSelectedWorldBrushesToEntity( GlobalSceneGraph(), node );
 		Scene_forEachChildSelectable( SelectableSetSelected( true ), instance.path() );
 	}
 
@@ -772,6 +773,17 @@ void ShowTargetNamesExport( EntityCreator& self, const BoolImportCallback& impor
 }
 typedef ReferenceCaller<EntityCreator, void(const BoolImportCallback&), ShowTargetNamesExport> ShowTargetNamesExportCaller;
 
+void ShowConnectionsThickImport( EntityCreator& self, bool value ){
+	self.setShowConnectionsThick( value );
+	UpdateAllWindows();
+}
+typedef ReferenceCaller<EntityCreator, void(bool), ShowConnectionsThickImport> ShowConnectionsThickImportCaller;
+
+void ShowConnectionsThickExport( EntityCreator& self, const BoolImportCallback& importer ){
+	importer( self.getShowConnectionsThick() );
+}
+typedef ReferenceCaller<EntityCreator, void(const BoolImportCallback&), ShowConnectionsThickExport> ShowConnectionsThickExportCaller;
+
 
 void Entity_constructPreferences( PreferencesPage& page ){
 	page.appendSpinner(	"Names Display Distance (3D)", 0, 200500,
@@ -785,6 +797,9 @@ void Entity_constructPreferences( PreferencesPage& page ){
 	page.appendCheckBox( "Entity Names", "= Targetnames",
 	                     BoolImportCallback( ShowTargetNamesImportCaller( GlobalEntityCreator() ) ),
 	                     BoolExportCallback( ShowTargetNamesExportCaller( GlobalEntityCreator() ) ) );
+	page.appendCheckBox( "", "Thick connection lines",
+	                     BoolImportCallback( ShowConnectionsThickImportCaller( GlobalEntityCreator() ) ),
+	                     BoolExportCallback( ShowConnectionsThickExportCaller( GlobalEntityCreator() ) ) );
 }
 void Entity_constructPage( PreferenceGroup& group ){
 	PreferencesPage page( group.createPage( "Entities", "Entity Display Preferences" ) );

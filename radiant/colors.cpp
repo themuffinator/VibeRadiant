@@ -156,6 +156,7 @@ std::array g_ColoursMenu{
 	ChooseColour( makeCallbackF  ( ModelBrowserColour_get )                , makeCallbackF( ModelBrowser_setBackgroundColour )      , "Model Browser Background..."      , "ColorModBroBackground" ),
 	ChooseColour( ColourGetCaller( g_camwindow_globals.color_cameraback )  , ColourSetCaller( g_camwindow_globals.color_cameraback ), "Camera Background..."             , "ColorCameraBackground" ),
 	ChooseColour( ColourGetCaller( g_xywindow_globals.color_gridback )     , ColourSetCaller( g_xywindow_globals.color_gridback )   , "Grid Background..."               , "ColorGridBackground" ),
+	ChooseColour( ColourGetCaller( g_xywindow_globals.color_gridback_coarse ), ColourSetCaller( g_xywindow_globals.color_gridback_coarse ), "Grid Background (Coarse)..."   , "ColorGridBackgroundCoarse" ),
 	ChooseColour( ColourGetCaller( g_xywindow_globals.color_gridmajor )    , ColourSetCaller( g_xywindow_globals.color_gridmajor )  , "Grid Major..."                    , "ColorGridMajor" ),
 	ChooseColour( ColourGetCaller( g_xywindow_globals.color_gridminor )    , ColourSetCaller( g_xywindow_globals.color_gridminor )  , "Grid Minor..."                    , "ColorGridMinor" ),
 	ChooseColour( ColourGetCaller( g_xywindow_globals.color_gridtext )     , ColourSetCaller( g_xywindow_globals.color_gridtext )   , "Grid Text..."                     , "ColorGridText" ), // coords and inactive name

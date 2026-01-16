@@ -1687,6 +1687,35 @@ void Scene_parentSelectedBrushesToEntity( scene::Graph& graph, scene::Node& pare
 	graph.traverse( ParentSelectedBrushesToEntityWalker( parent ) );
 }
 
+class ParentSelectedWorldBrushesToEntityWalker : public scene::Graph::Walker
+{
+	scene::Node& m_parent;
+	scene::Node* m_world = Map_FindWorldspawn( g_map );
+public:
+	ParentSelectedWorldBrushesToEntityWalker( scene::Node& parent ) : m_parent( parent ){
+	}
+	bool pre( const scene::Path& path, scene::Instance& instance ) const override {
+		return path.top().get_pointer() != &m_parent; /* skip traverse of target node */
+	}
+	void post( const scene::Path& path, scene::Instance& instance ) const override {
+		if ( m_world == nullptr ) {
+			return;
+		}
+		if ( Node_isPrimitive( path.top() )
+		  && Instance_isSelected( instance )
+		  && path.parent().get_pointer() == m_world ) {
+			NodeSmartReference node( path.top().get() );
+			scene::Traversable* parent_traversable = Node_getTraversable( path.parent() );
+			parent_traversable->erase( node );
+			Node_getTraversable( m_parent )->insert( node );
+		}
+	}
+};
+
+void Scene_parentSelectedWorldBrushesToEntity( scene::Graph& graph, scene::Node& parent ){
+	graph.traverse( ParentSelectedWorldBrushesToEntityWalker( parent ) );
+}
+
 void Scene_parentSubgraphSelectedBrushesToEntity( scene::Graph& graph, scene::Node& parent, const scene::Path& start ){
 	graph.traverse_subgraph( ParentSelectedBrushesToEntityWalker( parent ), start );
 }
@@ -1717,6 +1746,38 @@ public:
 std::size_t Scene_countSelectedBrushes( scene::Graph& graph ){
 	std::size_t count;
 	graph.traverse( CountSelectedBrushes( count ) );
+	return count;
+}
+
+class CountSelectedWorldBrushes : public scene::Graph::Walker
+{
+	std::size_t& m_count;
+	scene::Node* m_world = Map_FindWorldspawn( g_map );
+	mutable std::size_t m_depth;
+public:
+	CountSelectedWorldBrushes( std::size_t& count ) : m_count( count ), m_depth( 0 ){
+		m_count = 0;
+	}
+	bool pre( const scene::Path& path, scene::Instance& instance ) const override {
+		if ( ++m_depth != 1 && path.top().get().isRoot() ) {
+			return false;
+		}
+		if ( m_world != nullptr
+		  && Instance_isSelected( instance )
+		  && Node_isPrimitive( path.top() )
+		  && path.parent().get_pointer() == m_world ) {
+			++m_count;
+		}
+		return true;
+	}
+	void post( const scene::Path& path, scene::Instance& instance ) const override {
+		--m_depth;
+	}
+};
+
+std::size_t Scene_countSelectedWorldBrushes( scene::Graph& graph ){
+	std::size_t count;
+	graph.traverse( CountSelectedWorldBrushes( count ) );
 	return count;
 }
 #if 0

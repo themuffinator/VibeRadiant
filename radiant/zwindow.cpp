@@ -394,6 +394,9 @@ float ZWnd::screenToWorldZ( int y ) const {
 
 void ZWnd::drawGrid( float w, float h ){
 	const float gridSize = GetGridSize();
+	const Vector3& gridback = ( XYWnd_showGrid() && gridSize * m_scale <= 4.0f )
+		? g_xywindow_globals.color_gridback_coarse
+		: g_xywindow_globals.color_gridback;
 	float zb = m_origin[2] - h;
 	if ( zb < g_region_mins[2] ) {
 		zb = g_region_mins[2];
@@ -437,7 +440,7 @@ void ZWnd::drawGrid( float w, float h ){
 	}
 
 	if ( XYWnd_showGrid() && gridSize * m_scale >= 4.0f
-		&& g_xywindow_globals.color_gridminor != g_xywindow_globals.color_gridback ) {
+		&& g_xywindow_globals.color_gridminor != gridback ) {
 		gl().glColor3fv( vector3_to_array( g_xywindow_globals.color_gridminor ) );
 		gl().glBegin( GL_LINES );
 		for ( float zz = zb ; zz < ze ; zz += gridSize )
@@ -533,10 +536,15 @@ void ZWnd::Z_Draw(){
 	syncOriginXY();
 	updateModelview();
 
+	const float gridSize = GetGridSize();
+	const Vector3& gridback = ( XYWnd_showGrid() && gridSize * m_scale <= 4.0f )
+		? g_xywindow_globals.color_gridback_coarse
+		: g_xywindow_globals.color_gridback;
+
 	gl().glViewport( 0, 0, m_nWidth, m_nHeight );
-	gl().glClearColor( g_xywindow_globals.color_gridback[0],
-	                   g_xywindow_globals.color_gridback[1],
-	                   g_xywindow_globals.color_gridback[2], 0 );
+	gl().glClearColor( gridback[0],
+	                   gridback[1],
+	                   gridback[2], 0 );
 	gl().glClear( GL_COLOR_BUFFER_BIT );
 
 	gl().glMatrixMode( GL_PROJECTION );

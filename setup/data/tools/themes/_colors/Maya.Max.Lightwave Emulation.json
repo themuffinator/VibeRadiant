@@ -4,6 +4,7 @@
     "ColorModBroBackground": [0.25, 0.25, 0.25],
     "ColorCameraBackground": [0.25, 0.25, 0.25],
     "ColorGridBackground"  : [0.77, 0.77, 0.77],
+    "ColorGridBackgroundCoarse"  : [0.72, 0.72, 0.72],
     "ColorGridMajor"       : [0.89, 0.89, 0.89],
     "ColorGridMinor"       : [0.83, 0.83, 0.83],
     "ColorGridText"        : [0.0, 0.0, 0.0],

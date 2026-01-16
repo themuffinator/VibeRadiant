@@ -917,7 +917,7 @@ public:
 	void TransposeMatrix();
 	void Redisperse( EMatrixMajor mt );
 	void Smooth( EMatrixMajor mt );
-	void InsertRemove( bool bInsert, bool bColumn, bool bFirst );
+	void InsertRemove( bool bInsert, bool bColumn, bool bFirst, std::size_t selectedPos = std::numeric_limits<std::size_t>::max() );
 	Patch* MakeCap( Patch* patch, EPatchCap eType, EMatrixMajor mt, bool bFirst );
 	void ConstructSeam( EPatchCap eType, Vector3* p, std::size_t width );
 
@@ -998,8 +998,8 @@ private:
 		}
 	}
 
-	void InsertPoints( EMatrixMajor mt, bool bFirst );
-	void RemovePoints( EMatrixMajor mt, bool bFirst );
+	void InsertPoints( EMatrixMajor mt, bool bFirst, std::size_t selectedPos = std::numeric_limits<std::size_t>::max() );
+	void RemovePoints( EMatrixMajor mt, bool bFirst, std::size_t selectedPos = std::numeric_limits<std::size_t>::max() );
 
 	void AccumulateBBox();
 
@@ -1598,6 +1598,57 @@ public:
 
 	bool selectedVertices() const {
 		return std::ranges::any_of( m_ctrl_instances, []( const PatchControlInstance& instance ){ return instance.m_selectable.isSelected(); } );
+	}
+	std::size_t selectedRowOrColumn( bool column ) const {
+		const std::size_t invalid = std::numeric_limits<std::size_t>::max();
+		if ( m_ctrl_instances.empty() ) {
+			return invalid;
+		}
+
+		const std::size_t width = m_patch.getWidth();
+		const std::size_t height = m_patch.getHeight();
+		if ( width == 0 || height == 0 ) {
+			return invalid;
+		}
+
+		const auto isSelected = [&]( std::size_t row, std::size_t col ){
+			const std::size_t index = row * width + col;
+			return index < m_ctrl_instances.size() && m_ctrl_instances[index].m_selectable.isSelected();
+		};
+
+		if ( !column ) {
+			for ( std::size_t col = 0; col < width; ++col ) {
+				for ( std::size_t row = 1; row < height; row += 2 ) {
+					if ( isSelected( row, col ) ) {
+						return row;
+					}
+				}
+			}
+			for ( std::size_t col = 0; col < width; ++col ) {
+				for ( std::size_t row = 0; row < height; row += 2 ) {
+					if ( isSelected( row, col ) ) {
+						return row;
+					}
+				}
+			}
+			return invalid;
+		}
+
+		for ( std::size_t row = 0; row < height; ++row ) {
+			for ( std::size_t col = 1; col < width; col += 2 ) {
+				if ( isSelected( row, col ) ) {
+					return col;
+				}
+			}
+		}
+		for ( std::size_t row = 0; row < height; ++row ) {
+			for ( std::size_t col = 0; col < width; col += 2 ) {
+				if ( isSelected( row, col ) ) {
+					return col;
+				}
+			}
+		}
+		return invalid;
 	}
 
 	void transformComponents( const Matrix4& matrix ){

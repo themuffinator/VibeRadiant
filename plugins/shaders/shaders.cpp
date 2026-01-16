@@ -38,6 +38,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
+#include <algorithm>
 #include <map>
 #include <list>
 
@@ -51,6 +53,8 @@
 #include "debugging/debugging.h"
 #include "string/pooledstring.h"
 #include "math/vector.h"
+#include "math/matrix.h"
+#include "math/pi.h"
 #include "generic/callback.h"
 #include "generic/referencecounted.h"
 #include "stream/memstream.h"
@@ -71,6 +75,7 @@ const char* g_shadersExtension = "";
 const char* g_shadersDirectory = "";
 bool g_enableDefaultShaders = true;
 ShaderLanguage g_shaderLanguage = SHADERLANGUAGE_QUAKE3;
+bool g_enableQ3ShaderStages = false;
 bool g_useShaderList = true;
 _QERPlugImageTable* g_bitmapModule = 0;
 const char* g_texturePrefix = "textures/";
@@ -200,7 +205,22 @@ Image* loadHeightmap( void* environment, const char* name ){
 }
 
 
+Image* createSolidImage( byte r, byte g, byte b, byte a ){
+	RGBAImage* image = new RGBAImage( 1, 1 );
+	image->pixels[0].red = r;
+	image->pixels[0].green = g;
+	image->pixels[0].blue = b;
+	image->pixels[0].alpha = a;
+	return image;
+}
+
 Image* loadSpecial( void* environment, const char* name ){
+	if ( string_equal_nocase( name, "$whiteimage" ) || string_equal_nocase( name, "$lightmap" ) ) {
+		return createSolidImage( 255, 255, 255, 255 );
+	}
+	if ( string_equal_nocase( name, "$blackimage" ) ) {
+		return createSolidImage( 0, 0, 0, 255 );
+	}
 	if ( *name == '_' ) { // special image
 		Image* image = loadBitmap( environment, StringStream( GlobalRadiant().getAppPath(), "bitmaps/", name + 1, ".png" ) );
 		if ( image != 0 ) {
@@ -265,6 +285,198 @@ typedef std::list<ShaderVariable> ShaderParameters;
 typedef std::list<ShaderVariable> ShaderArguments;
 
 typedef std::pair<ShaderVariable, ShaderVariable> BlendFuncExpression;
+
+enum Q3WaveFunc
+{
+	Q3_WAVE_SIN,
+	Q3_WAVE_TRIANGLE,
+	Q3_WAVE_SQUARE,
+	Q3_WAVE_SAWTOOTH,
+	Q3_WAVE_INVERSESAWTOOTH,
+	Q3_WAVE_NOISE,
+};
+
+struct Q3WaveForm
+{
+	Q3WaveFunc func;
+	float base;
+	float amplitude;
+	float phase;
+	float frequency;
+
+	Q3WaveForm() :
+		func( Q3_WAVE_SIN ),
+		base( 0.0f ),
+		amplitude( 1.0f ),
+		phase( 0.0f ),
+		frequency( 1.0f ){
+	}
+};
+
+enum Q3RgbGenType
+{
+	Q3_RGB_IDENTITY,
+	Q3_RGB_IDENTITY_LIGHTING,
+	Q3_RGB_CONST,
+	Q3_RGB_WAVE,
+	Q3_RGB_VERTEX,
+	Q3_RGB_EXACTVERTEX,
+	Q3_RGB_ENTITY,
+	Q3_RGB_ONE_MINUS_ENTITY,
+	Q3_RGB_LIGHTING_DIFFUSE,
+	Q3_RGB_ONE_MINUS_VERTEX,
+};
+
+enum Q3AlphaGenType
+{
+	Q3_ALPHA_IDENTITY,
+	Q3_ALPHA_CONST,
+	Q3_ALPHA_WAVE,
+	Q3_ALPHA_VERTEX,
+	Q3_ALPHA_ONE_MINUS_VERTEX,
+	Q3_ALPHA_ENTITY,
+	Q3_ALPHA_ONE_MINUS_ENTITY,
+	Q3_ALPHA_PORTAL,
+	Q3_ALPHA_LIGHTING_SPECULAR,
+};
+
+enum Q3TcModType
+{
+	Q3_TCMOD_SCROLL,
+	Q3_TCMOD_SCALE,
+	Q3_TCMOD_ROTATE,
+	Q3_TCMOD_STRETCH,
+	Q3_TCMOD_TRANSFORM,
+	Q3_TCMOD_TURB,
+};
+
+struct Q3TcMod
+{
+	Q3TcModType type;
+	float params[6];
+	Q3WaveForm wave;
+
+	Q3TcMod() :
+		type( Q3_TCMOD_SCROLL ),
+		params{ 0, 0, 0, 0, 0, 0 },
+		wave(){
+	}
+};
+
+struct Q3StageTemplate
+{
+	enum MapType
+	{
+		MAP_NONE,
+		MAP_TEXTURE,
+		MAP_CLAMP,
+		MAP_ANIM,
+		MAP_ANIM_CLAMP,
+	};
+
+	MapType mapType;
+	TextureExpression map;
+	std::vector<TextureExpression> animMaps;
+	float animFps;
+
+	bool hasBlendFunc;
+	BlendFunc blendFunc;
+
+	Q3RgbGenType rgbGenType;
+	Vector3 rgbConst;
+	Q3WaveForm rgbWave;
+
+	Q3AlphaGenType alphaGenType;
+	float alphaConst;
+	Q3WaveForm alphaWave;
+	float alphaPortalRange;
+
+	ShaderStageAlphaFunc alphaFunc;
+	ShaderStageDepthFunc depthFunc;
+	bool depthWrite;
+	bool detail;
+
+	ShaderStageTcGen tcGen;
+	Vector3 tcGenVec0;
+	Vector3 tcGenVec1;
+	std::vector<Q3TcMod> tcMods;
+
+	Q3StageTemplate() :
+		mapType( MAP_NONE ),
+		animFps( 0.0f ),
+		hasBlendFunc( false ),
+		blendFunc( BLEND_ONE, BLEND_ZERO ),
+		rgbGenType( Q3_RGB_IDENTITY ),
+		rgbConst( 1, 1, 1 ),
+		rgbWave(),
+		alphaGenType( Q3_ALPHA_IDENTITY ),
+		alphaConst( 1.0f ),
+		alphaWave(),
+		alphaPortalRange( 0.0f ),
+		alphaFunc( eStageAlphaNone ),
+		depthFunc( eStageDepthNone ),
+		depthWrite( false ),
+		detail( false ),
+		tcGen( eTcGenBase ),
+		tcGenVec0( 1, 0, 0 ),
+		tcGenVec1( 0, 1, 0 ),
+		tcMods(){
+	}
+};
+
+struct Q3Stage
+{
+	std::vector<qtexture_t*> textures;
+	float animFps;
+	bool clampToEdge;
+	bool hasBlendFunc;
+	BlendFunc blendFunc;
+	Q3RgbGenType rgbGenType;
+	Vector3 rgbConst;
+	Q3WaveForm rgbWave;
+	Q3AlphaGenType alphaGenType;
+	float alphaConst;
+	Q3WaveForm alphaWave;
+	float alphaPortalRange;
+	ShaderStageAlphaFunc alphaFunc;
+	ShaderStageDepthFunc depthFunc;
+	bool depthWrite;
+	bool detail;
+	ShaderStageTcGen tcGen;
+	Vector3 tcGenVec0;
+	Vector3 tcGenVec1;
+	std::vector<Q3TcMod> tcMods;
+	bool usesVertexColour;
+	bool animated;
+
+	Q3Stage() :
+		animFps( 0.0f ),
+		clampToEdge( false ),
+		hasBlendFunc( false ),
+		blendFunc( BLEND_ONE, BLEND_ZERO ),
+		rgbGenType( Q3_RGB_IDENTITY ),
+		rgbConst( 1, 1, 1 ),
+		rgbWave(),
+		alphaGenType( Q3_ALPHA_IDENTITY ),
+		alphaConst( 1.0f ),
+		alphaWave(),
+		alphaPortalRange( 0.0f ),
+		alphaFunc( eStageAlphaNone ),
+		depthFunc( eStageDepthNone ),
+		depthWrite( false ),
+		detail( false ),
+		tcGen( eTcGenBase ),
+		tcGenVec0( 1, 0, 0 ),
+		tcGenVec1( 0, 1, 0 ),
+		tcMods(),
+		usesVertexColour( false ),
+		animated( false ){
+	}
+};
+
+float Q3Shader_waveValue( const Q3WaveForm& wave, float time );
+float Q3Shader_clamp01( float value );
+Matrix4 Q3Shader_buildTexMatrix( const Q3Stage& stage, float time );
 
 class ShaderTemplate
 {
@@ -365,6 +577,9 @@ public:
 	};
 	typedef std::vector<MapLayerTemplate> MapLayers;
 	MapLayers m_layers;
+
+	typedef std::vector<Q3StageTemplate> Q3StageTemplates;
+	Q3StageTemplates m_q3Stages;
 };
 
 
@@ -450,6 +665,149 @@ bool parseShaderParameters( Tokeniser& tokeniser, ShaderParameters& params ){
 		}
 	}
 	return true;
+}
+
+bool Q3Shader_parseVec3( Tokeniser& tokeniser, Vector3& value ){
+	const char* token = tokeniser.getToken();
+	if ( token == 0 ) {
+		Tokeniser_unexpectedError( tokeniser, token, "#vector3" );
+		return false;
+	}
+	if ( string_equal( token, "(" ) ) {
+		RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, value.x() ) );
+		RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, value.y() ) );
+		RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, value.z() ) );
+		RETURN_FALSE_IF_FAIL( Tokeniser_parseToken( tokeniser, ")" ) );
+		return true;
+	}
+	if ( !string_parse_float( token, value.x() ) ) {
+		Tokeniser_unexpectedError( tokeniser, token, "#number" );
+		return false;
+	}
+	RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, value.y() ) );
+	RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, value.z() ) );
+	return true;
+}
+
+bool Q3Shader_parseConstColor( Tokeniser& tokeniser, Vector3& value ){
+	return Q3Shader_parseVec3( tokeniser, value );
+}
+
+bool Q3Shader_parseConstAlpha( Tokeniser& tokeniser, float& value ){
+	const char* token = tokeniser.getToken();
+	if ( token == 0 ) {
+		Tokeniser_unexpectedError( tokeniser, token, "#number" );
+		return false;
+	}
+	if ( string_equal( token, "(" ) ) {
+		RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, value ) );
+		RETURN_FALSE_IF_FAIL( Tokeniser_parseToken( tokeniser, ")" ) );
+		return true;
+	}
+	if ( !string_parse_float( token, value ) ) {
+		Tokeniser_unexpectedError( tokeniser, token, "#number" );
+		return false;
+	}
+	return true;
+}
+
+bool Q3Shader_parseWaveForm( Tokeniser& tokeniser, Q3WaveForm& wave ){
+	const char* func = tokeniser.getToken();
+	if ( func == 0 ) {
+		Tokeniser_unexpectedError( tokeniser, func, "#wavefunc" );
+		return false;
+	}
+	if ( string_equal_nocase( func, "sin" ) ) {
+		wave.func = Q3_WAVE_SIN;
+	}
+	else if ( string_equal_nocase( func, "triangle" ) ) {
+		wave.func = Q3_WAVE_TRIANGLE;
+	}
+	else if ( string_equal_nocase( func, "square" ) ) {
+		wave.func = Q3_WAVE_SQUARE;
+	}
+	else if ( string_equal_nocase( func, "sawtooth" ) ) {
+		wave.func = Q3_WAVE_SAWTOOTH;
+	}
+	else if ( string_equal_nocase( func, "inversesawtooth" ) || string_equal_nocase( func, "inverseSawtooth" ) ) {
+		wave.func = Q3_WAVE_INVERSESAWTOOTH;
+	}
+	else if ( string_equal_nocase( func, "noise" ) ) {
+		wave.func = Q3_WAVE_NOISE;
+	}
+	else{
+		Tokeniser_unexpectedError( tokeniser, func, "#wavefunc" );
+		return false;
+	}
+
+	RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, wave.base ) );
+	RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, wave.amplitude ) );
+	RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, wave.phase ) );
+	RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, wave.frequency ) );
+	return true;
+}
+
+BlendFactor Q3Shader_parseBlendFactor( const char* token ){
+	if ( string_equal_nocase( token, "gl_zero" ) ) {
+		return BLEND_ZERO;
+	}
+	if ( string_equal_nocase( token, "gl_one" ) ) {
+		return BLEND_ONE;
+	}
+	if ( string_equal_nocase( token, "gl_src_color" ) ) {
+		return BLEND_SRC_COLOUR;
+	}
+	if ( string_equal_nocase( token, "gl_one_minus_src_color" ) ) {
+		return BLEND_ONE_MINUS_SRC_COLOUR;
+	}
+	if ( string_equal_nocase( token, "gl_src_alpha" ) ) {
+		return BLEND_SRC_ALPHA;
+	}
+	if ( string_equal_nocase( token, "gl_one_minus_src_alpha" ) ) {
+		return BLEND_ONE_MINUS_SRC_ALPHA;
+	}
+	if ( string_equal_nocase( token, "gl_dst_color" ) ) {
+		return BLEND_DST_COLOUR;
+	}
+	if ( string_equal_nocase( token, "gl_one_minus_dst_color" ) ) {
+		return BLEND_ONE_MINUS_DST_COLOUR;
+	}
+	if ( string_equal_nocase( token, "gl_dst_alpha" ) ) {
+		return BLEND_DST_ALPHA;
+	}
+	if ( string_equal_nocase( token, "gl_one_minus_dst_alpha" ) ) {
+		return BLEND_ONE_MINUS_DST_ALPHA;
+	}
+	if ( string_equal_nocase( token, "gl_src_alpha_saturate" ) ) {
+		return BLEND_SRC_ALPHA_SATURATE;
+	}
+	return BLEND_ZERO;
+}
+
+bool Q3Shader_isStageDirective( const char* token ){
+	static const char* directives[] = {
+		"map",
+		"clampmap",
+		"animmap",
+		"clampanimmap",
+		"videomap",
+		"blendfunc",
+		"rgbgen",
+		"alphagen",
+		"tcgen",
+		"tcmod",
+		"alphafunc",
+		"depthfunc",
+		"depthwrite",
+		"detail",
+	};
+	for ( const char* directive : directives )
+	{
+		if ( string_equal_nocase( token, directive ) ) {
+			return true;
+		}
+	}
+	return false;
 }
 
 bool ShaderTemplate::parseTemplate( Tokeniser& tokeniser ){
@@ -828,9 +1186,9 @@ class CShader final : public IShader
 {
 	std::size_t m_refcount;
 
-	const ShaderTemplate& m_template;
-	const ShaderArguments& m_args;
-	const char* m_filename;
+	ShaderTemplatePointer m_template;
+	ShaderArguments m_args;
+	CopiedString m_filename;
 // name is shader-name, otherwise texture-name (if not a real shader)
 	CopiedString m_Name;
 
@@ -845,6 +1203,8 @@ class CShader final : public IShader
 	BlendFunc m_blendFunc;
 
 	bool m_bInUse;
+	std::vector<Q3Stage> m_q3Stages;
+	bool m_q3Animated;
 
 
 public:
@@ -852,11 +1212,30 @@ public:
 
 	CShader( const ShaderDefinition& definition ) :
 		m_refcount( 0 ),
-		m_template( *definition.shaderTemplate ),
+		m_template( definition.shaderTemplate ),
 		m_args( definition.args ),
 		m_filename( definition.filename ),
 		m_blendFunc( BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA ),
-		m_bInUse( false ){
+		m_bInUse( false ),
+		m_q3Animated( false ){
+		m_pTexture = 0;
+		m_pSkyBox = 0;
+		m_pDiffuse = 0;
+		m_pBump = 0;
+		m_pSpecular = 0;
+
+		m_notfound = 0;
+
+		realise();
+	}
+	CShader( const ShaderTemplatePointer& shaderTemplate, const ShaderArguments& args, const char* filename ) :
+		m_refcount( 0 ),
+		m_template( shaderTemplate ),
+		m_args( args ),
+		m_filename( filename ),
+		m_blendFunc( BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA ),
+		m_bInUse( false ),
+		m_q3Animated( false ){
 		m_pTexture = 0;
 		m_pSkyBox = 0;
 		m_pDiffuse = 0;
@@ -894,8 +1273,8 @@ public:
 	}
 	qtexture_t* getSkyBox() override {
 		/* load skybox if only used */
-		if( m_pSkyBox == nullptr && !m_template.m_skyBox.empty() )
-			m_pSkyBox = GlobalTexturesCache().capture( LoadImageCallback( 0, GlobalTexturesCache().defaultLoader().m_func, true ), m_template.m_skyBox.c_str() );
+		if( m_pSkyBox == nullptr && !m_template->m_skyBox.empty() )
+			m_pSkyBox = GlobalTexturesCache().capture( LoadImageCallback( 0, GlobalTexturesCache().defaultLoader().m_func, true ), m_template->m_skyBox.c_str() );
 
 		return m_pSkyBox;
 	}
@@ -921,47 +1300,48 @@ public:
 	}
 // get the shader flags
 	int getFlags() const override {
-		return m_template.m_nFlags;
+		return m_template->m_nFlags;
 	}
 // get the transparency value
 	float getTrans() const override {
-		return m_template.m_fTrans;
+		return m_template->m_fTrans;
 	}
 // test if it's a true shader, or a default shader created to wrap around a texture
 	bool IsDefault() const override {
-		return string_empty( m_filename );
+		return string_empty( m_filename.c_str() );
 	}
 // get the alphaFunc
 	void getAlphaFunc( EAlphaFunc *func, float *ref ) override {
-		*func = m_template.m_AlphaFunc;
-		*ref = m_template.m_AlphaRef;
+		*func = m_template->m_AlphaFunc;
+		*ref = m_template->m_AlphaRef;
 	};
 	BlendFunc getBlendFunc() const override {
 		return m_blendFunc;
 	}
 // get the cull type
 	ECull getCull() override {
-		return m_template.m_Cull;
+		return m_template->m_Cull;
 	};
 // get shader file name (ie the file where this one is defined)
 	const char* getShaderFileName() const override {
-		return m_filename;
+		return m_filename.c_str();
 	}
 // -----------------------------------------
 
 	void realise(){
-		m_pTexture = evaluateTexture( m_template.m_textureName, m_template.m_params, m_args );
+		m_pTexture = evaluateTexture( m_template->m_textureName, m_template->m_params, m_args );
 
 		if ( m_pTexture->texture_number == 0 ) {
 			m_notfound = m_pTexture;
 
 			const auto name = StringStream( GlobalRadiant().getAppPath(), "bitmaps/",
-				( string_equal( m_template.getName(), "nomodel" )? "nomodel.png"
+				( string_equal( m_template->getName(), "nomodel" )? "nomodel.png"
 				: IsDefault() ? "notex.png"
 				: "shadernotex.png" ) );
 			m_pTexture = GlobalTexturesCache().capture( LoadImageCallback( 0, loadBitmap ), name );
 		}
 
+		realiseStages();
 		realiseLighting();
 	}
 
@@ -976,37 +1356,208 @@ public:
 			GlobalTexturesCache().release( m_pSkyBox );
 		}
 
+		unrealiseStages();
 		unrealiseLighting();
 	}
 
+	void realiseStages(){
+		m_q3Stages.clear();
+		m_q3Animated = false;
+
+		if ( g_shaderLanguage != SHADERLANGUAGE_QUAKE3 || !g_enableQ3ShaderStages ) {
+			return;
+		}
+
+		const LoadImageCallback loader( 0, loadSpecial );
+
+		for ( const auto& stageTemplate : m_template->m_q3Stages )
+		{
+			Q3Stage stage;
+			stage.animFps = stageTemplate.animFps;
+			stage.clampToEdge = stageTemplate.mapType == Q3StageTemplate::MAP_CLAMP
+			                    || stageTemplate.mapType == Q3StageTemplate::MAP_ANIM_CLAMP;
+			stage.hasBlendFunc = stageTemplate.hasBlendFunc;
+			stage.blendFunc = stageTemplate.blendFunc;
+
+			stage.rgbGenType = stageTemplate.rgbGenType;
+			stage.rgbConst = stageTemplate.rgbConst;
+			stage.rgbWave = stageTemplate.rgbWave;
+			stage.alphaGenType = stageTemplate.alphaGenType;
+			stage.alphaConst = stageTemplate.alphaConst;
+			stage.alphaWave = stageTemplate.alphaWave;
+			stage.alphaPortalRange = stageTemplate.alphaPortalRange;
+
+			stage.alphaFunc = stageTemplate.alphaFunc;
+			stage.depthFunc = stageTemplate.depthFunc;
+			stage.depthWrite = stageTemplate.depthWrite;
+			stage.detail = stageTemplate.detail;
+
+			stage.tcGen = stageTemplate.tcGen;
+			stage.tcGenVec0 = stageTemplate.tcGenVec0;
+			stage.tcGenVec1 = stageTemplate.tcGenVec1;
+			stage.tcMods = stageTemplate.tcMods;
+
+			if ( stageTemplate.mapType == Q3StageTemplate::MAP_TEXTURE || stageTemplate.mapType == Q3StageTemplate::MAP_CLAMP ) {
+				stage.textures.push_back( evaluateTexture( stageTemplate.map, m_template->m_params, m_args, loader ) );
+			}
+			else if ( stageTemplate.mapType == Q3StageTemplate::MAP_ANIM || stageTemplate.mapType == Q3StageTemplate::MAP_ANIM_CLAMP ) {
+				for ( const auto& frame : stageTemplate.animMaps )
+				{
+					stage.textures.push_back( evaluateTexture( frame, m_template->m_params, m_args, loader ) );
+				}
+			}
+
+			stage.usesVertexColour =
+			    stage.rgbGenType == Q3_RGB_VERTEX
+			    || stage.rgbGenType == Q3_RGB_EXACTVERTEX
+			    || stage.rgbGenType == Q3_RGB_LIGHTING_DIFFUSE
+			    || stage.rgbGenType == Q3_RGB_ONE_MINUS_VERTEX
+			    || stage.alphaGenType == Q3_ALPHA_VERTEX
+			    || stage.alphaGenType == Q3_ALPHA_ONE_MINUS_VERTEX
+			    || stage.alphaGenType == Q3_ALPHA_LIGHTING_SPECULAR;
+
+			const bool animMap = stage.textures.size() > 1 && stage.animFps > 0.0f;
+			const bool rgbWave = stage.rgbGenType == Q3_RGB_WAVE;
+			const bool alphaWave = stage.alphaGenType == Q3_ALPHA_WAVE;
+			bool tcModAnimated = false;
+			for ( const auto& tcMod : stage.tcMods )
+			{
+				if ( tcMod.type == Q3_TCMOD_SCROLL && ( tcMod.params[0] != 0.0f || tcMod.params[1] != 0.0f ) ) {
+					tcModAnimated = true;
+				}
+				else if ( tcMod.type == Q3_TCMOD_ROTATE && tcMod.params[0] != 0.0f ) {
+					tcModAnimated = true;
+				}
+				else if ( tcMod.type == Q3_TCMOD_STRETCH && ( tcMod.wave.frequency != 0.0f || tcMod.wave.amplitude != 0.0f ) ) {
+					tcModAnimated = true;
+				}
+				else if ( tcMod.type == Q3_TCMOD_TURB && ( tcMod.wave.frequency != 0.0f || tcMod.wave.amplitude != 0.0f ) ) {
+					tcModAnimated = true;
+				}
+			}
+
+			stage.animated = animMap || rgbWave || alphaWave || tcModAnimated;
+			m_q3Animated = m_q3Animated || stage.animated;
+
+			if ( !stage.textures.empty() ) {
+				m_q3Stages.push_back( stage );
+			}
+		}
+	}
+
+	void unrealiseStages(){
+		if ( g_shaderLanguage != SHADERLANGUAGE_QUAKE3 ) {
+			return;
+		}
+		for ( auto& stage : m_q3Stages )
+		{
+			for ( auto *texture : stage.textures )
+			{
+				GlobalTexturesCache().release( texture );
+			}
+		}
+		m_q3Stages.clear();
+		m_q3Animated = false;
+	}
+
+	void evaluateStage( const Q3Stage& stage, float time, ShaderStage& out ) const {
+		out = ShaderStage();
+
+		if ( stage.textures.empty() ) {
+			out.texture = m_pTexture;
+		}
+		else if ( stage.textures.size() == 1 || stage.animFps <= 0.0f ) {
+			out.texture = stage.textures.front();
+		}
+		else
+		{
+			const std::size_t count = stage.textures.size();
+			const std::size_t frame = static_cast<std::size_t>( std::floor( time * stage.animFps ) ) % count;
+			out.texture = stage.textures[frame];
+		}
+
+		Vector3 rgb( 1.0f, 1.0f, 1.0f );
+		switch ( stage.rgbGenType )
+		{
+		case Q3_RGB_CONST:
+			rgb = stage.rgbConst;
+			break;
+		case Q3_RGB_WAVE:
+			{
+				const float v = Q3Shader_clamp01( Q3Shader_waveValue( stage.rgbWave, time ) );
+				rgb = Vector3( v, v, v );
+			}
+			break;
+		default:
+			break;
+		}
+
+		float alpha = 1.0f;
+		switch ( stage.alphaGenType )
+		{
+		case Q3_ALPHA_CONST:
+			alpha = Q3Shader_clamp01( stage.alphaConst );
+			break;
+		case Q3_ALPHA_WAVE:
+			alpha = Q3Shader_clamp01( Q3Shader_waveValue( stage.alphaWave, time ) );
+			break;
+		case Q3_ALPHA_PORTAL:
+			alpha = 1.0f;
+			break;
+		default:
+			break;
+		}
+
+		rgb.x() = Q3Shader_clamp01( rgb.x() );
+		rgb.y() = Q3Shader_clamp01( rgb.y() );
+		rgb.z() = Q3Shader_clamp01( rgb.z() );
+
+		out.colour = Vector4( rgb, Q3Shader_clamp01( alpha ) );
+		out.blendFunc = stage.blendFunc;
+		out.hasBlendFunc = stage.hasBlendFunc;
+		out.clampToEdge = stage.clampToEdge;
+		out.depthWrite = stage.depthWrite || !stage.hasBlendFunc;
+		out.depthFunc = stage.depthFunc;
+		out.alphaFunc = stage.alphaFunc;
+		out.alphaRef = 0.0f;
+		if ( stage.alphaFunc == eStageAlphaLT128 || stage.alphaFunc == eStageAlphaGE128 ) {
+			out.alphaRef = 0.5f;
+		}
+		out.texMatrix = Q3Shader_buildTexMatrix( stage, time );
+		out.tcGen = stage.tcGen;
+		out.tcGenVec0 = stage.tcGenVec0;
+		out.tcGenVec1 = stage.tcGenVec1;
+		out.usesVertexColour = stage.usesVertexColour;
+	}
+
 	void realiseLighting(){
-		if ( m_lightingEnabled ) {
+		if ( m_lightingEnabled && g_shaderLanguage != SHADERLANGUAGE_QUAKE3 ) {
 			LoadImageCallback loader = GlobalTexturesCache().defaultLoader();
-			if ( !string_empty( m_template.m_heightmapScale.c_str() ) ) {
-				m_heightmapScale = evaluateFloat( m_template.m_heightmapScale, m_template.m_params, m_args );
+			if ( !string_empty( m_template->m_heightmapScale.c_str() ) ) {
+				m_heightmapScale = evaluateFloat( m_template->m_heightmapScale, m_template->m_params, m_args );
 				loader = LoadImageCallback( &m_heightmapScale, loadHeightmap );
 			}
-			m_pDiffuse = evaluateTexture( m_template.m_diffuse, m_template.m_params, m_args );
-			m_pBump = evaluateTexture( m_template.m_bump, m_template.m_params, m_args, loader );
-			m_pSpecular = evaluateTexture( m_template.m_specular, m_template.m_params, m_args );
-			m_pLightFalloffImage = evaluateTexture( m_template.m_lightFalloffImage, m_template.m_params, m_args );
+			m_pDiffuse = evaluateTexture( m_template->m_diffuse, m_template->m_params, m_args );
+			m_pBump = evaluateTexture( m_template->m_bump, m_template->m_params, m_args, loader );
+			m_pSpecular = evaluateTexture( m_template->m_specular, m_template->m_params, m_args );
+			m_pLightFalloffImage = evaluateTexture( m_template->m_lightFalloffImage, m_template->m_params, m_args );
 
-			for ( const auto& layer : m_template.m_layers )
+			for ( const auto& layer : m_template->m_layers )
 			{
-				m_layers.push_back( evaluateLayer( layer, m_template.m_params, m_args ) );
+				m_layers.push_back( evaluateLayer( layer, m_template->m_params, m_args ) );
 			}
 
 			if ( m_layers.size() == 1 ) {
-				const BlendFuncExpression& blendFunc = m_template.m_layers.front().blendFunc();
+				const BlendFuncExpression& blendFunc = m_template->m_layers.front().blendFunc();
 				if ( !string_empty( blendFunc.second.c_str() ) ) {
 					m_blendFunc = BlendFunc(
-					                  evaluateBlendFactor( blendFunc.first.c_str(), m_template.m_params, m_args ),
-					                  evaluateBlendFactor( blendFunc.second.c_str(), m_template.m_params, m_args )
+					                  evaluateBlendFactor( blendFunc.first.c_str(), m_template->m_params, m_args ),
+					                  evaluateBlendFactor( blendFunc.second.c_str(), m_template->m_params, m_args )
 					              );
 				}
 				else
 				{
-					const char* blend = evaluateShaderValue( blendFunc.first.c_str(), m_template.m_params, m_args );
+					const char* blend = evaluateShaderValue( blendFunc.first.c_str(), m_template->m_params, m_args );
 
 					if ( string_equal_nocase( blend, "add" ) ) {
 						m_blendFunc = BlendFunc( BLEND_ONE, BLEND_ONE );
@@ -1027,7 +1578,7 @@ public:
 	}
 
 	void unrealiseLighting(){
-		if ( m_lightingEnabled ) {
+		if ( m_lightingEnabled && g_shaderLanguage != SHADERLANGUAGE_QUAKE3 ) {
 			GlobalTexturesCache().release( m_pDiffuse );
 			GlobalTexturesCache().release( m_pBump );
 			GlobalTexturesCache().release( m_pSpecular );
@@ -1101,8 +1652,45 @@ public:
 		}
 	}
 
+	bool hasStages() const override {
+		return g_shaderLanguage == SHADERLANGUAGE_QUAKE3 && g_enableQ3ShaderStages && !m_q3Stages.empty();
+	}
+
+	bool isAnimated() const override {
+		return g_enableQ3ShaderStages && m_q3Animated;
+	}
+
+	void forEachStage( float time, const ShaderStageCallback& callback ) const override {
+		if ( g_shaderLanguage != SHADERLANGUAGE_QUAKE3 ) {
+			return;
+		}
+
+		if ( !g_enableQ3ShaderStages ) {
+			ShaderStage stage;
+			stage.texture = m_pTexture;
+			stage.depthWrite = true;
+			callback( stage );
+			return;
+		}
+
+		if ( m_q3Stages.empty() ) {
+			ShaderStage stage;
+			stage.texture = m_pTexture;
+			stage.depthWrite = true;
+			callback( stage );
+			return;
+		}
+
+		for ( const auto& stage : m_q3Stages )
+		{
+			ShaderStage out;
+			evaluateStage( stage, time, out );
+			callback( out );
+		}
+	}
+
 	qtexture_t* lightFalloffImage() const override {
-		if ( !m_template.m_lightFalloffImage.empty() ) {
+		if ( !m_template->m_lightFalloffImage.empty() ) {
 			return m_pLightFalloffImage;
 		}
 		return 0;
@@ -1157,14 +1745,19 @@ void FreeShaders(){
 bool ShaderTemplate::parseQuake3( Tokeniser& tokeniser ){
 	// name of the qtexture_t we'll use to represent this shader (this one has the "textures\" before)
 	m_textureName = m_Name;
+	m_q3Stages.clear();
+	const bool parseStages = g_enableQ3ShaderStages;
 
 	tokeniser.nextLine();
 
 	// we need to read until we hit a balanced }
 	int depth = 0;
+	Q3StageTemplate currentStage;
 	for (;; )
 	{
-		tokeniser.nextLine();
+		if ( !parseStages ) {
+			tokeniser.nextLine();
+		}
 		const char* token = tokeniser.getToken();
 
 		if ( token == 0 ) {
@@ -1173,12 +1766,23 @@ bool ShaderTemplate::parseQuake3( Tokeniser& tokeniser ){
 
 		if ( string_equal( token, "{" ) ) {
 			++depth;
+			if ( parseStages && depth == 2 ) {
+				currentStage = Q3StageTemplate();
+			}
 			continue;
 		}
 		else if ( string_equal( token, "}" ) ) {
 			--depth;
 			if ( depth < 0 ) { // underflow
 				return false;
+			}
+			if ( parseStages && depth == 1 ) {
+				const bool hasMap = ( currentStage.mapType == Q3StageTemplate::MAP_TEXTURE || currentStage.mapType == Q3StageTemplate::MAP_CLAMP )
+				                    ? !currentStage.map.empty()
+				                    : !currentStage.animMaps.empty();
+				if ( hasMap ) {
+					m_q3Stages.push_back( currentStage );
+				}
 			}
 			if ( depth == 0 ) { // end of shader
 				break;
@@ -1306,6 +1910,288 @@ bool ShaderTemplate::parseQuake3( Tokeniser& tokeniser ){
 				}
 			}
 		}
+		else if ( depth == 2 ) {
+			if ( !parseStages ) {
+				continue;
+			}
+			if ( string_equal_nocase( token, "map" ) ) {
+				currentStage.mapType = Q3StageTemplate::MAP_TEXTURE;
+				RETURN_FALSE_IF_FAIL( Tokeniser_parseTextureName( tokeniser, currentStage.map ) );
+			}
+			else if ( string_equal_nocase( token, "clampmap" ) ) {
+				currentStage.mapType = Q3StageTemplate::MAP_CLAMP;
+				RETURN_FALSE_IF_FAIL( Tokeniser_parseTextureName( tokeniser, currentStage.map ) );
+			}
+			else if ( string_equal_nocase( token, "animmap" ) || string_equal_nocase( token, "clampanimmap" ) ) {
+				currentStage.mapType = string_equal_nocase( token, "clampanimmap" )
+				                       ? Q3StageTemplate::MAP_ANIM_CLAMP
+				                       : Q3StageTemplate::MAP_ANIM;
+				currentStage.animMaps.clear();
+				RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, currentStage.animFps ) );
+				for (;; )
+				{
+					const char* frame = tokeniser.getToken();
+					if ( frame == 0 ) {
+						return false;
+					}
+					if ( string_equal( frame, "}" ) || Q3Shader_isStageDirective( frame ) ) {
+						tokeniser.ungetToken();
+						break;
+					}
+					TextureExpression frameName;
+					parseTextureName( frameName, frame );
+					currentStage.animMaps.push_back( frameName );
+				}
+			}
+			else if ( string_equal_nocase( token, "videomap" ) ) {
+				const char* videoName = tokeniser.getToken();
+				if ( videoName == 0 ) {
+					Tokeniser_unexpectedError( tokeniser, videoName, "#videomap" );
+					return false;
+				}
+				currentStage.mapType = Q3StageTemplate::MAP_TEXTURE;
+				currentStage.map = "$whiteimage";
+			}
+			else if ( string_equal_nocase( token, "blendfunc" ) ) {
+				const char* blend = tokeniser.getToken();
+				if ( blend == 0 ) {
+					Tokeniser_unexpectedError( tokeniser, blend, "#blendfunc" );
+					return false;
+				}
+				if ( string_equal_nocase( blend, "add" ) ) {
+					currentStage.blendFunc = BlendFunc( BLEND_ONE, BLEND_ONE );
+				}
+				else if ( string_equal_nocase( blend, "filter" ) ) {
+					currentStage.blendFunc = BlendFunc( BLEND_DST_COLOUR, BLEND_ZERO );
+				}
+				else if ( string_equal_nocase( blend, "blend" ) ) {
+					currentStage.blendFunc = BlendFunc( BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA );
+				}
+				else
+				{
+					const char* dst = tokeniser.getToken();
+					if ( dst == 0 ) {
+						Tokeniser_unexpectedError( tokeniser, dst, "#blendfunc-dst" );
+						return false;
+					}
+					currentStage.blendFunc = BlendFunc(
+					                             Q3Shader_parseBlendFactor( blend ),
+					                             Q3Shader_parseBlendFactor( dst )
+					                         );
+				}
+				currentStage.hasBlendFunc = true;
+			}
+			else if ( string_equal_nocase( token, "rgbgen" ) ) {
+				const char* gen = tokeniser.getToken();
+				if ( gen == 0 ) {
+					Tokeniser_unexpectedError( tokeniser, gen, "#rgbgen" );
+					return false;
+				}
+				if ( string_equal_nocase( gen, "identity" ) ) {
+					currentStage.rgbGenType = Q3_RGB_IDENTITY;
+				}
+				else if ( string_equal_nocase( gen, "identitylighting" ) ) {
+					currentStage.rgbGenType = Q3_RGB_IDENTITY_LIGHTING;
+				}
+				else if ( string_equal_nocase( gen, "const" ) ) {
+					currentStage.rgbGenType = Q3_RGB_CONST;
+					RETURN_FALSE_IF_FAIL( Q3Shader_parseConstColor( tokeniser, currentStage.rgbConst ) );
+				}
+				else if ( string_equal_nocase( gen, "wave" ) ) {
+					currentStage.rgbGenType = Q3_RGB_WAVE;
+					RETURN_FALSE_IF_FAIL( Q3Shader_parseWaveForm( tokeniser, currentStage.rgbWave ) );
+				}
+				else if ( string_equal_nocase( gen, "vertex" ) ) {
+					currentStage.rgbGenType = Q3_RGB_VERTEX;
+				}
+				else if ( string_equal_nocase( gen, "exactvertex" ) ) {
+					currentStage.rgbGenType = Q3_RGB_EXACTVERTEX;
+				}
+				else if ( string_equal_nocase( gen, "entity" ) ) {
+					currentStage.rgbGenType = Q3_RGB_ENTITY;
+				}
+				else if ( string_equal_nocase( gen, "oneminusentity" ) ) {
+					currentStage.rgbGenType = Q3_RGB_ONE_MINUS_ENTITY;
+				}
+				else if ( string_equal_nocase( gen, "lightingdiffuse" ) ) {
+					currentStage.rgbGenType = Q3_RGB_LIGHTING_DIFFUSE;
+				}
+				else if ( string_equal_nocase( gen, "oneminusvertex" ) ) {
+					currentStage.rgbGenType = Q3_RGB_ONE_MINUS_VERTEX;
+				}
+			}
+			else if ( string_equal_nocase( token, "alphagen" ) ) {
+				const char* gen = tokeniser.getToken();
+				if ( gen == 0 ) {
+					Tokeniser_unexpectedError( tokeniser, gen, "#alphagen" );
+					return false;
+				}
+				if ( string_equal_nocase( gen, "identity" ) ) {
+					currentStage.alphaGenType = Q3_ALPHA_IDENTITY;
+				}
+				else if ( string_equal_nocase( gen, "const" ) ) {
+					currentStage.alphaGenType = Q3_ALPHA_CONST;
+					RETURN_FALSE_IF_FAIL( Q3Shader_parseConstAlpha( tokeniser, currentStage.alphaConst ) );
+				}
+				else if ( string_equal_nocase( gen, "wave" ) ) {
+					currentStage.alphaGenType = Q3_ALPHA_WAVE;
+					RETURN_FALSE_IF_FAIL( Q3Shader_parseWaveForm( tokeniser, currentStage.alphaWave ) );
+				}
+				else if ( string_equal_nocase( gen, "vertex" ) ) {
+					currentStage.alphaGenType = Q3_ALPHA_VERTEX;
+				}
+				else if ( string_equal_nocase( gen, "oneminusvertex" ) ) {
+					currentStage.alphaGenType = Q3_ALPHA_ONE_MINUS_VERTEX;
+				}
+				else if ( string_equal_nocase( gen, "entity" ) ) {
+					currentStage.alphaGenType = Q3_ALPHA_ENTITY;
+				}
+				else if ( string_equal_nocase( gen, "oneminusentity" ) ) {
+					currentStage.alphaGenType = Q3_ALPHA_ONE_MINUS_ENTITY;
+				}
+				else if ( string_equal_nocase( gen, "portal" ) ) {
+					currentStage.alphaGenType = Q3_ALPHA_PORTAL;
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, currentStage.alphaPortalRange ) );
+				}
+				else if ( string_equal_nocase( gen, "lightingspecular" ) ) {
+					currentStage.alphaGenType = Q3_ALPHA_LIGHTING_SPECULAR;
+				}
+			}
+			else if ( string_equal_nocase( token, "alphafunc" ) ) {
+				const char* func = tokeniser.getToken();
+				if ( func == 0 ) {
+					Tokeniser_unexpectedError( tokeniser, func, "#alphafunc" );
+					return false;
+				}
+				if ( string_equal_nocase( func, "gt0" ) ) {
+					currentStage.alphaFunc = eStageAlphaGT0;
+				}
+				else if ( string_equal_nocase( func, "lt128" ) ) {
+					currentStage.alphaFunc = eStageAlphaLT128;
+				}
+				else if ( string_equal_nocase( func, "ge128" ) ) {
+					currentStage.alphaFunc = eStageAlphaGE128;
+				}
+			}
+			else if ( string_equal_nocase( token, "depthfunc" ) ) {
+				const char* func = tokeniser.getToken();
+				if ( func == 0 ) {
+					Tokeniser_unexpectedError( tokeniser, func, "#depthfunc" );
+					return false;
+				}
+				if ( string_equal_nocase( func, "less" ) ) {
+					currentStage.depthFunc = eStageDepthLess;
+				}
+				else if ( string_equal_nocase( func, "lequal" ) ) {
+					currentStage.depthFunc = eStageDepthLEqual;
+				}
+				else if ( string_equal_nocase( func, "equal" ) ) {
+					currentStage.depthFunc = eStageDepthEqual;
+				}
+				else if ( string_equal_nocase( func, "greater" ) ) {
+					currentStage.depthFunc = eStageDepthGreater;
+				}
+				else if ( string_equal_nocase( func, "gequal" ) ) {
+					currentStage.depthFunc = eStageDepthGEqual;
+				}
+				else if ( string_equal_nocase( func, "always" ) ) {
+					currentStage.depthFunc = eStageDepthAlways;
+				}
+			}
+			else if ( string_equal_nocase( token, "depthwrite" ) ) {
+				currentStage.depthWrite = true;
+			}
+			else if ( string_equal_nocase( token, "detail" ) ) {
+				currentStage.detail = true;
+			}
+			else if ( string_equal_nocase( token, "tcgen" ) ) {
+				const char* gen = tokeniser.getToken();
+				if ( gen == 0 ) {
+					Tokeniser_unexpectedError( tokeniser, gen, "#tcgen" );
+					return false;
+				}
+				if ( string_equal_nocase( gen, "base" ) ) {
+					currentStage.tcGen = eTcGenBase;
+				}
+				else if ( string_equal_nocase( gen, "lightmap" ) ) {
+					currentStage.tcGen = eTcGenLightmap;
+				}
+				else if ( string_equal_nocase( gen, "environment" ) ) {
+					currentStage.tcGen = eTcGenEnvironment;
+				}
+				else if ( string_equal_nocase( gen, "vector" ) ) {
+					currentStage.tcGen = eTcGenVector;
+					RETURN_FALSE_IF_FAIL( Q3Shader_parseVec3( tokeniser, currentStage.tcGenVec0 ) );
+					RETURN_FALSE_IF_FAIL( Q3Shader_parseVec3( tokeniser, currentStage.tcGenVec1 ) );
+				}
+			}
+			else if ( string_equal_nocase( token, "tcmod" ) ) {
+				const char* mod = tokeniser.getToken();
+				if ( mod == 0 ) {
+					Tokeniser_unexpectedError( tokeniser, mod, "#tcmod" );
+					return false;
+				}
+				Q3TcMod tcmod;
+				if ( string_equal_nocase( mod, "scroll" ) ) {
+					tcmod.type = Q3_TCMOD_SCROLL;
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[0] ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[1] ) );
+					currentStage.tcMods.push_back( tcmod );
+				}
+				else if ( string_equal_nocase( mod, "scale" ) ) {
+					tcmod.type = Q3_TCMOD_SCALE;
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[0] ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[1] ) );
+					currentStage.tcMods.push_back( tcmod );
+				}
+				else if ( string_equal_nocase( mod, "rotate" ) ) {
+					tcmod.type = Q3_TCMOD_ROTATE;
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[0] ) );
+					currentStage.tcMods.push_back( tcmod );
+				}
+				else if ( string_equal_nocase( mod, "stretch" ) ) {
+					tcmod.type = Q3_TCMOD_STRETCH;
+					RETURN_FALSE_IF_FAIL( Q3Shader_parseWaveForm( tokeniser, tcmod.wave ) );
+					currentStage.tcMods.push_back( tcmod );
+				}
+				else if ( string_equal_nocase( mod, "transform" ) ) {
+					tcmod.type = Q3_TCMOD_TRANSFORM;
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[0] ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[1] ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[2] ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[3] ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[4] ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.params[5] ) );
+					currentStage.tcMods.push_back( tcmod );
+				}
+				else if ( string_equal_nocase( mod, "turb" ) ) {
+					tcmod.type = Q3_TCMOD_TURB;
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.wave.base ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.wave.amplitude ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.wave.phase ) );
+					RETURN_FALSE_IF_FAIL( Tokeniser_getFloat( tokeniser, tcmod.wave.frequency ) );
+					currentStage.tcMods.push_back( tcmod );
+				}
+			}
+		}
+	}
+
+	if ( parseStages && ( m_textureName.empty() || string_equal( m_textureName.c_str(), m_Name.c_str() ) ) ) {
+		for ( const auto& stage : m_q3Stages )
+		{
+			if ( stage.mapType == Q3StageTemplate::MAP_TEXTURE || stage.mapType == Q3StageTemplate::MAP_CLAMP ) {
+				if ( !stage.map.empty() && !string_equal_nocase( stage.map.c_str(), "$lightmap" ) ) {
+					m_textureName = stage.map;
+					break;
+				}
+			}
+			else if ( stage.mapType == Q3StageTemplate::MAP_ANIM || stage.mapType == Q3StageTemplate::MAP_ANIM_CLAMP ) {
+				if ( !stage.animMaps.empty() ) {
+					m_textureName = stage.animMaps.front();
+					break;
+				}
+			}
+		}
 	}
 
 	return true;
@@ -1324,6 +2210,98 @@ public:
 	Layer() : m_type( LAYER_NONE ), m_blendFunc( BLEND_ONE, BLEND_ZERO ), m_clampToBorder( false ), m_alphaTest( -1 ), m_heightmapScale( 0 ){
 	}
 };
+
+float Q3Shader_wrap01( float value ){
+	value = float_mod( value, 1.0f );
+	return value < 0.0f ? value + 1.0f : value;
+}
+
+float Q3Shader_noise( float phase ){
+	const float n = sin( phase * 12.9898f + 78.233f ) * 43758.5453f;
+	const float frac = n - std::floor( n );
+	return frac * 2.0f - 1.0f;
+}
+
+float Q3Shader_waveSample( const Q3WaveForm& wave, float time ){
+	const float phase = wave.phase + time * wave.frequency;
+	const float frac = Q3Shader_wrap01( phase );
+	switch ( wave.func )
+	{
+	case Q3_WAVE_SIN:
+		return sin( phase * static_cast<float>( c_2pi ) );
+	case Q3_WAVE_TRIANGLE:
+		return 2.0f * std::fabs( 2.0f * frac - 1.0f ) - 1.0f;
+	case Q3_WAVE_SQUARE:
+		return frac < 0.5f ? 1.0f : -1.0f;
+	case Q3_WAVE_SAWTOOTH:
+		return frac;
+	case Q3_WAVE_INVERSESAWTOOTH:
+		return 1.0f - frac;
+	case Q3_WAVE_NOISE:
+		return Q3Shader_noise( phase );
+	}
+	return 0.0f;
+}
+
+float Q3Shader_waveValue( const Q3WaveForm& wave, float time ){
+	const float sample = Q3Shader_waveSample( wave, time );
+	return wave.base + wave.amplitude * sample;
+}
+
+float Q3Shader_clamp01( float value ){
+	return std::max( 0.0f, std::min( 1.0f, value ) );
+}
+
+Matrix4 Q3Shader_buildTexMatrix( const Q3Stage& stage, float time ){
+	Matrix4 texMatrix = g_matrix4_identity;
+	for ( const auto& mod : stage.tcMods )
+	{
+		Matrix4 modMatrix = g_matrix4_identity;
+		switch ( mod.type )
+		{
+		case Q3_TCMOD_SCROLL:
+			matrix4_translate_by_vec3( modMatrix, Vector3( Q3Shader_wrap01( mod.params[0] * time ),
+			                                               Q3Shader_wrap01( mod.params[1] * time ),
+			                                               0.0f ) );
+			break;
+		case Q3_TCMOD_SCALE:
+			matrix4_scale_by_vec3( modMatrix, Vector3( mod.params[0], mod.params[1], 1.0f ) );
+			break;
+		case Q3_TCMOD_ROTATE:
+			matrix4_translate_by_vec3( modMatrix, Vector3( 0.5f, 0.5f, 0.0f ) );
+			matrix4_rotate_by_euler_xyz_degrees( modMatrix, Vector3( 0.0f, 0.0f, -mod.params[0] * time ) );
+			matrix4_translate_by_vec3( modMatrix, Vector3( -0.5f, -0.5f, 0.0f ) );
+			break;
+		case Q3_TCMOD_STRETCH:
+			{
+				float scale = Q3Shader_waveValue( mod.wave, time );
+				if ( scale == 0.0f ) {
+					scale = 1.0f;
+				}
+				matrix4_translate_by_vec3( modMatrix, Vector3( 0.5f, 0.5f, 0.0f ) );
+				matrix4_scale_by_vec3( modMatrix, Vector3( scale, scale, 1.0f ) );
+				matrix4_translate_by_vec3( modMatrix, Vector3( -0.5f, -0.5f, 0.0f ) );
+			}
+			break;
+		case Q3_TCMOD_TRANSFORM:
+			modMatrix = Matrix4(
+			              mod.params[0], mod.params[1], 0.0f, 0.0f,
+			              mod.params[2], mod.params[3], 0.0f, 0.0f,
+			              0.0f,          0.0f,          1.0f, 0.0f,
+			              mod.params[4], mod.params[5], 0.0f, 1.0f
+			          );
+			break;
+		case Q3_TCMOD_TURB:
+			{
+				const float offset = mod.wave.base + mod.wave.amplitude * sin( ( mod.wave.phase + time * mod.wave.frequency ) * static_cast<float>( c_2pi ) );
+				matrix4_translate_by_vec3( modMatrix, Vector3( offset, offset, 0.0f ) );
+			}
+			break;
+		}
+		matrix4_premultiply_by_matrix4( texMatrix, modMatrix );
+	}
+	return texMatrix;
+}
 
 std::list<CopiedString> g_shaderFilenames;
 
@@ -1406,6 +2384,115 @@ void ParseShaderFile( Tokeniser& tokeniser, const char* filename ){
 			}
 		}
 	}
+}
+
+ShaderTemplate* ParseShaderTextForPreview( Tokeniser& tokeniser, const char* shaderName ){
+	tokeniser.nextLine();
+
+	ShaderTemplate* first = 0;
+	ShaderTemplate* match = 0;
+
+	for (;; )
+	{
+		const char* token = tokeniser.getToken();
+
+		if ( token == 0 ) {
+			break;
+		}
+
+		if ( string_equal( token, "table" ) ) {
+			if ( tokeniser.getToken() == 0 ) {
+				Tokeniser_unexpectedError( tokeniser, 0, "#table-name" );
+				break;
+			}
+			if ( !Tokeniser_parseToken( tokeniser, "{" ) ) {
+				break;
+			}
+			for (;; )
+			{
+				const char* option = tokeniser.getToken();
+				if ( string_equal( option, "{" ) ) {
+					for (;; )
+					{
+						const char* value = tokeniser.getToken();
+						if ( string_equal( value, "}" ) ) {
+							break;
+						}
+					}
+
+					if ( !Tokeniser_parseToken( tokeniser, "}" ) ) {
+						break;
+					}
+					break;
+				}
+			}
+			continue;
+		}
+
+		if ( string_equal( token, "guide" ) || string_equal( token, "inlineGuide" ) ) {
+			std::size_t depth = 0;
+			for (;; )
+			{
+				token = tokeniser.getToken();
+				if ( token == 0 ) {
+					break;
+				}
+				if ( string_equal( token, "{" ) ) {
+					++depth;
+				}
+				else if ( string_equal( token, "}" ) ) {
+					if ( depth > 0 && --depth == 0 ) {
+						break;
+					}
+				}
+			}
+			continue;
+		}
+
+		if ( !string_equal( token, "material" )
+		  && !string_equal( token, "particle" )
+		  && !string_equal( token, "skin" ) ) {
+			tokeniser.ungetToken();
+		}
+
+		CopiedString name;
+		if ( !Tokeniser_parseShaderName( tokeniser, name ) ) {
+			break;
+		}
+
+		ShaderTemplate* shaderTemplate = new ShaderTemplate();
+		shaderTemplate->setName( name.c_str() );
+
+		const bool parsed = ( g_shaderLanguage == SHADERLANGUAGE_QUAKE3 )
+		                    ? shaderTemplate->parseQuake3( tokeniser )
+		                    : shaderTemplate->parseDoom3( tokeniser );
+
+		if ( !parsed ) {
+			delete shaderTemplate;
+			break;
+		}
+
+		if ( first == 0 ) {
+			first = shaderTemplate;
+		}
+
+		if ( shaderName != 0 && shader_equal( shaderName, name.c_str() ) ) {
+			match = shaderTemplate;
+			break;
+		}
+
+		if ( shaderTemplate != first ) {
+			delete shaderTemplate;
+		}
+	}
+
+	if ( match != 0 ) {
+		if ( first != 0 && first != match ) {
+			delete first;
+		}
+		return match;
+	}
+	return first;
 }
 
 void parseGuideFile( Tokeniser& tokeniser, const char* filename ){
@@ -1731,6 +2818,30 @@ public:
 
 	IShader* getShaderForName( const char* name ) override {
 		return Shader_ForName( name );
+	}
+	IShader* createShaderFromText( const char* shaderText, const char* shaderName ) override {
+		if ( shaderText == 0 ) {
+			return 0;
+		}
+
+		BufferInputStream stream( shaderText, string_length( shaderText ) );
+		Tokeniser& tokeniser = GlobalScriptLibrary().m_pfnNewScriptTokeniser( stream );
+
+		ShaderTemplate* shaderTemplate = ParseShaderTextForPreview( tokeniser, shaderName );
+		tokeniser.release();
+
+		if ( shaderTemplate == 0 ) {
+			return 0;
+		}
+
+		ShaderTemplatePointer shaderTemplatePtr( shaderTemplate );
+		ShaderArguments args;
+		const bool hasName = shaderName != 0 && !string_empty( shaderName );
+		const char* previewFilename = hasName ? shaderName : "preview";
+		auto *shader = new CShader( shaderTemplatePtr, args, previewFilename );
+		shader->setName( hasName ? shaderName : shaderTemplatePtr->getName() );
+		shader->IncRef();
+		return shader;
 	}
 
 	void foreachShaderName( const ShaderNameCallback& callback ) override {

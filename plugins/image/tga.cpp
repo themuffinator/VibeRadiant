@@ -247,7 +247,8 @@ struct TargaHeader
 
 	byte *colormap = nullptr;
 	void colormap_read( PointerInputStream& istream ){
-		const std::size_t size = colormap_size / 8 * colormap_length;
+		const std::size_t bytesPerEntry = ( colormap_size + 7 ) / 8;
+		const std::size_t size = bytesPerEntry * colormap_length;
 		colormap = new byte[size];
 		istream.read( colormap, size );
 	}
@@ -275,8 +276,17 @@ inline void targa_header_read_istream( TargaHeader& targa_header, PointerInputSt
 		istream.seek( targa_header.id_length ); // skip TARGA image comment
 	}
 
-	if( ( targa_header.image_type == 1 || targa_header.image_type == 9 ) && targa_header.colormap_type == 1 ){
-		targa_header.colormap_read( istream );
+	if ( targa_header.colormap_type == 1 ) {
+		const std::size_t bytesPerEntry = ( targa_header.colormap_size + 7 ) / 8;
+		const std::size_t size = bytesPerEntry * targa_header.colormap_length;
+		if ( size != 0 ) {
+			if ( targa_header.image_type == 1 || targa_header.image_type == 9 ) {
+				targa_header.colormap_read( istream );
+			}
+			else {
+				istream.seek( size );
+			}
+		}
 	}
 }
 

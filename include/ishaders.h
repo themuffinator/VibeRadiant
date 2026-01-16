@@ -23,6 +23,7 @@
 
 #include "generic/constant.h"
 #include "generic/callback.h"
+#include "math/matrix.h"
 
 enum
 {
@@ -64,6 +65,68 @@ public:
 	BlendFactor m_dst;
 };
 
+enum ShaderStageTcGen
+{
+	eTcGenBase,
+	eTcGenLightmap,
+	eTcGenEnvironment,
+	eTcGenVector,
+};
+
+enum ShaderStageAlphaFunc
+{
+	eStageAlphaNone,
+	eStageAlphaGT0,
+	eStageAlphaLT128,
+	eStageAlphaGE128,
+};
+
+enum ShaderStageDepthFunc
+{
+	eStageDepthNone,
+	eStageDepthLess,
+	eStageDepthLEqual,
+	eStageDepthEqual,
+	eStageDepthGreater,
+	eStageDepthGEqual,
+	eStageDepthAlways,
+};
+
+struct ShaderStage
+{
+	qtexture_t* texture;
+	BlendFunc blendFunc;
+	bool hasBlendFunc;
+	bool clampToEdge;
+	bool depthWrite;
+	ShaderStageDepthFunc depthFunc;
+	ShaderStageAlphaFunc alphaFunc;
+	float alphaRef;
+	Vector4 colour;
+	Matrix4 texMatrix;
+	ShaderStageTcGen tcGen;
+	Vector3 tcGenVec0;
+	Vector3 tcGenVec1;
+	bool usesVertexColour;
+
+	ShaderStage() :
+		texture( 0 ),
+		blendFunc( BLEND_ONE, BLEND_ZERO ),
+		hasBlendFunc( false ),
+		clampToEdge( false ),
+		depthWrite( false ),
+		depthFunc( eStageDepthNone ),
+		alphaFunc( eStageAlphaNone ),
+		alphaRef( 0.0f ),
+		colour( 1, 1, 1, 1 ),
+		texMatrix( g_matrix4_identity ),
+		tcGen( eTcGenBase ),
+		tcGenVec0( 1, 0, 0 ),
+		tcGenVec1( 0, 1, 0 ),
+		usesVertexColour( false ){
+	}
+};
+
 class ShaderLayer
 {
 public:
@@ -74,6 +137,7 @@ public:
 };
 
 typedef Callback<void(const ShaderLayer&)> ShaderLayerCallback;
+typedef Callback<void(const ShaderStage&)> ShaderStageCallback;
 
 
 class IShader
@@ -124,6 +188,10 @@ public:
 	virtual const ShaderLayer* firstLayer() const = 0;
 	virtual void forEachLayer( const ShaderLayerCallback& layer ) const = 0;
 
+	virtual bool hasStages() const = 0;
+	virtual bool isAnimated() const = 0;
+	virtual void forEachStage( float time, const ShaderStageCallback& callback ) const = 0;
+
 	virtual qtexture_t* lightFalloffImage() const = 0;
 };
 
@@ -145,6 +213,7 @@ public:
 // activate the shader for a given name and return it
 // will return the default shader if name is not found
 	virtual IShader* getShaderForName( const char* name ) = 0;
+	virtual IShader* createShaderFromText( const char* shaderText, const char* shaderName ) = 0;
 
 	virtual void foreachShaderName( const ShaderNameCallback& callback ) = 0;
 

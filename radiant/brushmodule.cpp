@@ -36,10 +36,71 @@
 
 #include "clippertool.h"
 
+#include <cmath>
+#include <QComboBox>
+
 bool g_multipleBrushTypes = false;
 EBrushType g_brushTypes[3];
 int g_brushType;
 bool g_brush_always_caulk = false;
+
+namespace
+{
+enum TexdefDefaultScaleMode
+{
+	eTexdefScaleGameDefault = 0,
+	eTexdefScaleCustom = 1,
+};
+
+int g_texdef_default_scale_mode = eTexdefScaleGameDefault;
+float g_texdef_default_scale_custom = 0.5f;
+bool g_texdef_default_scale_mode_imported = false;
+
+float Brush_getGameDefaultTextureScale(){
+	const char* value = g_pGameDescription->getKeyValue( "default_scale" );
+	if ( !string_empty( value ) ) {
+		float scale = 0.0f;
+		if ( string_parse_float( value, scale ) && scale != 0.0f ) {
+			return scale;
+		}
+		globalErrorStream() << "error parsing \"default_scale\" attribute\n";
+	}
+
+	const char* brushTypes = GlobalRadiant().getRequiredGameDescriptionKeyValue( "brushtypes" );
+	return string_equal( brushTypes, "quake2" ) ? 1.0f : 0.5f;
+}
+
+void Brush_updateDefaultTextureScale(){
+	g_texdef_default_scale = ( g_texdef_default_scale_mode == eTexdefScaleGameDefault )
+		? Brush_getGameDefaultTextureScale()
+		: g_texdef_default_scale_custom;
+}
+
+void TexdefDefaultScaleModeImport( int value ){
+	g_texdef_default_scale_mode = value;
+	g_texdef_default_scale_mode_imported = true;
+	Brush_updateDefaultTextureScale();
+}
+
+void TexdefDefaultScaleCustomImport( float value ){
+	g_texdef_default_scale_custom = value;
+	if ( !g_texdef_default_scale_mode_imported ) {
+		const float gameDefault = Brush_getGameDefaultTextureScale();
+		if ( std::fabs( value - gameDefault ) > 0.0001f ) {
+			g_texdef_default_scale_mode = eTexdefScaleCustom;
+		}
+	}
+	Brush_updateDefaultTextureScale();
+}
+
+void TexdefDefaultScaleCustomImportString( const char* value ){
+	float scale = 0.0f;
+	if ( !string_parse_float( value, scale ) ) {
+		scale = 0.0f;
+	}
+	TexdefDefaultScaleCustomImport( scale );
+}
+}
 
 bool getTextureLockEnabled(){
 	return g_brush_texturelock_enabled;
@@ -83,13 +144,24 @@ void Face_exportSnapPlanes( const BoolImportCallback& importer ){
 }
 
 void Brush_constructPreferences( PreferencesPage& page ){
-	page.appendSpinner(
+	const char* scaleModes[] = { "Game default", "Custom" };
+	auto* scaleMode = page.appendCombo(
 		"Default texture scale",
-		g_texdef_default_scale,
+		StringArrayRange( scaleModes ),
+		IntImportCallback( FreeCaller<void( int ), TexdefDefaultScaleModeImport>() ),
+		IntExportCallback( IntExportCaller( g_texdef_default_scale_mode ) )
+	);
+	auto* scaleSpinner = page.appendSpinner(
+		"Custom texture scale",
 		0.0625,
 		64,
+		FloatImportCallback( FreeCaller<void( float ), TexdefDefaultScaleCustomImport>() ),
+		FloatExportCallback( FloatExportCaller( g_texdef_default_scale_custom ) ),
 		4
 	);
+	scaleSpinner->setEnabled( g_texdef_default_scale_mode == eTexdefScaleCustom );
+	QObject::connect( scaleMode, static_cast<void( QComboBox::* )( int )>( &QComboBox::currentIndexChanged ),
+		[scaleSpinner]( int index ){ scaleSpinner->setEnabled( index == eTexdefScaleCustom ); } );
 	if ( g_multipleBrushTypes ) {
 		const char* names[] = { BrushType_getName( g_brushTypes[0] ), BrushType_getName( g_brushTypes[1] ), BrushType_getName( g_brushTypes[2] ) };
 		page.appendCombo(
@@ -163,23 +235,24 @@ void Brush_Construct( EBrushType type ){
 	Brush::m_maxWorldCoord = g_MaxWorldCoord;
 	BrushInstance::m_counter = &g_brushCount;
 
-	g_texdef_default_scale = 0.5f;
-	const char* value = g_pGameDescription->getKeyValue( "default_scale" );
-	if ( !string_empty( value ) ) {
-		const float scale = atof( value );
-		if ( scale != 0 ) {
-			g_texdef_default_scale = scale;
-		}
-		else
-		{
-			globalErrorStream() << "error parsing \"default_scale\" attribute\n";
-		}
-	}
+	g_texdef_default_scale_mode_imported = false;
+	g_texdef_default_scale_mode = eTexdefScaleGameDefault;
+	g_texdef_default_scale_custom = Brush_getGameDefaultTextureScale();
+	Brush_updateDefaultTextureScale();
 
 	GlobalPreferenceSystem().registerPreference( "TextureLock", BoolImportStringCaller( g_brush_texturelock_enabled ), BoolExportStringCaller( g_brush_texturelock_enabled ) );
 	GlobalPreferenceSystem().registerPreference( "TextureVertexLock", BoolImportStringCaller( g_brush_textureVertexlock_enabled ), BoolExportStringCaller( g_brush_textureVertexlock_enabled ) );
 	GlobalPreferenceSystem().registerPreference( "BrushSnapPlanes", makeBoolStringImportCallback( FreeCaller<void(bool), Face_importSnapPlanes>() ), makeBoolStringExportCallback( FreeCaller<void(const BoolImportCallback&), Face_exportSnapPlanes>() ) );
-	GlobalPreferenceSystem().registerPreference( "TexdefDefaultScale", FloatImportStringCaller( g_texdef_default_scale ), FloatExportStringCaller( g_texdef_default_scale ) );
+	GlobalPreferenceSystem().registerPreference(
+		"TexdefDefaultScaleMode",
+		makeIntStringImportCallback( FreeCaller<void( int ), TexdefDefaultScaleModeImport>() ),
+		IntExportStringCaller( g_texdef_default_scale_mode )
+	);
+	GlobalPreferenceSystem().registerPreference(
+		"TexdefDefaultScale",
+		StringImportCallback( FreeCaller<void( const char* ), TexdefDefaultScaleCustomImportString>() ),
+		FloatExportStringCaller( g_texdef_default_scale_custom )
+	);
 
 	GridStatus_getTextureLockEnabled = getTextureLockEnabled;
 	GridStatus_getTexdefTypeIdLabel = getTexdefTypeIdLabel;

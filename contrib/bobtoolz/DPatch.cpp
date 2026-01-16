@@ -282,8 +282,12 @@ DPatch* DPatch::MergePatches( patch_merge_t merge_info, DPatch& p1, DPatch& p2 )
 		p2.Transpose();
 		merge_info.pos2--;
 		if ( merge_info.pos2 < 0 ) {
-			merge_info.pos2 += 3;
+			merge_info.pos2 += 4;
 		}
+	}
+
+	if ( p1.width != p2.width ) {
+		return 0;
 	}
 
 	const int newHeight = p1.height + p2.height - 1;

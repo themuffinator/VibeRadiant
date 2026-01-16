@@ -93,6 +93,29 @@ struct PressedKeys
 
 AcceleratorMap g_keydown_accelerators;
 AcceleratorMap g_keyup_accelerators;
+namespace {
+bool g_shiftKeyDown = false;
+
+void update_shift_state_on_key_press( const QKeyEvent* event ){
+	if ( event->key() == Qt::Key_Shift && !event->isAutoRepeat() ) {
+		g_shiftKeyDown = true;
+	}
+}
+
+void update_shift_state_on_key_release( const QKeyEvent* event ){
+	if ( event->key() == Qt::Key_Shift && !event->isAutoRepeat() ) {
+		g_shiftKeyDown = false;
+	}
+}
+
+Qt::KeyboardModifiers effective_modifiers_for_pressed_keys( const QKeyEvent* event ){
+	Qt::KeyboardModifiers modifiers = event->modifiers();
+	if ( ( modifiers & Qt::ShiftModifier ) && !g_shiftKeyDown ) {
+		modifiers &= ~Qt::ShiftModifier;
+	}
+	return modifiers;
+}
+}
 
 bool Keys_press( PressedKeys::Keys& keys, int keyval ){
 	if ( keys.insert( keyval ).second ) {
@@ -118,11 +141,20 @@ void Keys_releaseAll( PressedKeys::Keys& keys, Qt::KeyboardModifiers state ){
 
 bool PressedKeys_key_press( const QKeyEvent* event, PressedKeys& pressedKeys ){
 	//globalOutputStream() << "pressed: " << event->key() << '\n';
-	return event->modifiers() == 0 && Keys_press( pressedKeys.keys, qt_keyvalue_is_known( event->key() )? event->key() : event->nativeVirtualKey() );
+	update_shift_state_on_key_press( event );
+	if ( event->key() == Qt::Key_Shift ) {
+		return false;
+	}
+	return effective_modifiers_for_pressed_keys( event ) == 0
+		&& Keys_press( pressedKeys.keys, qt_keyvalue_is_known( event->key() )? event->key() : event->nativeVirtualKey() );
 }
 
 bool PressedKeys_key_release( const QKeyEvent* event, PressedKeys& pressedKeys ){
 	//globalOutputStream() << "released: " << event->key() << '\n';
+	update_shift_state_on_key_release( event );
+	if ( event->key() == Qt::Key_Shift ) {
+		return false;
+	}
 	return Keys_release( pressedKeys.keys, qt_keyvalue_is_known( event->key() )? event->key() : event->nativeVirtualKey() );
 }
 
@@ -130,6 +162,7 @@ PressedKeys g_pressedKeys;
 
 void GlobalPressedKeys_releaseAll(){
 	Keys_releaseAll( g_pressedKeys.keys, {} );
+	g_shiftKeyDown = false;
 }
 
 class PressedKeysHandler : public QObject
@@ -196,4 +229,3 @@ void keyup_accelerators_remove( QKeySequence accelerator ){
 		globalErrorStream() << "keyup_accelerators_remove: not found: " << Quoted( accelerator ) << '\n';
 	}
 }
-
