@@ -97,6 +97,11 @@ QImage applyOpacity( QImage image, float opacity ){
 	return image;
 }
 
+Vector3 rotatedExtentsForAabb( const AABB& aabb, const Matrix4& rotation ){
+	const AABB rotated = aabb_for_oriented_aabb( aabb, rotation );
+	return rotated.extents;
+}
+
 } // namespace
 
 /* specialized copy of class CompiledGraph */
@@ -365,6 +370,10 @@ public:
 		m_cube.renderWireframe( renderer, volume, Instance::localToWorld() );
 	}
 };
+
+static bool EntityBrowser_isCubeInstance( scene::Instance* instance ){
+	return InstanceTypeCast<BrowserCubeInstance>::cast( *instance ) != nullptr;
+}
 
 class BrowserCubeNode final : public scene::Node::Symbiot, public scene::Instantiable
 {
@@ -638,16 +647,12 @@ public:
 		return std::max( height, ( ( cellCount - 1 ) / m_cellsInRow + 1 ) * ( m_cellSize * 2 + m_fontHeight + m_plusHeight ) + m_fontHeight );
 	}
 	int testSelect( int x, int z ) const {
-		if( x < 0 || z > 0 ) {
+		if( x < 0 || z < 0 ) {
 			return -1;
 		}
 		const int col = x / ( m_cellSize * 2 + m_plusWidth );
-		const int row = -z / ( m_cellSize * 2 + m_fontHeight + m_plusHeight );
-		const int index = row * m_cellsInRow + col;
-		if ( index < 0 ) {
-			return -1;
-		}
-		return index;
+		const int row = z / ( m_cellSize * 2 + m_fontHeight + m_plusHeight );
+		return row * m_cellsInRow + col;
 	}
 };
 
@@ -903,6 +908,13 @@ static bool EntityBrowser_needsFixedSizePreview( const EntityClass* eclass ){
 	    && string_empty( eclass->modelpath() );
 }
 
+static bool EntityBrowser_needsBrushPreview( const EntityClass* eclass ){
+	return eclass != nullptr
+	    && !eclass->fixedsize
+	    && !eclass->miscmodel_is
+	    && string_empty( eclass->modelpath() );
+}
+
 static void EntityBrowser_addTriggerPreview( scene::Node& node ){
 	scene::Traversable* traversable = Node_getTraversable( node );
 	if ( traversable == nullptr ) {
@@ -922,15 +934,27 @@ static NodeSmartReference EntityBrowser_createFixedSizePreviewNode( EntityClass*
 	return NodeSmartReference( ( new EntityBrowserPreviewNode( cubeNode ) )->node() );
 }
 
+static NodeSmartReference EntityBrowser_createBrushPreviewNode(){
+	const Vector3 extents( 16.0f, 16.0f, 16.0f );
+	const AABB bounds( g_vector3_identity, extents );
+	const CopiedString shader = GetCommonShader( "notex" );
+	NodeSmartReference cubeNode( ( new BrowserCubeNode( bounds, shader.c_str() ) )->node() );
+	return NodeSmartReference( ( new EntityBrowserPreviewNode( cubeNode ) )->node() );
+}
+
 static NodeSmartReference EntityBrowser_createPreviewNode( EntityClass* eclass ){
 	if ( EntityBrowser_needsFixedSizePreview( eclass ) ) {
 		return EntityBrowser_createFixedSizePreviewNode( eclass );
 	}
-	NodeSmartReference node( GlobalEntityCreator().createEntity( eclass ) );
 	if ( EntityBrowser_isTriggerClass( eclass ) ) {
+		NodeSmartReference node( GlobalEntityCreator().createEntity( eclass ) );
 		EntityBrowser_addTriggerPreview( node.get() );
+		return node;
 	}
-	return node;
+	if ( EntityBrowser_needsBrushPreview( eclass ) ) {
+		return EntityBrowser_createBrushPreviewNode();
+	}
+	return NodeSmartReference( GlobalEntityCreator().createEntity( eclass ) );
 }
 
 static QRect EntityBrowser_cellRectPixels( const EntityBrowser& browser, int index ){
@@ -963,20 +987,53 @@ static QPixmap EntityBrowser_dragPixmap( EntityBrowser& browser ){
 	return pixmap;
 }
 
+static float EntityBrowser_maxScaledExtent(){
+	float maxExtent = 0.0f;
+	const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( Vector3( 45, 0, 45 ) );
+	g_EntityBrowser.forEachEntityInstance( [&]( scene::Instance* instance ){
+		if ( Bounded *bounded = Instance_getBounded( *instance ) ) {
+			AABB aabb = bounded->localAABB();
+			if ( !aabb_valid( aabb ) ) {
+				return;
+			}
+			const Vector3 extents = rotatedExtentsForAabb( aabb, rotation );
+			const float baseExtent = std::max( extents[0], extents[2] );
+			if ( baseExtent <= 0.0f ) {
+				return;
+			}
+			const Entity* entity = Node_getEntity( instance->path().parent() );
+			const float scaledExtent = baseExtent * ( entity != nullptr && EntityBrowser_isTriggerClass( &entity->getEntityClass() ) ? 2.0f : 1.0f );
+			maxExtent = std::max( maxExtent, scaledExtent );
+		}
+	} );
+	return maxExtent > 0.0f ? maxExtent : 1.0f;
+}
+
+static float EntityBrowser_baseScale(){
+	const float maxExtent = EntityBrowser_maxScaledExtent();
+	return maxExtent > 0.0f
+	     ? static_cast<float>( g_EntityBrowser.m_cellSize ) / ( maxExtent * kAssetBrowserHoverScale )
+	     : 1.0f;
+}
+
 class entities_set_transforms
 {
+	const float m_baseScale;
 	mutable CellPos m_cellPos = g_EntityBrowser.constructCellPos();
 public:
+	explicit entities_set_transforms( float baseScale ) : m_baseScale( baseScale ){
+	}
 	void operator()( scene::Instance* instance ) const {
 		if( TransformNode *transformNode = Node_getTransformNode( instance->path().parent() ) ){
 			if( Bounded *bounded = Instance_getBounded( *instance ) ){
 				AABB aabb = bounded->localAABB();
+				if ( !aabb_valid( aabb ) ) {
+					aabb = AABB( g_vector3_identity, Vector3( 1, 1, 1 ) );
+				}
 				const Entity* entity = Node_getEntity( instance->path().parent() );
 				const bool isTrigger = entity != nullptr && EntityBrowser_isTriggerClass( &entity->getEntityClass() );
-				const float max_extent = std::max( { aabb.extents[0], aabb.extents[1], aabb.extents[2] } );
 				const int index = m_cellPos.index();
-				const float baseScale = max_extent > 0.0f ? m_cellPos.getCellSize() / max_extent : 1.0f;
-				float scale = baseScale * g_EntityBrowser.hoverScaleForIndex( index );
+				float scale = m_baseScale * g_EntityBrowser.hoverScaleForIndex( index );
 				if ( isTrigger ) {
 					scale *= 2.0f;
 				}
@@ -1049,7 +1106,7 @@ void EntityBrowser_render(){
 	g_EntityBrowser.validate();
 	const bool hoverChanged = g_EntityBrowser.updateHoverAnimation();
 	if ( hoverChanged ) {
-		g_EntityBrowser.forEachEntityInstance( entities_set_transforms() );
+		g_EntityBrowser.forEachEntityInstance( entities_set_transforms( EntityBrowser_baseScale() ) );
 	}
 
 	const int W = g_EntityBrowser.m_width;
@@ -1167,36 +1224,46 @@ void EntityBrowser_render(){
 			gl().glEnd();
 		}
 
-		{	// one directional light source directly behind the viewer
-			GLfloat inverse_cam_dir[4], ambient[4], diffuse[4];
+		{	// directional lighting: keep models readable, add depth to cube tiles
+			auto setDirectionalLight = []( const Vector3& direction, float ambientStrength, float diffuseStrength ){
+				GLfloat dir[4] = { direction[0], direction[1], direction[2], 0.0f };
+				GLfloat ambient[4] = { ambientStrength, ambientStrength, ambientStrength, 1.0f };
+				GLfloat diffuse[4] = { diffuseStrength, diffuseStrength, diffuseStrength, 1.0f };
+				gl().glLightfv( GL_LIGHT0, GL_POSITION, dir );
+				gl().glLightfv( GL_LIGHT0, GL_AMBIENT, ambient );
+				gl().glLightfv( GL_LIGHT0, GL_DIFFUSE, diffuse );
+				gl().glEnable( GL_LIGHT0 );
+			};
 
-			ambient[0] = ambient[1] = ambient[2] = 0.4f;
-			ambient[3] = 1;
-			diffuse[0] = diffuse[1] = diffuse[2] = 0.4f;
-			diffuse[3] = 1;
+			const Vector3 viewDir = m_view.getViewDir();
+			setDirectionalLight( Vector3( -viewDir[0], -viewDir[1], -viewDir[2] ), 0.4f, 0.4f );
+			{
+				EntityRenderer renderer( globalstate );
+				g_EntityBrowser.forEachEntityInstance( [&renderer, &m_view]( scene::Instance* instance ){
+					if ( EntityBrowser_isCubeInstance( instance ) ) {
+						return;
+					}
+					if( Renderable *renderable = Instance_getRenderable( *instance ) ) {
+						renderable->renderSolid( renderer, m_view );
+					}
+				} );
+				renderer.render( m_modelview, m_projection );
+			}
 
-			inverse_cam_dir[0] = -m_view.getViewDir()[0];
-			inverse_cam_dir[1] = -m_view.getViewDir()[1];
-			inverse_cam_dir[2] = -m_view.getViewDir()[2];
-			inverse_cam_dir[3] = 0;
-
-			gl().glLightfv( GL_LIGHT0, GL_POSITION, inverse_cam_dir );
-
-			gl().glLightfv( GL_LIGHT0, GL_AMBIENT, ambient );
-			gl().glLightfv( GL_LIGHT0, GL_DIFFUSE, diffuse );
-
-			gl().glEnable( GL_LIGHT0 );
-		}
-
-		{
-			EntityRenderer renderer( globalstate );
-
-			g_EntityBrowser.forEachEntityInstance( [&renderer, &m_view]( scene::Instance* instance ){
-				if( Renderable *renderable = Instance_getRenderable( *instance ) )
-					renderable->renderSolid( renderer, m_view );
-			} );
-
-			renderer.render( m_modelview, m_projection );
+			const Vector3 cubeLightDir = vector3_normalised( Vector3( -0.4f, 0.6f, -1.0f ) );
+			setDirectionalLight( cubeLightDir, 0.2f, 0.75f );
+			{
+				EntityRenderer renderer( globalstate );
+				g_EntityBrowser.forEachEntityInstance( [&renderer, &m_view]( scene::Instance* instance ){
+					if ( !EntityBrowser_isCubeInstance( instance ) ) {
+						return;
+					}
+					if( Renderable *renderable = Instance_getRenderable( *instance ) ) {
+						renderable->renderSolid( renderer, m_view );
+					}
+				} );
+				renderer.render( m_modelview, m_projection );
+			}
 		}
 
 		{	// prepare for 2d stuff
@@ -1280,7 +1347,7 @@ protected:
 		m_entBro.m_width = float_to_integer( w * m_scale );
 		m_entBro.m_height = float_to_integer( h * m_scale );
 		m_entBro.m_originInvalid = true;
-		m_entBro.forEachEntityInstance( entities_set_transforms() );
+		m_entBro.forEachEntityInstance( entities_set_transforms( EntityBrowser_baseScale() ) );
 
 		delete m_fbo;
 		m_fbo = nullptr;
@@ -1307,7 +1374,11 @@ protected:
 		setFocus();
 		const auto press = m_mouse.press( event );
 		if ( press == MousePresses::Left || press == MousePresses::Right ) {
-			m_entBro.tracking_MouseDown();
+			if ( press == MousePresses::Right ) {
+				m_entBro.tracking_MouseDown();
+			} else {
+				m_entBro.m_move_amount = 0;
+			}
 			if ( press == MousePresses::Left ) {
 				const QPoint localPos = mouseEventLocalPos( event );
 				m_dragStart = localPos;
@@ -1383,7 +1454,7 @@ static void EntityBrowser_selectCategory( const QString& name ){
 				traversable->insert( node );
 			}
 		}
-		g_EntityBrowser.forEachEntityInstance( entities_set_transforms() );
+		g_EntityBrowser.forEachEntityInstance( entities_set_transforms( EntityBrowser_baseScale() ) );
 	}
 	g_EntityBrowser.queueDraw();
 }

@@ -78,6 +78,7 @@ for EXTRAPATH in \
     "$QT_PLUGINS_DIR/iconengines/*.dll" \
     "$QT_PLUGINS_DIR/tls/*.dll" \
     "$QT_PLUGINS_DIR/ssl/*.dll" \
+    "$QT_PLUGINS_DIR/multimedia/*.dll" \
 ; do
     PLUGIN_DLLS="$PLUGIN_DLLS $(find $EXTRAPATH -type f 2>/dev/null)"
 done

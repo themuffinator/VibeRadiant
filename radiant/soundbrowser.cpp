@@ -164,16 +164,12 @@ public:
 		return std::max( height, ( ( cellCount - 1 ) / m_cellsInRow + 1 ) * ( m_cellSize * 2 + m_fontHeight + m_plusHeight ) + m_fontHeight );
 	}
 	int testSelect( int x, int z ) const {
-		if( x < 0 || z > 0 ) {
+		if( x < 0 || z < 0 ) {
 			return -1;
 		}
 		const int col = x / ( m_cellSize * 2 + m_plusWidth );
-		const int row = -z / ( m_cellSize * 2 + m_fontHeight + m_plusHeight );
-		const int index = row * m_cellsInRow + col;
-		if ( index < 0 ) {
-			return -1;
-		}
-		return index;
+		const int row = z / ( m_cellSize * 2 + m_fontHeight + m_plusHeight );
+		return row * m_cellsInRow + col;
 	}
 };
 
@@ -805,7 +801,11 @@ protected:
 			return;
 		}
 		if ( press == MousePresses::Left || press == MousePresses::Right ) {
-			m_sndBro.tracking_MouseDown();
+			if ( press == MousePresses::Right ) {
+				m_sndBro.tracking_MouseDown();
+			} else {
+				m_sndBro.m_move_amount = 0;
+			}
 			if ( press == MousePresses::Left ) {
 				m_sndBro.stopPlayback();
 				const QPoint localPos = mouseEventLocalPos( event );

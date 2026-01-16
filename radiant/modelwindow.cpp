@@ -99,6 +99,11 @@ QImage applyOpacity( QImage image, float opacity ){
 	}
 	return image;
 }
+
+Vector3 rotatedExtentsForAabb( const AABB& aabb, const Matrix4& rotation ){
+	const AABB rotated = aabb_for_oriented_aabb( aabb, rotation );
+	return rotated.extents;
+}
 } // namespace
 
 
@@ -814,18 +819,48 @@ static QPixmap ModelBrowser_dragPixmap( ModelBrowser& browser ){
 
 
 
+static float ModelBrowser_maxExtent(){
+	float maxExtent = 0.0f;
+	const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( Vector3( 45, 0, 45 ) );
+	g_ModelBrowser.forEachModelInstance( [&]( scene::Instance* instance ){
+		if( Bounded *bounded = Instance_getBounded( *instance ) ){
+			AABB aabb = bounded->localAABB();
+			if ( !aabb_valid( aabb ) ) {
+				return;
+			}
+			const Vector3 extents = rotatedExtentsForAabb( aabb, rotation );
+			const float extent = std::max( extents[0], extents[2] );
+			if ( extent > 0.0f ) {
+				maxExtent = std::max( maxExtent, extent );
+			}
+		}
+	} );
+	return maxExtent > 0.0f ? maxExtent : 1.0f;
+}
+
+static float ModelBrowser_baseScale(){
+	const float maxExtent = ModelBrowser_maxExtent();
+	return maxExtent > 0.0f
+	     ? static_cast<float>( g_ModelBrowser.m_cellSize ) / ( maxExtent * kAssetBrowserHoverScale )
+	     : 1.0f;
+}
+
 class models_set_transforms
 {
+	const float m_baseScale;
 	mutable CellPos m_cellPos = g_ModelBrowser.constructCellPos();
 public:
+	explicit models_set_transforms( float baseScale ) : m_baseScale( baseScale ){
+	}
 	void operator()( scene::Instance* instance ) const {
 		if( TransformNode *transformNode = Node_getTransformNode( instance->path().parent() ) ){
 			if( Bounded *bounded = Instance_getBounded( *instance ) ){
 				AABB aabb = bounded->localAABB();
-				const float max_extent = std::max( { aabb.extents[0], aabb.extents[1], aabb.extents[2] } );
+				if ( !aabb_valid( aabb ) ) {
+					aabb = AABB( g_vector3_identity, Vector3( 1, 1, 1 ) );
+				}
 				const int index = m_cellPos.index();
-				const float baseScale = max_extent > 0.0f ? m_cellPos.getCellSize() / max_extent : 1.0f;
-				const float scale = baseScale * g_ModelBrowser.hoverScaleForIndex( index );
+				const float scale = m_baseScale * g_ModelBrowser.hoverScaleForIndex( index );
 				const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( Vector3( 45, 0, 45 ) );
 				const_cast<Matrix4&>( transformNode->localToParent() ) =
 				        matrix4_multiplied_by_matrix4(
@@ -905,7 +940,7 @@ void ModelBrowser_render(){
 	g_ModelBrowser.validate();
 	const bool hoverChanged = g_ModelBrowser.updateHoverAnimation();
 	if ( hoverChanged ) {
-		g_ModelBrowser.forEachModelInstance( models_set_transforms() );
+		g_ModelBrowser.forEachModelInstance( models_set_transforms( ModelBrowser_baseScale() ) );
 	}
 
 	const int W = g_ModelBrowser.m_width;
@@ -1152,7 +1187,7 @@ protected:
 		m_modBro.m_width = float_to_integer( w * m_scale );
 		m_modBro.m_height = float_to_integer( h * m_scale );
 		m_modBro.m_originInvalid = true;
-		m_modBro.forEachModelInstance( models_set_transforms() );
+		m_modBro.forEachModelInstance( models_set_transforms( ModelBrowser_baseScale() ) );
 
 		delete m_fbo;
 		m_fbo = nullptr;
@@ -1182,7 +1217,11 @@ protected:
 			mouseDoubleClick();
 		}
 		else if ( press == MousePresses::Left || press == MousePresses::Right ) {
-			m_modBro.tracking_MouseDown();
+			if ( press == MousePresses::Right || ( press == MousePresses::Left && event->modifiers().testFlag( Qt::KeyboardModifier::AltModifier ) ) ) {
+				m_modBro.tracking_MouseDown();
+			} else if ( press == MousePresses::Left ) {
+				m_modBro.m_move_amount = 0;
+			}
 			if ( press == MousePresses::Left ) {
 				const QPoint localPos = mouseEventLocalPos( event );
 				m_dragStart = localPos;
@@ -1197,6 +1236,9 @@ protected:
 			return;
 		}
 		if ( !( event->buttons() & Qt::MouseButton::LeftButton ) ) {
+			return;
+		}
+		if ( event->modifiers().testFlag( Qt::KeyboardModifier::AltModifier ) ) {
 			return;
 		}
 		const QPoint localPos = mouseEventLocalPos( event );
@@ -1284,7 +1326,7 @@ protected:
 			GlobalSelectionSystem().foreachSelected( visitor );
 		}
 		else if( release == MousePresses::Right && m_modBro.m_move_amount < 16 && m_modBro.m_currentFolder != nullptr ){
-			m_modBro.forEachModelInstance( models_set_transforms() );
+			m_modBro.forEachModelInstance( models_set_transforms( ModelBrowser_baseScale() ) );
 			m_modBro.queueDraw();
 		}
 	}
@@ -1336,7 +1378,7 @@ static void TreeView_onRowActivated( const QModelIndex& index ){
 			NodeSmartReference node( modelNode->node() );
 			Node_getTraversable( g_modelGraph->root() )->insert( node );
 		}
-		g_ModelBrowser.forEachModelInstance( models_set_transforms() );
+		g_ModelBrowser.forEachModelInstance( models_set_transforms( ModelBrowser_baseScale() ) );
 	}
 
 	g_ModelBrowser.queueDraw();
@@ -1583,7 +1625,7 @@ void ModelBrowser_setBackgroundColour( const Vector3& colour ){
 void CellSizeImport( int& oldvalue, int value ){
 	if( oldvalue != value ){
 		oldvalue = value;
-		g_ModelBrowser.forEachModelInstance( models_set_transforms() );
+		g_ModelBrowser.forEachModelInstance( models_set_transforms( ModelBrowser_baseScale() ) );
 		g_ModelBrowser.m_originInvalid = true;
 		g_ModelBrowser.queueDraw();
 	}

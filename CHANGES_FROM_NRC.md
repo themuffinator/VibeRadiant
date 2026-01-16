@@ -49,6 +49,7 @@ Sources used:
 - bobtoolz: merge-patches now wraps edge rotations correctly and rejects width mismatches before combining.
 - bobtoolz: initialize portal normals when loading `.prt` data to avoid uninitialized comparisons in `DEntity::LoadFromPrt`.
 - Windows packaging: include Qt TLS plugins and their OpenSSL runtime dependencies so in-app update checks can complete.
+- Windows packaging: bundle Qt multimedia plugins and point Qt to the local plugin prefix so QMediaPlayer backends load from the install tree.
 - Debugging: added `VIBERADIANT_DISABLE_OPENGL`/`RADIANT_DISABLE_OPENGL` to disable OpenGL widgets and substitute placeholder views for crash isolation.
 - Texture browser: initialize scroll/size state and guard scroll updates until widgets exist to avoid early null dereferences.
 - Texture browser: refreshed layout with a unified filter bar, name search, and surface/content flag filtering.
@@ -75,7 +76,12 @@ Sources used:
 - Asset browser: merged the model browser into the asset browser and enabled model drag-drop to create `misc_model` entities with the model key set.
 - Asset browser: added hover scale transitions and yellow outlines for asset tiles.
 - Asset browser: sound tiles now preview on double-click with a stop icon and single-click stop; drag-and-drop uses transparent tile snapshots and drops into 2D/3D views.
+- Asset browser: drag-and-drop no longer grabs the pointer on left-drag; model rotation is available via Alt+drag.
+- Asset browser: fixed entity/sound hover hit-testing and drag start, and scale entity/model tiles proportionally using per-browser max extents.
+- Asset browser: brush-entity drops create a notex 64^3 cube when no world brush is under the drop point.
+- Asset browser: cube entity tiles use a dedicated directional light pass, and tile scaling now accounts for 45/0/45 rotated extents so angled previews fit their frames.
 - Asset browser: entity/model tiles now default to 45/0/45 rotation, fixedsize entity tiles render colored cubes, and triggers render as double-sized trigger-textured cubes.
+- Asset browser: brush-model entities render as notex-textured cubes in entity tiles.
 - Asset browser: renamed the Textures tab to Materials, removed the standalone model browser window, and moved Refresh Models into the model browser toolbar.
 - Branding: replaced the splash screen artwork with a new 1536x1024 `splash.png`.
 - Branding: updated the main window title to use the "VibeRadiant" name without a space.

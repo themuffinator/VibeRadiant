@@ -15,6 +15,7 @@
 #include "math/aabb.h"
 #include "math/vector.h"
 #include "grid.h"
+#include "filterbar.h"
 #include "string/string.h"
 
 const char* const kEntityBrowserMimeType = "application/x-viberadiant-entityclass";
@@ -98,6 +99,20 @@ BrushInstance* findBrushAtPoint( const Vector3& point ){
 	return bestBrush;
 }
 
+bool selectWorldBrushAtPoint( const Vector3& point ){
+	BrushInstance* brush = findBrushAtPoint( point );
+	if ( brush == nullptr ) {
+		return false;
+	}
+	Entity* entity = Node_getEntity( brush->path().parent() );
+	if ( entity == nullptr || !classname_equal( entity->getClassName(), "worldspawn" ) ) {
+		return false;
+	}
+	GlobalSelectionSystem().setSelectedAll( false );
+	selectPath( brush->path(), true );
+	return true;
+}
+
 Vector3 snappedPoint( const Vector3& point ){
 	Vector3 snapped = point;
 	vector3_snap( snapped, GetSnapGridSize() );
@@ -164,7 +179,28 @@ bool AssetDrop_handleEntityClass( const char* classname, const Vector3& point ){
 		return false;
 	}
 
-	Entity_createFromSelection( classname, snappedPoint( point ) );
+	const Vector3 snapped = snappedPoint( point );
+	EntityClass* entityClass = GlobalEntityClassManager().findOrInsert( classname, true );
+	if ( entityClass != nullptr && !entityClass->fixedsize && !entityClass->miscmodel_is ) {
+		bool createdBrush = false;
+		if ( !selectWorldBrushAtPoint( snapped ) ) {
+			const CopiedString shader = GetCommonShader( "notex" );
+			if ( !createTexturedBrushAtPoint( snapped, shader.c_str() ) ) {
+				return false;
+			}
+			createdBrush = true;
+		}
+		Entity_createFromSelection( classname, snapped );
+		if ( createdBrush && string_equal_nocase_n( classname, "trigger_", 8 ) ) {
+			const CopiedString shader = GetCommonShader( "notex" );
+			Scene_forEachSelectedBrush( [&]( BrushInstance& brush ){
+				applyShaderToBrush( brush.getBrush(), shader.c_str() );
+			} );
+		}
+		return true;
+	}
+
+	Entity_createFromSelection( classname, snapped );
 	return true;
 }
 
