@@ -289,7 +289,9 @@ GLenum TextureBrowser_convertAlphaFunc(ShaderStageAlphaFunc func) {
 
 void TextureBrowser_drawStage(const ShaderStage &stage, bool enableAlpha,
                               bool useDefaultBlend) {
-  const GLint texture = stage.texture != nullptr ? stage.texture->texture_number : 0;
+  const bool hasTexture =
+      stage.texture != nullptr && stage.texture->texture_number != 0;
+  const GLint texture = hasTexture ? stage.texture->texture_number : 0;
   gl().glActiveTexture(GL_TEXTURE0);
   gl().glClientActiveTexture(GL_TEXTURE0);
 
@@ -313,14 +315,21 @@ void TextureBrowser_drawStage(const ShaderStage &stage, bool enableAlpha,
     gl().glDisable(GL_ALPHA_TEST);
   }
 
-  gl().glBindTexture(GL_TEXTURE_2D, texture);
-  gl().glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
-                       stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-  gl().glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
-                       stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+  bool textureDisabled = false;
+  if (hasTexture) {
+    gl().glBindTexture(GL_TEXTURE_2D, texture);
+    gl().glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                         stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+    gl().glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                         stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+  } else {
+    gl().glDisable(GL_TEXTURE_2D);
+    textureDisabled = true;
+  }
 
   bool texgenEnabled = false;
-  if (stage.tcGen == eTcGenEnvironment || stage.tcGen == eTcGenVector) {
+  if (hasTexture &&
+      (stage.tcGen == eTcGenEnvironment || stage.tcGen == eTcGenVector)) {
     gl().glEnable(GL_TEXTURE_GEN_S);
     gl().glEnable(GL_TEXTURE_GEN_T);
     if (stage.tcGen == eTcGenEnvironment) {
@@ -343,7 +352,7 @@ void TextureBrowser_drawStage(const ShaderStage &stage, bool enableAlpha,
   }
 
   bool texMatrixPushed = false;
-  if (stage.texMatrix != g_matrix4_identity) {
+  if (hasTexture && stage.texMatrix != g_matrix4_identity) {
     gl().glMatrixMode(GL_TEXTURE);
     gl().glPushMatrix();
     gl().glLoadMatrixf(reinterpret_cast<const float *>(&stage.texMatrix));
@@ -373,6 +382,9 @@ void TextureBrowser_drawStage(const ShaderStage &stage, bool enableAlpha,
   if (texgenEnabled) {
     gl().glDisable(GL_TEXTURE_GEN_S);
     gl().glDisable(GL_TEXTURE_GEN_T);
+  }
+  if (textureDisabled) {
+    gl().glEnable(GL_TEXTURE_2D);
   }
   gl().glDisable(GL_ALPHA_TEST);
 }
@@ -1532,10 +1544,16 @@ void TextureBrowser::draw() {
             isHover ? static_cast<float>(m_hoverTimer.elapsed_sec()) : 0.0f;
         struct StageDraw {
           bool enableAlpha;
+          qtexture_t *fallbackTexture;
           void operator()(const ShaderStage &stage) const {
-            TextureBrowser_drawStage(stage, enableAlpha, false);
+            ShaderStage safeStage = stage;
+            if (safeStage.texture == nullptr ||
+                safeStage.texture->texture_number == 0) {
+              safeStage.texture = fallbackTexture;
+            }
+            TextureBrowser_drawStage(safeStage, enableAlpha, false);
           }
-        } draw{g_TextureBrowser_enableAlpha};
+        } draw{g_TextureBrowser_enableAlpha, q};
         shader->forEachStage(stageTime, makeCallback(draw));
         gl().glPopMatrix();
       } else {

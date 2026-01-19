@@ -2524,7 +2524,8 @@ GLenum ShaderPreview_convertAlphaFunc( ShaderStageAlphaFunc func ){
 }
 
 void ShaderPreview_drawStage( const ShaderStage& stage, bool useDefaultBlend ){
-	const GLint texture = stage.texture != 0 ? stage.texture->texture_number : 0;
+	const bool hasTexture = stage.texture != 0 && stage.texture->texture_number != 0;
+	const GLint texture = hasTexture ? stage.texture->texture_number : 0;
 	gl().glActiveTexture( GL_TEXTURE0 );
 	gl().glClientActiveTexture( GL_TEXTURE0 );
 
@@ -2553,12 +2554,20 @@ void ShaderPreview_drawStage( const ShaderStage& stage, bool useDefaultBlend ){
 		gl().glDisable( GL_ALPHA_TEST );
 	}
 
-	gl().glBindTexture( GL_TEXTURE_2D, texture );
-	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT );
-	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+	bool textureDisabled = false;
+	if ( hasTexture ) {
+		gl().glBindTexture( GL_TEXTURE_2D, texture );
+		gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+		gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, stage.clampToEdge ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+	}
+	else
+	{
+		gl().glDisable( GL_TEXTURE_2D );
+		textureDisabled = true;
+	}
 
 	bool texgenEnabled = false;
-	if ( stage.tcGen == eTcGenEnvironment || stage.tcGen == eTcGenVector ) {
+	if ( hasTexture && ( stage.tcGen == eTcGenEnvironment || stage.tcGen == eTcGenVector ) ) {
 		gl().glEnable( GL_TEXTURE_GEN_S );
 		gl().glEnable( GL_TEXTURE_GEN_T );
 		if ( stage.tcGen == eTcGenEnvironment ) {
@@ -2583,7 +2592,7 @@ void ShaderPreview_drawStage( const ShaderStage& stage, bool useDefaultBlend ){
 	}
 
 	bool texMatrixPushed = false;
-	if ( stage.texMatrix != g_matrix4_identity ) {
+	if ( hasTexture && stage.texMatrix != g_matrix4_identity ) {
 		gl().glMatrixMode( GL_TEXTURE );
 		gl().glPushMatrix();
 		gl().glLoadMatrixf( reinterpret_cast<const float*>( &stage.texMatrix ) );
@@ -2612,6 +2621,9 @@ void ShaderPreview_drawStage( const ShaderStage& stage, bool useDefaultBlend ){
 	if ( texgenEnabled ) {
 		gl().glDisable( GL_TEXTURE_GEN_S );
 		gl().glDisable( GL_TEXTURE_GEN_T );
+	}
+	if ( textureDisabled ) {
+		gl().glEnable( GL_TEXTURE_2D );
 	}
 	gl().glDisable( GL_ALPHA_TEST );
 }
@@ -2902,10 +2914,15 @@ public:
 			                   : 0.0f;
 			struct StageDraw
 			{
+				qtexture_t *fallbackTexture;
 				void operator()( const ShaderStage& stage ) const {
-					ShaderPreview_drawStage( stage, false );
+					ShaderStage safeStage = stage;
+					if ( safeStage.texture == nullptr || safeStage.texture->texture_number == 0 ) {
+						safeStage.texture = fallbackTexture;
+					}
+					ShaderPreview_drawStage( safeStage, false );
 				}
-			} draw;
+			} draw{ texture };
 			m_previewShader->forEachStage( time, makeCallback( draw ) );
 		}
 		else

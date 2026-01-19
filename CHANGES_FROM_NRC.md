@@ -54,7 +54,11 @@ Sources used:
 - Texture browser: initialize scroll/size state and guard scroll updates until widgets exist to avoid early null dereferences.
 - Texture browser: refreshed layout with a unified filter bar, name search, and surface/content flag filtering.
 - Shader rendering: implemented Quake 3 multi-stage shader previews in the texture browser with hover animation, added a live shader editor preview, and added a 3D view animate/static shader toggle.
-- Shader rendering: defaulted to legacy single-texture rendering and legacy Quake3 shader parsing when multi-stage rendering is disabled for stability testing.
+- Shader rendering: re-enabled Quake 3 multi-stage shader rendering by default while keeping the legacy single-texture fallback when stages are disabled.
+- Shader rendering: guarded stage evaluation to fall back to the base shader texture when stage textures fail to realize, preventing material browser crashes on missing stage assets.
+- Shader rendering: added safe texture fallback handling in texture browser and shader preview stage draws to avoid GL state crashes when stage textures are missing.
+- Shader rendering: added safe fallback vertex-color arrays for Quake 3 stages to prevent GL crashes and matched `identityLighting` stage color scaling to Quake3e.
+- Shader rendering: temporarily disabled Quake 3 shader stage rendering by default to avoid material browser crashes while the root cause is investigated.
 - Preferences: added game-default brush texture scale (idTech2=1.0, idTech3/4=0.5) and texture thumbnail scale (idTech2=200%, idTech3/4=100%).
 - Selection/tools: added a default startup tool mode preference, a primitive-mode toggle/button (Ctrl+Space), and adjustable manipulator size with +/- shortcuts.
 - UI: preferences dialog is now resizable with a larger default size, and the status bar shows selection size.

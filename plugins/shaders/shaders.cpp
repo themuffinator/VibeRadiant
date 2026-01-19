@@ -1463,6 +1463,9 @@ public:
 	void evaluateStage( const Q3Stage& stage, float time, ShaderStage& out ) const {
 		out = ShaderStage();
 
+		// Q3 default overbrightBits=1 maps identityLighting to 0.5.
+		static constexpr float c_q3IdentityLight = 0.5f;
+
 		if ( stage.textures.empty() ) {
 			out.texture = m_pTexture;
 		}
@@ -1475,10 +1478,16 @@ public:
 			const std::size_t frame = static_cast<std::size_t>( std::floor( time * stage.animFps ) ) % count;
 			out.texture = stage.textures[frame];
 		}
+		if ( out.texture == nullptr || out.texture->texture_number == 0 ) {
+			out.texture = m_pTexture;
+		}
 
 		Vector3 rgb( 1.0f, 1.0f, 1.0f );
 		switch ( stage.rgbGenType )
 		{
+		case Q3_RGB_IDENTITY_LIGHTING:
+			rgb = Vector3( c_q3IdentityLight, c_q3IdentityLight, c_q3IdentityLight );
+			break;
 		case Q3_RGB_CONST:
 			rgb = stage.rgbConst;
 			break;

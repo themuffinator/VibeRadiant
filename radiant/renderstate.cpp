@@ -31,6 +31,7 @@
 #include "renderable.h"
 #include "qerplugin.h"
 
+#include <algorithm>
 #include <set>
 #include <vector>
 #include <list>
@@ -97,6 +98,53 @@ std::size_t g_count_transforms;
 Timer g_timer;
 Timer g_shaderAnimationTimer;
 bool g_shaderAnimationEnabled = true;
+// Large enough for typical editor draw calls to avoid invalid color array reads.
+static const std::size_t c_stageFallbackColourCount = 1 << 20;
+std::vector<unsigned char> g_stageFallbackColours;
+unsigned char g_stageFallbackColour[4] = { 0, 0, 0, 0 };
+bool g_stageFallbackColourValid = false;
+
+inline unsigned char ShaderStage_clampToByte( float value ){
+	value = std::max( 0.0f, std::min( 1.0f, value ) );
+	return static_cast<unsigned char>( value * 255.0f + 0.5f );
+}
+
+void ShaderStage_updateFallbackColours( const Vector4& colour ){
+	if ( g_stageFallbackColours.empty() ) {
+		g_stageFallbackColours.resize( c_stageFallbackColourCount * 4 );
+		g_stageFallbackColourValid = false;
+	}
+
+	const unsigned char rgba[4] = {
+		ShaderStage_clampToByte( colour[0] ),
+		ShaderStage_clampToByte( colour[1] ),
+		ShaderStage_clampToByte( colour[2] ),
+		ShaderStage_clampToByte( colour[3] )
+	};
+
+	if ( g_stageFallbackColourValid
+	     && rgba[0] == g_stageFallbackColour[0]
+	     && rgba[1] == g_stageFallbackColour[1]
+	     && rgba[2] == g_stageFallbackColour[2]
+	     && rgba[3] == g_stageFallbackColour[3] ) {
+		return;
+	}
+
+	g_stageFallbackColour[0] = rgba[0];
+	g_stageFallbackColour[1] = rgba[1];
+	g_stageFallbackColour[2] = rgba[2];
+	g_stageFallbackColour[3] = rgba[3];
+
+	for ( std::size_t i = 0; i < g_stageFallbackColours.size(); i += 4 )
+	{
+		g_stageFallbackColours[i] = rgba[0];
+		g_stageFallbackColours[i + 1] = rgba[1];
+		g_stageFallbackColours[i + 2] = rgba[2];
+		g_stageFallbackColours[i + 3] = rgba[3];
+	}
+
+	g_stageFallbackColourValid = true;
+}
 
 inline void count_prim(){
 	++g_count_prims;
@@ -1890,7 +1938,8 @@ void OpenGLStateBucket::render( OpenGLState& current, unsigned int globalstate, 
 
 		if ( m_stageShader != 0 ) {
 			ShaderStage stage;
-			if ( ShaderStage_getAtIndex( *m_stageShader, ShaderCache_getShaderTime(), m_stageIndex, stage ) ) {
+			const bool stageFound = ShaderStage_getAtIndex( *m_stageShader, ShaderCache_getShaderTime(), m_stageIndex, stage );
+			if ( stageFound ) {
 				if ( ( current.m_state & RENDER_TEXTURE ) != 0 ) {
 					const GLint texture = stage.texture != 0 ? stage.texture->texture_number : 0;
 					setTextureState( current.m_texture, texture, GL_TEXTURE0 );
@@ -1935,6 +1984,12 @@ void OpenGLStateBucket::render( OpenGLState& current, unsigned int globalstate, 
 					gl().glColor4f( stage.colour[0], stage.colour[1], stage.colour[2], stage.colour[3] );
 					current.m_colour = stage.colour;
 				}
+			}
+
+			if ( ( current.m_state & RENDER_COLOURARRAY ) != 0 ) {
+				ShaderStage_updateFallbackColours( stage.colour );
+				gl().glColorPointer( 4, GL_UNSIGNED_BYTE, 0, g_stageFallbackColours.data() );
+				GlobalOpenGL_debugAssertNoErrors();
 			}
 		}
 
