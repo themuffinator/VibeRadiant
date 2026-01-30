@@ -74,7 +74,7 @@ class EclassModel :
 	Vector3 m_angles;
 	RotationKey m_rotationKey;
 	Float9 m_rotation;
-	SingletonModel m_model;
+	MultiModel m_model;
 
 	ClassnameFilter m_filter;
 	NamedEntity m_named;
@@ -89,6 +89,16 @@ class EclassModel :
 
 	Callback<void()> m_transformChanged;
 	Callback<void()> m_evaluateTransform;
+
+	void modelKeyChanged( const char* ){
+		const EntityClass& eclass = m_entity.getEntityClass();
+		const char* model2 = m_entity.getKeyValue( "model2" );
+		if ( string_empty( model2 ) ) {
+			model2 = EntityClass_valueForKey( eclass, "model2" );
+		}
+		m_model.setModels( eclass.modelpath(), model2 );
+	}
+	typedef MemberCaller<EclassModel, void(const char*), &EclassModel::modelKeyChanged> ModelKeyChangedCaller;
 
 	void construct(){
 		read_aabb( m_aabb_local, m_entity.getEntityClass() );
@@ -111,6 +121,7 @@ class EclassModel :
 				m_keyObservers.insert( "angles", m_anglesKey.getAnglesChangedCallback() );
 		}
 		m_keyObservers.insert( "origin", OriginKey::OriginChangedCaller( m_originKey ) );
+		m_keyObservers.insert( "model2", ModelKeyChangedCaller( *this ) );
 	}
 
 // vc 2k5 compiler fix
@@ -150,8 +161,10 @@ public:
 	typedef MemberCaller<EclassModel, void(), &EclassModel::rotationChanged> RotationChangedCaller;
 
 	void skinChanged(){
-		scene::Node* node = m_model.getNode();
-		if ( node != 0 ) {
+		if ( scene::Node* node = m_model.getPrimaryNode() ) {
+			Node_modelSkinChanged( *node );
+		}
+		if ( scene::Node* node = m_model.getSecondaryNode() ) {
 			Node_modelSkinChanged( *node );
 		}
 	}
@@ -205,14 +218,14 @@ public:
 			m_entity.instanceAttach( path_find_mapfile( path.begin(), path.end() ) );
 			m_entity.attach( m_keyObservers );
 			m_linkedGroupObserver.attach( m_entity );
-			m_model.modelChanged( m_entity.getEntityClass().modelpath() );
+			modelKeyChanged( "" );
 			m_skin.skinChanged( m_entity.getEntityClass().skin() );
 		}
 	}
 	void instanceDetach( const scene::Path& path ){
 		if ( --m_instanceCounter.m_count == 0 ) {
 			m_skin.skinChanged( "" );
-			m_model.modelChanged( "" );
+			m_model.setModels( "", "" );
 			m_linkedGroupObserver.detach( m_entity );
 			m_entity.detach( m_keyObservers );
 			m_entity.instanceDetach( path_find_mapfile( path.begin(), path.end() ) );

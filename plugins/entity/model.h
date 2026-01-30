@@ -33,11 +33,12 @@ class EModel : public ModuleObserver
 	ResourceReference m_resource;
 	scene::Traversable& m_traverse;
 	scene::Node* m_node;
+	bool m_realised;
 	Callback<void()> m_modelChanged;
 
 public:
 	EModel( scene::Traversable& traversable, const Callback<void()>& modelChanged )
-		: m_resource( "" ), m_traverse( traversable ), m_node( 0 ), m_modelChanged( modelChanged ){
+		: m_resource( "" ), m_traverse( traversable ), m_node( 0 ), m_realised( false ), m_modelChanged( modelChanged ){
 		m_resource.attach( *this );
 	}
 	~EModel(){
@@ -45,16 +46,30 @@ public:
 	}
 
 	void realise() override {
-		m_resource.get()->load();
+		if ( m_realised ) {
+			return;
+		}
+		const bool loaded = m_resource.get()->load();
+		if ( !loaded ) {
+			m_node = 0;
+			return;
+		}
 		m_node = m_resource.get()->getNode();
 		if ( m_node != 0 ) {
 			m_traverse.insert( *m_node );
+			m_realised = true;
 		}
 	}
 	void unrealise() override {
+		if ( !m_realised ) {
+			m_node = 0;
+			return;
+		}
 		if ( m_node != 0 ) {
 			m_traverse.erase( *m_node );
 		}
+		m_node = 0;
+		m_realised = false;
 	}
 
 	void modelChanged( const char* value ){
@@ -100,5 +115,58 @@ public:
 
 	scene::Node* getNode() const {
 		return m_model.getNode();
+	}
+};
+
+class MultiModel
+{
+	TraversableNodeSet m_traverse;
+	EModel m_primary;
+	EModel m_secondary;
+public:
+	MultiModel()
+		: m_primary( m_traverse, Callback<void()>() ),
+		  m_secondary( m_traverse, Callback<void()>() ){
+	}
+
+	void attach( scene::Traversable::Observer* observer ){
+		m_traverse.attach( observer );
+	}
+	void detach( scene::Traversable::Observer* observer ){
+		m_traverse.detach( observer );
+	}
+
+	scene::Traversable& getTraversable(){
+		return m_traverse;
+	}
+
+	void modelChangedPrimary( const char* value ){
+		m_primary.modelChanged( value );
+		if ( !string_empty( value ) && string_equal_nocase( value, m_secondary.getName() ) ) {
+			m_secondary.modelChanged( "" );
+		}
+	}
+	void modelChangedSecondary( const char* value ){
+		m_secondary.modelChanged( value );
+		if ( !string_empty( value ) && string_equal_nocase( value, m_primary.getName() ) ) {
+			m_primary.modelChanged( "" );
+		}
+	}
+	void setModels( const char* primary, const char* secondary ){
+		const char* primaryName = primary != nullptr ? primary : "";
+		const char* secondaryName = secondary != nullptr ? secondary : "";
+		if ( !string_empty( primaryName ) && !string_empty( secondaryName )
+		  && string_equal_nocase( primaryName, secondaryName ) ) {
+			secondaryName = "";
+		}
+		m_primary.modelChanged( primaryName );
+		m_secondary.modelChanged( secondaryName );
+	}
+
+	scene::Node* getPrimaryNode() const {
+		return m_primary.getNode();
+	}
+	scene::Node* getSecondaryNode() const {
+		return m_secondary.getNode();
 	}
 };

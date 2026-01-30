@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <map>
 #include <set>
 #include <vector>
 
@@ -74,6 +75,7 @@ bool string_contains_nocase( const char* haystack, const char* needle ){
 constexpr float kAssetBrowserHoverScale = 1.05f;
 constexpr float kAssetBrowserHoverLerp = 0.2f;
 constexpr float kAssetBrowserHoverEpsilon = 0.001f;
+constexpr const char* kSoundBrowserRoot = "sound/world/";
 
 float AssetBrowser_approachHoverScale( float current, float target ){
 	return current + ( target - current ) * kAssetBrowserHoverLerp;
@@ -94,6 +96,33 @@ QImage applyOpacity( QImage image, float opacity ){
 		}
 	}
 	return image;
+}
+
+bool SoundBrowser_readSoundData( const char* soundPath, QByteArray& data ){
+	ArchiveFile* file = GlobalFileSystem().openFile( soundPath );
+	if ( file == nullptr ) {
+		return false;
+	}
+
+	const std::size_t size = file->size();
+	data.clear();
+	if ( size > 0 ) {
+		data.resize( static_cast<int>( size ) );
+		InputStream& stream = file->getInputStream();
+		std::size_t total = 0;
+		while ( total < size ) {
+			const std::size_t read = stream.read( reinterpret_cast<InputStream::byte_type*>( data.data() + total ), size - total );
+			if ( read == 0 ) {
+				break;
+			}
+			total += read;
+		}
+		if ( total < size ) {
+			data.truncate( static_cast<int>( total ) );
+		}
+	}
+	file->release();
+	return !data.isEmpty();
 }
 } // namespace
 
@@ -195,6 +224,7 @@ public:
 	const SoundFS* m_currentFolder = nullptr;
 	std::vector<CopiedString> m_visibleFiles;
 	CopiedString m_filter;
+	std::map<CopiedString, QByteArray, StringLessNoCase> m_soundCache;
 
 	int m_width = 0;
 	int m_height = 0;
@@ -277,7 +307,21 @@ public:
 		if ( index < 0 || index >= static_cast<int>( m_visibleFiles.size() ) ) {
 			return CopiedString( "" );
 		}
-		return CopiedString( StringStream<256>( "sound/", m_currentFolderPath, m_visibleFiles[index].c_str() ) );
+		return CopiedString( StringStream<256>( kSoundBrowserRoot, m_currentFolderPath, m_visibleFiles[index].c_str() ) );
+	}
+	bool cacheSound( const char* soundPath ){
+		if ( string_empty( soundPath ) ) {
+			return false;
+		}
+		if ( m_soundCache.find( soundPath ) != m_soundCache.end() ) {
+			return true;
+		}
+		QByteArray data;
+		if ( !SoundBrowser_readSoundData( soundPath, data ) ) {
+			return false;
+		}
+		m_soundCache.emplace( CopiedString( soundPath ), data );
+		return true;
 	}
 	bool isPlayingIndex( int index ) const {
 		return index >= 0 && index == m_playingSoundId;
@@ -336,46 +380,22 @@ private:
 		} );
 	}
 	bool loadSound( const char* soundPath ){
-		const char* root = GlobalFileSystem().findFile( soundPath );
-		if ( !string_empty( root ) ) {
-			const auto absolute = StringStream<512>( root, soundPath );
-			if ( file_exists( absolute ) ) {
-#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
-				m_player->setSource( QUrl::fromLocalFile( QString::fromLatin1( absolute.c_str() ) ) );
-#else
-				m_player->setMedia( QUrl::fromLocalFile( QString::fromLatin1( absolute.c_str() ) ) );
-#endif
-				return true;
-			}
+		const auto cached = m_soundCache.find( soundPath );
+		if ( cached != m_soundCache.end() ) {
+			return loadSoundFromData( cached->second, soundPath );
 		}
 
-		ArchiveFile* file = GlobalFileSystem().openFile( soundPath );
-		if ( file == nullptr ) {
+		QByteArray data;
+		if ( !SoundBrowser_readSoundData( soundPath, data ) ) {
 			return false;
 		}
-
-		const std::size_t size = file->size();
-		QByteArray data;
-		if ( size > 0 ) {
-			data.resize( static_cast<int>( size ) );
-			InputStream& stream = file->getInputStream();
-			std::size_t total = 0;
-			while ( total < size ) {
-				const std::size_t read = stream.read( reinterpret_cast<InputStream::byte_type*>( data.data() + total ), size - total );
-				if ( read == 0 ) {
-					break;
-				}
-				total += read;
-			}
-			if ( total < size ) {
-				data.truncate( static_cast<int>( total ) );
-			}
-		}
-		file->release();
+		m_soundCache.emplace( CopiedString( soundPath ), data );
+		return loadSoundFromData( data, soundPath );
+	}
+	bool loadSoundFromData( const QByteArray& data, const char* soundPath ){
 		if ( data.isEmpty() ) {
 			return false;
 		}
-
 		if ( m_soundBuffer != nullptr ) {
 			m_soundBuffer->close();
 			delete m_soundBuffer;
@@ -903,10 +923,14 @@ static void SoundBrowser_constructTreeModel( const SoundFS& soundFS, QStandardIt
 
 static void SoundBrowser_addFromFileSystem( const char* name ){
 	const char* relative = name;
-	if ( string_equal_prefix( name, "sound/" ) ) {
-		relative = name + 6;
+	if ( string_equal_prefix( name, kSoundBrowserRoot ) ) {
+		relative = name + string_length( kSoundBrowserRoot );
 	}
 	g_SoundBrowser.m_soundFS.insert( relative );
+}
+
+static void SoundBrowser_cacheSoundFile( const char* name ){
+	g_SoundBrowser.cacheSound( name );
 }
 
 static void SoundBrowser_constructTree(){
@@ -932,7 +956,7 @@ static void SoundBrowser_constructTree(){
 	GlobalFiletypes().getTypeList( "sound", &typelist, true, false, false );
 
 	for ( const CopiedString& ext : typelist.m_soundExtensions ) {
-		GlobalFileSystem().forEachFile( "sound/", ext.c_str(), makeCallbackF( SoundBrowser_addFromFileSystem ), 99 );
+		GlobalFileSystem().forEachFile( kSoundBrowserRoot, ext.c_str(), makeCallbackF( SoundBrowser_addFromFileSystem ), 99 );
 	}
 
 	auto *model = new QStandardItemModel( g_SoundBrowser.m_treeView );
@@ -953,6 +977,31 @@ static void SoundBrowser_constructTree(){
 		g_SoundBrowser.m_treeView->setCurrentIndex( first );
 		SoundBrowser_selectFolder( first );
 	}
+}
+
+void SoundBrowser_PrecacheWorldSounds(){
+	class : public IFileTypeList
+	{
+	public:
+		using StringSetNoCase = std::set<CopiedString, StringLessNoCase>;
+
+		StringSetNoCase m_soundExtensions;
+		void addType( const char* moduleName, filetype_t type ) override {
+			m_soundExtensions.emplace( moduleName );
+		}
+	} typelist;
+	GlobalFiletypes().getTypeList( "sound", &typelist, true, false, false );
+
+	for ( const CopiedString& ext : typelist.m_soundExtensions ) {
+		GlobalFileSystem().forEachFile( kSoundBrowserRoot, ext.c_str(), makeCallbackF( SoundBrowser_cacheSoundFile ), 99 );
+	}
+}
+
+void SoundBrowser_ReloadSounds(){
+	g_SoundBrowser.stopPlayback();
+	g_SoundBrowser.m_soundCache.clear();
+	SoundBrowser_constructTree();
+	SoundBrowser_PrecacheWorldSounds();
 }
 
 class TexBro_QTreeView : public QTreeView
@@ -992,6 +1041,7 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 		toolbar->setIconSize( QSize( iconSize, iconSize ) );
 
 		toolbar_append_button( toolbar, "Reload Sound Tree", "refresh_modelstree.png", FreeCaller<void(), SoundBrowser_constructTree>() );
+		toolbar_append_button( toolbar, "Reload Sounds", "refresh_models.png", FreeCaller<void(), SoundBrowser_ReloadSounds>() );
 	}
 	{	// filter bar
 		auto *filterBar = new QWidget;

@@ -94,6 +94,8 @@ struct xywindow_globals_private_t
 
 	bool show_blocks = false;
 
+	bool show_clipper_debug = false;
+
 	bool m_bChaseMouse = true;
 	bool m_bShowSize = true;
 
@@ -104,6 +106,8 @@ struct xywindow_globals_private_t
 
 xywindow_globals_t g_xywindow_globals;
 xywindow_globals_private_t g_xywindow_globals_private;
+
+static bool g_clipper_debug_report_pending = false;
 
 bool XYWnd_showGrid(){
 	return g_xywindow_globals_private.d_showgrid;
@@ -1898,6 +1902,232 @@ void XYWnd::updateModelview(){
 	m_view.Construct( m_projection, m_modelview, m_nWidth, m_nHeight );
 }
 
+namespace
+{
+struct ClipperOrthoDebugInfo
+{
+	GLenum line_error = GL_NO_ERROR;
+	GLenum polygon_error = GL_NO_ERROR;
+	GLfloat point_size = 0.0f;
+	GLfloat point_range[2]{ 0.0f, 0.0f };
+	GLfloat point_granularity = 0.0f;
+	GLfloat line_width = 0.0f;
+	GLfloat line_width_range[2]{ 0.0f, 0.0f };
+	GLint sample_buffers = 0;
+	GLint samples = 0;
+};
+
+static const char* ClipperOrthoDebugErrorName( GLenum error ){
+	switch ( error )
+	{
+	case GL_NO_ERROR: return "OK";
+	case GL_INVALID_ENUM: return "GL_INVALID_ENUM";
+	case GL_INVALID_VALUE: return "GL_INVALID_VALUE";
+	case GL_INVALID_OPERATION: return "GL_INVALID_OPERATION";
+	case GL_OUT_OF_MEMORY: return "GL_OUT_OF_MEMORY";
+	case GL_INVALID_FRAMEBUFFER_OPERATION: return "GL_INVALID_FRAMEBUFFER_OPERATION";
+	default: return "GL_UNKNOWN_ERROR";
+	}
+}
+
+static void ClipperOrthoDebugBuildPattern( GLubyte pattern[128] ){
+	for ( int row = 0; row < 32; ++row ) {
+		const GLubyte value = ( row & 1 ) ? 0x55 : 0xAA;
+		for ( int col = 0; col < 4; ++col ) {
+			pattern[row * 4 + col] = value;
+		}
+	}
+}
+
+static void ClipperOrthoDebugLog( const ClipperOrthoDebugInfo& info ){
+	const char* vendor = reinterpret_cast<const char*>( gl().glGetString( GL_VENDOR ) );
+	const char* renderer = reinterpret_cast<const char*>( gl().glGetString( GL_RENDERER ) );
+	const char* version = reinterpret_cast<const char*>( gl().glGetString( GL_VERSION ) );
+
+	globalOutputStream() << "Clipper Ortho Debug\n";
+	globalOutputStream() << "  Vendor: " << ( vendor ? vendor : "Unavailable" ) << '\n';
+	globalOutputStream() << "  Renderer: " << ( renderer ? renderer : "Unavailable" ) << '\n';
+	globalOutputStream() << "  Version: " << ( version ? version : "Unavailable" ) << '\n';
+	globalOutputStream() << "  LineStipple enable: " << ClipperOrthoDebugErrorName( info.line_error ) << '\n';
+	globalOutputStream() << "  PolygonStipple enable: " << ClipperOrthoDebugErrorName( info.polygon_error ) << '\n';
+	globalOutputStream() << "  PointSize: " << info.point_size << " (range " << info.point_range[0] << " - " << info.point_range[1]
+	                     << ", gran " << info.point_granularity << ")\n";
+	globalOutputStream() << "  LineWidth: " << info.line_width << " (range " << info.line_width_range[0] << " - " << info.line_width_range[1] << ")\n";
+	globalOutputStream() << "  MSAA (XY): " << g_xywindow_globals_private.m_MSAA << " samples, GL sample buffers " << info.sample_buffers
+	                     << ", GL samples " << info.samples << '\n';
+	globalOutputStream() << "  NoStipple preference: " << ( g_xywindow_globals.m_bNoStipple ? "true" : "false" ) << '\n';
+}
+
+static ClipperOrthoDebugInfo ClipperOrthoDebugDraw( VIEWTYPE viewType, const Vector3& origin, float scale, int width, int height ){
+	ClipperOrthoDebugInfo info{};
+
+	gl().glGetFloatv( GL_POINT_SIZE, &info.point_size );
+	gl().glGetFloatv( GL_POINT_SIZE_RANGE, info.point_range );
+	gl().glGetFloatv( GL_POINT_SIZE_GRANULARITY, &info.point_granularity );
+	gl().glGetFloatv( GL_LINE_WIDTH, &info.line_width );
+	gl().glGetFloatv( GL_LINE_WIDTH_RANGE, info.line_width_range );
+	gl().glGetIntegerv( GL_SAMPLE_BUFFERS, &info.sample_buffers );
+	gl().glGetIntegerv( GL_SAMPLES, &info.samples );
+
+	while ( gl().glGetError() != GL_NO_ERROR ) {
+	}
+
+	const bool was_line_stipple = gl().glIsEnabled( GL_LINE_STIPPLE ) == GL_TRUE;
+	const bool was_polygon_stipple = gl().glIsEnabled( GL_POLYGON_STIPPLE ) == GL_TRUE;
+	const bool was_blend = gl().glIsEnabled( GL_BLEND ) == GL_TRUE;
+	const bool was_depth = gl().glIsEnabled( GL_DEPTH_TEST ) == GL_TRUE;
+	const bool was_texture = gl().glIsEnabled( GL_TEXTURE_2D ) == GL_TRUE;
+	const bool was_lighting = gl().glIsEnabled( GL_LIGHTING ) == GL_TRUE;
+
+	GLint prev_line_repeat = 1;
+	GLint prev_line_pattern = 0xFFFF;
+	gl().glGetIntegerv( GL_LINE_STIPPLE_REPEAT, &prev_line_repeat );
+	gl().glGetIntegerv( GL_LINE_STIPPLE_PATTERN, &prev_line_pattern );
+
+	GLfloat prev_point_size = info.point_size;
+	GLfloat prev_line_width = info.line_width;
+	GLint prev_blend_src = GL_ONE;
+	GLint prev_blend_dst = GL_ZERO;
+	gl().glGetIntegerv( GL_BLEND_SRC, &prev_blend_src );
+	gl().glGetIntegerv( GL_BLEND_DST, &prev_blend_dst );
+
+	GLubyte prev_polygon_pattern[128];
+	gl().glGetPolygonStipple( prev_polygon_pattern );
+
+	gl().glDisable( GL_TEXTURE_2D );
+	gl().glDisable( GL_LIGHTING );
+	gl().glDisable( GL_DEPTH_TEST );
+
+	gl().glEnable( GL_BLEND );
+	gl().glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+
+	GLubyte pattern[128];
+	ClipperOrthoDebugBuildPattern( pattern );
+	gl().glEnable( GL_POLYGON_STIPPLE );
+	gl().glPolygonStipple( pattern );
+	info.polygon_error = gl().glGetError();
+
+	gl().glEnable( GL_LINE_STIPPLE );
+	gl().glLineStipple( 2, 0xF0F0 );
+	info.line_error = gl().glGetError();
+
+	NDIM1NDIM2( viewType )
+	const float half_w = static_cast<float>( width ) / 2.0f / scale;
+	const float half_h = static_cast<float>( height ) / 2.0f / scale;
+	const float pad = 12.0f / scale;
+	const float size = 64.0f / scale;
+	const float left = origin[nDim1] - half_w + pad;
+	const float top = origin[nDim2] + half_h - pad;
+	const float right = left + size;
+	const float bottom = top - size;
+
+	auto make_point = [&]( float dim1, float dim2 ){
+		Vector3 v = g_vector3_identity;
+		v[nDim1] = dim1;
+		v[nDim2] = dim2;
+		return v;
+	};
+
+	gl().glColor4f( 1.0f, 0.1f, 0.1f, 0.35f );
+	gl().glBegin( GL_POLYGON );
+	gl().glVertex3fv( vector3_to_array( make_point( left, top ) ) );
+	gl().glVertex3fv( vector3_to_array( make_point( right, top ) ) );
+	gl().glVertex3fv( vector3_to_array( make_point( right, bottom ) ) );
+	gl().glVertex3fv( vector3_to_array( make_point( left, bottom ) ) );
+	gl().glEnd();
+
+	gl().glColor4f( 1.0f, 0.1f, 0.1f, 1.0f );
+	gl().glBegin( GL_LINE_LOOP );
+	gl().glVertex3fv( vector3_to_array( make_point( left, top ) ) );
+	gl().glVertex3fv( vector3_to_array( make_point( right, top ) ) );
+	gl().glVertex3fv( vector3_to_array( make_point( right, bottom ) ) );
+	gl().glVertex3fv( vector3_to_array( make_point( left, bottom ) ) );
+	gl().glEnd();
+
+	const Vector3 center = make_point( ( left + right ) * 0.5f, ( top + bottom ) * 0.5f );
+	gl().glPointSize( 6.0f );
+	gl().glColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
+	gl().glBegin( GL_POINTS );
+	gl().glVertex3fv( vector3_to_array( center ) );
+	gl().glEnd();
+
+	const float text_left = left;
+	float text_y = bottom - ( 8.0f / scale );
+	const float line_height = ( GlobalOpenGL().m_font->getPixelHeight() + 2 ) / scale;
+
+	StringOutputStream line( 128 );
+	gl().glColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
+	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
+	GlobalOpenGL().drawString( line( "Clipper Ortho Debug" ) );
+	text_y -= line_height;
+
+	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
+	GlobalOpenGL().drawString( line( "LineStipple: ", ClipperOrthoDebugErrorName( info.line_error ) ) );
+	text_y -= line_height;
+
+	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
+	GlobalOpenGL().drawString( line( "PolygonStipple: ", ClipperOrthoDebugErrorName( info.polygon_error ) ) );
+	text_y -= line_height;
+
+	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
+	GlobalOpenGL().drawString( line( "PointSize: 6 (range ", info.point_range[0], " - ", info.point_range[1], ")" ) );
+	text_y -= line_height;
+
+	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
+	GlobalOpenGL().drawString( line( "LineWidth: 2 (range ", info.line_width_range[0], " - ", info.line_width_range[1], ")" ) );
+
+	gl().glLineStipple( prev_line_repeat, static_cast<GLushort>( prev_line_pattern ) );
+	if ( was_line_stipple ) {
+		gl().glEnable( GL_LINE_STIPPLE );
+	}
+	else {
+		gl().glDisable( GL_LINE_STIPPLE );
+	}
+
+	gl().glPolygonStipple( prev_polygon_pattern );
+	if ( was_polygon_stipple ) {
+		gl().glEnable( GL_POLYGON_STIPPLE );
+	}
+	else {
+		gl().glDisable( GL_POLYGON_STIPPLE );
+	}
+
+	gl().glPointSize( prev_point_size );
+	gl().glLineWidth( prev_line_width );
+
+	gl().glBlendFunc( prev_blend_src, prev_blend_dst );
+	if ( was_blend ) {
+		gl().glEnable( GL_BLEND );
+	}
+	else {
+		gl().glDisable( GL_BLEND );
+	}
+
+	if ( was_depth ) {
+		gl().glEnable( GL_DEPTH_TEST );
+	}
+	else {
+		gl().glDisable( GL_DEPTH_TEST );
+	}
+
+	if ( was_texture ) {
+		gl().glEnable( GL_TEXTURE_2D );
+	}
+	else {
+		gl().glDisable( GL_TEXTURE_2D );
+	}
+
+	if ( was_lighting ) {
+		gl().glEnable( GL_LIGHTING );
+	}
+	else {
+		gl().glDisable( GL_LIGHTING );
+	}
+
+	return info;
+}
+}
+
 /*
    ==============
    XY_Draw
@@ -1969,6 +2199,14 @@ void XYWnd::XY_Draw(){
 		GlobalOpenGL_debugAssertNoErrors();
 		renderer.render( m_modelview, m_projection );
 		GlobalOpenGL_debugAssertNoErrors();
+	}
+
+	if ( g_xywindow_globals_private.show_clipper_debug ) {
+		const ClipperOrthoDebugInfo info = ClipperOrthoDebugDraw( m_viewType, m_vOrigin, m_fScale, m_nWidth, m_nHeight );
+		if ( g_clipper_debug_report_pending ) {
+			ClipperOrthoDebugLog( info );
+			g_clipper_debug_report_pending = false;
+		}
 	}
 
 	gl().glDepthMask( GL_FALSE );
@@ -2300,6 +2538,14 @@ void ToggleShowCrosshair(){
 	XY_UpdateAllWindows();
 }
 
+ToggleItem g_show_clipper_debug_item( BoolExportCaller( g_xywindow_globals_private.show_clipper_debug ) );
+void ToggleShowClipperOrthoDebug(){
+	g_xywindow_globals_private.show_clipper_debug = !g_xywindow_globals_private.show_clipper_debug;
+	g_show_clipper_debug_item.update();
+	g_clipper_debug_report_pending = g_xywindow_globals_private.show_clipper_debug;
+	XY_UpdateAllWindows();
+}
+
 ToggleItem g_show_grid_item( BoolExportCaller( g_xywindow_globals_private.d_showgrid ) );
 void ToggleShowGrid(){
 	g_xywindow_globals_private.d_showgrid = !g_xywindow_globals_private.d_showgrid;
@@ -2356,6 +2602,7 @@ void XYShow_registerCommands(){
 	GlobalToggles_insert( "ShowWindowOutline", makeCallbackF( ShowOutlineToggle ), ToggleItem::AddCallbackCaller( g_show_outline ) );
 	GlobalToggles_insert( "ShowAxes", makeCallbackF( ShowAxesToggle ), ToggleItem::AddCallbackCaller( g_show_axes ) );
 	GlobalToggles_insert( "ShowWorkzone2d", makeCallbackF( ShowWorkzoneToggle ), ToggleItem::AddCallbackCaller( g_show_workzone ) );
+	GlobalToggles_insert( "ShowClipperOrthoDebug", makeCallbackF( ToggleShowClipperOrthoDebug ), ToggleItem::AddCallbackCaller( g_show_clipper_debug_item ) );
 }
 
 void XYWnd_registerShortcuts(){
@@ -2419,6 +2666,7 @@ void XYWindow_Construct(){
 	GlobalPreferenceSystem().registerPreference( "SI_ShowOutlines", BoolImportStringCaller( g_xywindow_globals_private.show_outline ), BoolExportStringCaller( g_xywindow_globals_private.show_outline ) );
 	GlobalPreferenceSystem().registerPreference( "SI_ShowAxis", BoolImportStringCaller( g_xywindow_globals_private.show_axis ), BoolExportStringCaller( g_xywindow_globals_private.show_axis ) );
 	GlobalPreferenceSystem().registerPreference( "ShowWorkzone2d", BoolImportStringCaller( g_xywindow_globals_private.show_workzone ), BoolExportStringCaller( g_xywindow_globals_private.show_workzone ) );
+	GlobalPreferenceSystem().registerPreference( "ShowClipperOrthoDebug", BoolImportStringCaller( g_xywindow_globals_private.show_clipper_debug ), BoolExportStringCaller( g_xywindow_globals_private.show_clipper_debug ) );
 
 	GlobalPreferenceSystem().registerPreference( "ColorAxisX", Colour4bImportStringCaller( g_colour_x ), Colour4bExportStringCaller( g_colour_x ) );
 	GlobalPreferenceSystem().registerPreference( "ColorAxisY", Colour4bImportStringCaller( g_colour_y ), Colour4bExportStringCaller( g_colour_y ) );

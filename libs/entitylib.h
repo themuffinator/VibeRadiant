@@ -42,44 +42,84 @@
 #include <list>
 #include <set>
 #include <optional>
+#include <cmath>
 
 inline void arrow_draw( const Vector3& origin, const Vector3& direction_forward, const Vector3& direction_left, const Vector3& direction_up ){
-	Vector3 endpoint( vector3_added( origin, vector3_scaled( direction_forward, 32.0 ) ) );
+	constexpr float kConeLength = 32.0f;
+	constexpr float kConeBaseOffset = 24.0f;
+	constexpr float kConeRadius = 6.0f;
+	constexpr int kConeSegments = 12;
+	constexpr float kShaftRadius = 2.0f;
+	constexpr float kShaftEndOffset = kConeBaseOffset - 1.0f;
+	constexpr float kPi = 3.14159265358979323846f;
 
-	Vector3 tip1( vector3_added( vector3_added( endpoint, vector3_scaled( direction_forward, -8.0 ) ), vector3_scaled( direction_up, -4.0 ) ) );
-	Vector3 tip2( vector3_added( tip1, vector3_scaled( direction_up, 8.0 ) ) );
-	Vector3 tip3( vector3_added( vector3_added( endpoint, vector3_scaled( direction_forward, -8.0 ) ), vector3_scaled( direction_left, -4.0 ) ) );
-	Vector3 tip4( vector3_added( tip3, vector3_scaled( direction_left, 8.0 ) ) );
+	const Vector3 tip( vector3_added( origin, vector3_scaled( direction_forward, kConeLength ) ) );
+	const Vector3 baseCenter( vector3_added( origin, vector3_scaled( direction_forward, kConeBaseOffset ) ) );
+	const Vector3 shaftStart( origin );
+	const Vector3 shaftEnd( vector3_added( origin, vector3_scaled( direction_forward, kShaftEndOffset ) ) );
 
-	gl().glBegin( GL_LINES );
+	gl().glBegin( GL_TRIANGLES );
+	for ( int i = 0; i < kConeSegments; ++i ) {
+		const float angle0 = static_cast<float>( i ) * ( 2.0f * kPi / kConeSegments );
+		const float angle1 = static_cast<float>( i + 1 ) * ( 2.0f * kPi / kConeSegments );
 
-	gl().glVertex3fv( vector3_to_array( origin ) );
-	gl().glVertex3fv( vector3_to_array( endpoint ) );
+		const Vector3 ring0( vector3_added( shaftStart,
+			vector3_added(
+				vector3_scaled( direction_left, std::cos( angle0 ) * kShaftRadius ),
+				vector3_scaled( direction_up, std::sin( angle0 ) * kShaftRadius ) ) ) );
+		const Vector3 ring1( vector3_added( shaftStart,
+			vector3_added(
+				vector3_scaled( direction_left, std::cos( angle1 ) * kShaftRadius ),
+				vector3_scaled( direction_up, std::sin( angle1 ) * kShaftRadius ) ) ) );
+		const Vector3 ring2( vector3_added( shaftEnd,
+			vector3_added(
+				vector3_scaled( direction_left, std::cos( angle0 ) * kShaftRadius ),
+				vector3_scaled( direction_up, std::sin( angle0 ) * kShaftRadius ) ) ) );
+		const Vector3 ring3( vector3_added( shaftEnd,
+			vector3_added(
+				vector3_scaled( direction_left, std::cos( angle1 ) * kShaftRadius ),
+				vector3_scaled( direction_up, std::sin( angle1 ) * kShaftRadius ) ) ) );
 
-	gl().glVertex3fv( vector3_to_array( endpoint ) );
-	gl().glVertex3fv( vector3_to_array( tip1 ) );
+		gl().glVertex3fv( vector3_to_array( ring0 ) );
+		gl().glVertex3fv( vector3_to_array( ring2 ) );
+		gl().glVertex3fv( vector3_to_array( ring3 ) );
 
-	gl().glVertex3fv( vector3_to_array( endpoint ) );
-	gl().glVertex3fv( vector3_to_array( tip2 ) );
+		gl().glVertex3fv( vector3_to_array( ring0 ) );
+		gl().glVertex3fv( vector3_to_array( ring3 ) );
+		gl().glVertex3fv( vector3_to_array( ring1 ) );
+	}
+	gl().glEnd();
 
-	gl().glVertex3fv( vector3_to_array( endpoint ) );
-	gl().glVertex3fv( vector3_to_array( tip3 ) );
+	gl().glBegin( GL_TRIANGLES );
+	for ( int i = 0; i < kConeSegments; ++i ) {
+		const float angle0 = static_cast<float>( i ) * ( 2.0f * kPi / kConeSegments );
+		const float angle1 = static_cast<float>( i + 1 ) * ( 2.0f * kPi / kConeSegments );
 
-	gl().glVertex3fv( vector3_to_array( endpoint ) );
-	gl().glVertex3fv( vector3_to_array( tip4 ) );
+		const Vector3 base0( vector3_added( baseCenter,
+			vector3_added(
+				vector3_scaled( direction_left, std::cos( angle0 ) * kConeRadius ),
+				vector3_scaled( direction_up, std::sin( angle0 ) * kConeRadius ) ) ) );
+		const Vector3 base1( vector3_added( baseCenter,
+			vector3_added(
+				vector3_scaled( direction_left, std::cos( angle1 ) * kConeRadius ),
+				vector3_scaled( direction_up, std::sin( angle1 ) * kConeRadius ) ) ) );
 
-	gl().glVertex3fv( vector3_to_array( tip1 ) );
-	gl().glVertex3fv( vector3_to_array( tip3 ) );
+		gl().glVertex3fv( vector3_to_array( base1 ) );
+		gl().glVertex3fv( vector3_to_array( base0 ) );
+		gl().glVertex3fv( vector3_to_array( tip ) );
+	}
+	gl().glEnd();
 
-	gl().glVertex3fv( vector3_to_array( tip3 ) );
-	gl().glVertex3fv( vector3_to_array( tip2 ) );
-
-	gl().glVertex3fv( vector3_to_array( tip2 ) );
-	gl().glVertex3fv( vector3_to_array( tip4 ) );
-
-	gl().glVertex3fv( vector3_to_array( tip4 ) );
-	gl().glVertex3fv( vector3_to_array( tip1 ) );
-
+	gl().glBegin( GL_TRIANGLE_FAN );
+	gl().glVertex3fv( vector3_to_array( baseCenter ) );
+	for ( int i = kConeSegments; i >= 0; --i ) {
+		const float angle = static_cast<float>( i ) * ( 2.0f * kPi / kConeSegments );
+		const Vector3 basePoint( vector3_added( baseCenter,
+			vector3_added(
+				vector3_scaled( direction_left, std::cos( angle ) * kConeRadius ),
+				vector3_scaled( direction_up, std::sin( angle ) * kConeRadius ) ) ) );
+		gl().glVertex3fv( vector3_to_array( basePoint ) );
+	}
 	gl().glEnd();
 }
 

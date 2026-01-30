@@ -41,6 +41,9 @@ Sources used:
 - Runtime stability: initialize texture defaults and guard shader preview sizing to prevent crashes when shader textures are missing or unrealized.
 - Runtime stability: validate texture image data before uploads and skybox resampling to avoid driver crashes on invalid dimensions.
 - Runtime stability: swapped entity browser trigger previews to lightweight textured cubes to prevent post-cache crashes.
+- Runtime stability: make Radiant shutdown idempotent to avoid double module release crashes on close.
+- Runtime stability: make model resource realise/unrealise idempotent to prevent TraversableNode insert/erase assertions.
+- Runtime stability: skip inserting null/failed model loads into traversables to prevent duplicate node set assertions.
 - UI stability: clamp restored floating-window geometry to the available screen bounds so resolution changes do not strand windows off-screen.
 - Entity creation: creating new brush entities now only re-parents worldspawn brushes, keeping other entities intact.
 - Patch editing: insert/remove rows and columns now respects the selected patch vertices.
@@ -59,6 +62,8 @@ Sources used:
 - Shader rendering: added safe texture fallback handling in texture browser and shader preview stage draws to avoid GL state crashes when stage textures are missing.
 - Shader rendering: added safe fallback vertex-color arrays for Quake 3 stages to prevent GL crashes and matched `identityLighting` stage color scaling to Quake3e.
 - Shader rendering: temporarily disabled Quake 3 shader stage rendering by default to avoid material browser crashes while the root cause is investigated.
+- Gamepacks (VibePack): converted legacy `entities.def` files to generated `.fgd` definitions and switched each affected `.game` to `entityclasstype="fgd"` (preserving `xml` where present).
+- Gamepacks: renamed NRCPack references to VibePack in tooling and downloads.
 - Preferences: added game-default brush texture scale (idTech2=1.0, idTech3/4=0.5) and texture thumbnail scale (idTech2=200%, idTech3/4=100%).
 - Selection/tools: added a default startup tool mode preference, a primitive-mode toggle/button (Ctrl+Space), and adjustable manipulator size with +/- shortcuts.
 - UI: preferences dialog is now resizable with a larger default size, and the status bar shows selection size.
@@ -75,6 +80,7 @@ Sources used:
 - Documentation: added `docs/language-packs.md` to describe language packs and supported languages.
 - Clipper tool: added a visual style option (GTK/NRC/VIBE) for clipped volume previewing, including a VIBE mode with a red dashed cut line and striped fill.
 - Clipper tool: apply the selected clipper fill/stipple style in orthographic views for VIBE/GTK parity.
+- Debugging: added a clipper ortho debug overlay (View > Show) that exercises line/polygon stipple and point rendering while logging GL state for diagnosing missing clipper indicators.
 - Asset browser: added entity and sound browser tabs alongside textures, with drag-and-drop into 2D/3D views to create entities or assign `noise`/`target_speaker` sounds.
 - Asset browser: re-enabled texture/entity/sound tabs and labeled the combined view as the Asset Browser.
 - Asset browser: merged the model browser into the asset browser and enabled model drag-drop to create `misc_model` entities with the model key set.
@@ -82,10 +88,19 @@ Sources used:
 - Asset browser: sound tiles now preview on double-click with a stop icon and single-click stop; drag-and-drop uses transparent tile snapshots and drops into 2D/3D views.
 - Asset browser: drag-and-drop no longer grabs the pointer on left-drag; model rotation is available via Alt+drag.
 - Asset browser: fixed entity/sound hover hit-testing and drag start, and scale entity/model tiles proportionally using per-browser max extents.
+- Asset browser: hovered entity/model tiles now ease into a continuous Z-axis rotation and snap back to the default 45/0/45 orientation when not hovered.
 - Asset browser: brush-entity drops create a notex 64^3 cube when no world brush is under the drop point.
 - Asset browser: cube entity tiles use a dedicated directional light pass, and tile scaling now accounts for 45/0/45 rotated extents so angled previews fit their frames.
 - Asset browser: entity/model tiles now default to 45/0/45 rotation, fixedsize entity tiles render colored cubes, and triggers render as double-sized trigger-textured cubes.
 - Asset browser: brush-model entities render as notex-textured cubes in entity tiles.
+- Asset browser: model tiles now default to `models/mapobjects/`, fixedsize entity tiles draw a solid cone direction arrow with a slimmer shaft, and the default preview angles are configurable.
+- Asset browser: fixedsize entity arrows now use an inverted/closed cone with a connecting cylinder shaft for clearer direction cues.
+- Entity rendering: `model2` now renders as a secondary model alongside the primary model for misc_model and eclass model entities (e.g., Q3 powerups/health bubbles).
+- Sound browser: root moved to `sound/world/`, added precache of world sounds after textures/models, and added a reload sounds button.
+- File dialogs: remember recent folders and expose them in open/save dialogs for faster path reuse.
+- Brush tools: added the "Silly Sausage Tool" to build a tapered, bowed sausage of brushes from a selected brush and group it under `func_group`.
+- Brush tools: fixed the Silly Sausage Tool to accept component-selected faces and handle tapered end tips without degenerating.
+- Brush tools: Silly Sausage Tool now keeps divisions on the body only and adds separate hemispherical cap brushes at each end.
 - Asset browser: renamed the Textures tab to Materials, removed the standalone model browser window, and moved Refresh Models into the model browser toolbar.
 - Branding: replaced the splash screen artwork with a new 1536x1024 `splash.png`.
 - Branding: updated the main window title to use the "VibeRadiant" name without a space.

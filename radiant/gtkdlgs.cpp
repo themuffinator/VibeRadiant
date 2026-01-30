@@ -340,6 +340,40 @@ void DoSides( EBrushPrefab type ){
 	}
 }
 
+void Scene_BrushConstructSillySausage( std::size_t divisions, std::size_t sides );
+
+void DoSillySausage(){
+	QDialog dialog( MainFrame_getWindow(), Qt::Dialog | Qt::WindowCloseButtonHint );
+	dialog.setWindowTitle( "Silly Sausage Tool" );
+
+	auto *divisionsSpin = new SpinBox;
+	auto *sidesSpin = new SpinBox;
+	{
+		auto *form = new QFormLayout( &dialog );
+		form->setSizeConstraint( QLayout::SizeConstraint::SetFixedSize );
+
+		form->addRow( new SpinBoxLabel( "Divisions:", divisionsSpin ), divisionsSpin );
+		form->addRow( new SpinBoxLabel( "Sides:", sidesSpin ), sidesSpin );
+
+		divisionsSpin->setRange( 2, 64 );
+		divisionsSpin->setValue( 5 );
+		sidesSpin->setRange( 3, 64 );
+		sidesSpin->setValue( 6 );
+
+		divisionsSpin->selectAll();
+
+		auto *buttons = new QDialogButtonBox( QDialogButtonBox::StandardButton::Ok | QDialogButtonBox::StandardButton::Cancel );
+		form->addWidget( buttons );
+		QObject::connect( buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept );
+		QObject::connect( buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject );
+	}
+
+	if ( dialog.exec() ) {
+		Scene_BrushConstructSillySausage( static_cast<std::size_t>( divisionsSpin->value() ),
+		                                 static_cast<std::size_t>( sidesSpin->value() ) );
+	}
+}
+
 // =============================================================================
 // About dialog (no program is complete without one)
 

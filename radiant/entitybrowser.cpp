@@ -44,6 +44,8 @@
 #include "view.h"
 #include "filterbar.h"
 #include "math/aabb.h"
+#include "timer.h"
+#include "assetbrowserprefs.h"
 
 #include "generic/callback.h"
 
@@ -72,9 +74,11 @@ bool string_contains_nocase( const char* haystack, const char* needle ){
 	return false;
 }
 
-constexpr float kAssetBrowserHoverScale = 1.05f;
-constexpr float kAssetBrowserHoverLerp = 0.2f;
-constexpr float kAssetBrowserHoverEpsilon = 0.001f;
+	constexpr float kAssetBrowserHoverScale = 1.05f;
+	constexpr float kAssetBrowserHoverLerp = 0.2f;
+	constexpr float kAssetBrowserHoverEpsilon = 0.001f;
+	constexpr float kAssetBrowserHoverRotateDegrees = 12.0f;
+	constexpr float kAssetBrowserHoverSpinDegreesPerSecond = 90.0f;
 
 float AssetBrowser_approachHoverScale( float current, float target ){
 	return current + ( target - current ) * kAssetBrowserHoverLerp;
@@ -301,20 +305,32 @@ class BrowserCube final : public Bounded
 	bool m_ownsState = false;
 	CopiedString m_shaderName;
 	AABB m_aabb_local;
+	Vector3 m_arrowOrigin;
+	Vector3 m_arrowAngles;
+	RenderableArrow m_arrow;
+	bool m_drawArrow = false;
 	RenderableSolidAABB m_aabb_solid;
 	RenderableWireframeAABB m_aabb_wire;
 public:
-	BrowserCube( const AABB& aabb, Shader* state ) :
+	BrowserCube( const AABB& aabb, Shader* state, bool drawArrow = false ) :
 		m_state( state ),
 		m_aabb_local( aabb ),
+		m_arrowOrigin( aabb.origin ),
+		m_arrowAngles( 0, 0, 0 ),
+		m_arrow( m_arrowOrigin, m_arrowAngles ),
+		m_drawArrow( drawArrow ),
 		m_aabb_solid( m_aabb_local ),
 		m_aabb_wire( m_aabb_local ){
 	}
-	BrowserCube( const AABB& aabb, const char* shaderName ) :
+	BrowserCube( const AABB& aabb, const char* shaderName, bool drawArrow = false ) :
 		m_state( GlobalShaderCache().capture( shaderName ) ),
 		m_ownsState( true ),
 		m_shaderName( shaderName ),
 		m_aabb_local( aabb ),
+		m_arrowOrigin( aabb.origin ),
+		m_arrowAngles( 0, 0, 0 ),
+		m_arrow( m_arrowOrigin, m_arrowAngles ),
+		m_drawArrow( drawArrow ),
 		m_aabb_solid( m_aabb_local ),
 		m_aabb_wire( m_aabb_local ){
 	}
@@ -329,9 +345,15 @@ public:
 	void renderSolid( Renderer& renderer, const VolumeTest& volume, const Matrix4& localToWorld ) const {
 		renderer.SetState( m_state, Renderer::eFullMaterials );
 		renderer.addRenderable( m_aabb_solid, localToWorld );
+		if ( m_drawArrow ) {
+			renderer.addRenderable( m_arrow, localToWorld );
+		}
 	}
 	void renderWireframe( Renderer& renderer, const VolumeTest& volume, const Matrix4& localToWorld ) const {
 		renderer.addRenderable( m_aabb_wire, localToWorld );
+		if ( m_drawArrow ) {
+			renderer.addRenderable( m_arrow, localToWorld );
+		}
 	}
 };
 
@@ -395,13 +417,13 @@ class BrowserCubeNode final : public scene::Node::Symbiot, public scene::Instant
 public:
 	typedef LazyStatic<TypeCasts> StaticTypeCasts;
 
-	BrowserCubeNode( const AABB& aabb, Shader* state ) :
+	BrowserCubeNode( const AABB& aabb, Shader* state, bool drawArrow = false ) :
 		m_node( this, this, StaticTypeCasts::instance().get(), nullptr ),
-		m_cube( aabb, state ){
+		m_cube( aabb, state, drawArrow ){
 	}
-	BrowserCubeNode( const AABB& aabb, const char* shaderName ) :
+	BrowserCubeNode( const AABB& aabb, const char* shaderName, bool drawArrow = false ) :
 		m_node( this, this, StaticTypeCasts::instance().get(), nullptr ),
-		m_cube( aabb, shaderName ){
+		m_cube( aabb, shaderName, drawArrow ){
 	}
 
 	void release() override {
@@ -691,6 +713,10 @@ public:
 	int m_hoverEntityId = -1;
 	float m_hoverScale = 1.0f;
 	float m_hoverScaleTarget = 1.0f;
+	float m_hoverRotate = 0.0f;
+	float m_hoverRotateTarget = 0.0f;
+	float m_hoverSpin = 0.0f;
+	Timer m_hoverSpinTimer;
 
 	CellPos constructCellPos() const {
 		return CellPos( m_width, m_cellSize, GlobalOpenGL().m_font->getPixelHeight() );
@@ -715,6 +741,9 @@ public:
 	float hoverScaleForIndex( int index ) const {
 		return index == m_hoverEntityId ? m_hoverScale : 1.0f;
 	}
+	float hoverRotationForIndex( int index ) const {
+		return index == m_hoverEntityId ? ( m_hoverRotate + m_hoverSpin ) : 0.0f;
+	}
 	float hoverAlpha() const {
 		if ( m_hoverEntityId < 0 ) {
 			return 0.0f;
@@ -722,23 +751,51 @@ public:
 		return std::clamp( ( m_hoverScale - 1.0f ) / ( kAssetBrowserHoverScale - 1.0f ), 0.0f, 1.0f );
 	}
 	bool updateHoverAnimation(){
+		const float previousSpin = m_hoverSpin;
 		if ( m_hoverEntityId < 0 ) {
+			const bool rotateChanged = std::fabs( m_hoverRotate ) > kAssetBrowserHoverEpsilon;
+			const bool spinChanged = std::fabs( m_hoverSpin ) > kAssetBrowserHoverEpsilon;
 			m_hoverScale = 1.0f;
 			m_hoverScaleTarget = 1.0f;
-			return false;
+			m_hoverRotate = 0.0f;
+			m_hoverRotateTarget = 0.0f;
+			m_hoverSpin = 0.0f;
+			return rotateChanged || spinChanged;
 		}
 		if ( m_hoverEntityId >= static_cast<int>( m_visibleClasses.size() ) ) {
+			const bool rotateChanged = std::fabs( m_hoverRotate ) > kAssetBrowserHoverEpsilon;
+			const bool spinChanged = std::fabs( m_hoverSpin ) > kAssetBrowserHoverEpsilon;
 			m_hoverEntityId = -1;
 			m_hoverScale = 1.0f;
 			m_hoverScaleTarget = 1.0f;
-			return false;
+			m_hoverRotate = 0.0f;
+			m_hoverRotateTarget = 0.0f;
+			m_hoverSpin = 0.0f;
+			return rotateChanged || spinChanged;
 		}
 		const float previous = m_hoverScale;
+		const float previousRotate = m_hoverRotate;
 		m_hoverScale = AssetBrowser_approachHoverScale( m_hoverScale, m_hoverScaleTarget );
-		if ( std::fabs( m_hoverScale - m_hoverScaleTarget ) < kAssetBrowserHoverEpsilon ) {
+		m_hoverRotate = AssetBrowser_approachHoverScale( m_hoverRotate, m_hoverRotateTarget );
+		const bool scaleSettled = std::fabs( m_hoverScale - m_hoverScaleTarget ) < kAssetBrowserHoverEpsilon;
+		const bool rotateSettled = std::fabs( m_hoverRotate - m_hoverRotateTarget ) < kAssetBrowserHoverEpsilon;
+		if ( scaleSettled ) {
 			m_hoverScale = m_hoverScaleTarget;
 		}
-		else{
+		if ( rotateSettled ) {
+			m_hoverRotate = m_hoverRotateTarget;
+		}
+		const bool spinActive = m_hoverScaleTarget > 1.0f + kAssetBrowserHoverEpsilon;
+		if ( spinActive ) {
+			m_hoverSpin = static_cast<float>(
+				std::fmod( m_hoverSpinTimer.elapsed_sec() * kAssetBrowserHoverSpinDegreesPerSecond, 360.0 ) );
+		}
+		else
+		{
+			m_hoverSpin = 0.0f;
+		}
+		const bool spinChanged = std::fabs( m_hoverSpin - previousSpin ) > kAssetBrowserHoverEpsilon;
+		if ( spinActive || !( scaleSettled && rotateSettled ) || spinChanged ) {
 			queueDraw();
 		}
 		if ( m_hoverScaleTarget <= 1.0f + kAssetBrowserHoverEpsilon
@@ -746,8 +803,14 @@ public:
 			m_hoverScale = 1.0f;
 			m_hoverScaleTarget = 1.0f;
 			m_hoverEntityId = -1;
+			m_hoverRotate = 0.0f;
+			m_hoverRotateTarget = 0.0f;
+			m_hoverSpin = 0.0f;
 		}
-		return std::fabs( m_hoverScale - previous ) > kAssetBrowserHoverEpsilon;
+		return ( std::fabs( m_hoverScale - previous ) > kAssetBrowserHoverEpsilon )
+			|| ( std::fabs( m_hoverRotate - previousRotate ) > kAssetBrowserHoverEpsilon )
+			|| spinChanged
+			|| spinActive;
 	}
 	const EntityClass* currentEntityClass() const {
 		if ( m_currentEntityId < 0 || m_currentEntityId >= static_cast<int>( m_visibleClasses.size() ) ) {
@@ -763,6 +826,9 @@ private:
 		if ( hoverId < 0 ) {
 			if ( m_hoverEntityId >= 0 && m_hoverScaleTarget != 1.0f ) {
 				m_hoverScaleTarget = 1.0f;
+				m_hoverRotateTarget = 0.0f;
+				m_hoverRotate = 0.0f;
+				m_hoverSpin = 0.0f;
 				queueDraw();
 			}
 			return;
@@ -772,9 +838,14 @@ private:
 		if ( idChanged ) {
 			m_hoverEntityId = hoverId;
 			m_hoverScale = 1.0f;
+			m_hoverRotate = 0.0f;
+			m_hoverSpin = 0.0f;
 		}
 		if ( idChanged || m_hoverScaleTarget != kAssetBrowserHoverScale ) {
 			m_hoverScaleTarget = kAssetBrowserHoverScale;
+			m_hoverRotateTarget = kAssetBrowserHoverRotateDegrees;
+			m_hoverSpinTimer.start();
+			m_hoverSpin = 0.0f;
 			queueDraw();
 		}
 	}
@@ -930,7 +1001,7 @@ static void EntityBrowser_addTriggerPreview( scene::Node& node ){
 
 static NodeSmartReference EntityBrowser_createFixedSizePreviewNode( EntityClass* eclass ){
 	const AABB bounds = aabb_for_minmax( eclass->mins, eclass->maxs );
-	NodeSmartReference cubeNode( ( new BrowserCubeNode( bounds, eclass->m_state_fill ) )->node() );
+	NodeSmartReference cubeNode( ( new BrowserCubeNode( bounds, eclass->m_state_fill, true ) )->node() );
 	return NodeSmartReference( ( new EntityBrowserPreviewNode( cubeNode ) )->node() );
 }
 
@@ -989,7 +1060,7 @@ static QPixmap EntityBrowser_dragPixmap( EntityBrowser& browser ){
 
 static float EntityBrowser_maxScaledExtent(){
 	float maxExtent = 0.0f;
-	const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( Vector3( 45, 0, 45 ) );
+	const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( AssetBrowser_defaultAngles() );
 	g_EntityBrowser.forEachEntityInstance( [&]( scene::Instance* instance ){
 		if ( Bounded *bounded = Instance_getBounded( *instance ) ) {
 			AABB aabb = bounded->localAABB();
@@ -1037,7 +1108,11 @@ public:
 				if ( isTrigger ) {
 					scale *= 2.0f;
 				}
-				const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( Vector3( 45, 0, 45 ) );
+				const float hoverRotate = g_EntityBrowser.hoverRotationForIndex( index );
+				const Matrix4 baseRotation = matrix4_rotation_for_euler_xyz_degrees( AssetBrowser_defaultAngles() );
+				const Matrix4 rotation = ( std::fabs( hoverRotate ) > 0.0f )
+					? matrix4_multiplied_by_matrix4( baseRotation, matrix4_rotation_for_z_degrees( hoverRotate ) )
+					: baseRotation;
 				const_cast<Matrix4&>( transformNode->localToParent() ) =
 				        matrix4_multiplied_by_matrix4(
 				            matrix4_translation_for_vec3( m_cellPos.getOrigin() ),

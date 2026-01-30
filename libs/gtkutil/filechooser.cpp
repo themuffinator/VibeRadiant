@@ -23,9 +23,15 @@
 
 #include "ifiletypes.h"
 
+#include <algorithm>
 #include <list>
 #include <vector>
+#include <QDialog>
 #include <QFileDialog>
+#include <QDir>
+#include <QFileInfo>
+#include <QSettings>
+#include <QUrl>
 
 #include "string/string.h"
 #include "stream/stringstream.h"
@@ -103,6 +109,77 @@ public:
 
 static QByteArray g_file_dialog_file;
 
+namespace {
+constexpr int kRecentFolderLimit = 12;
+
+QStringList file_dialog_recent_folders(){
+	QSettings settings;
+	return settings.value( "FileDialog/recentFolders" ).toStringList();
+}
+
+void file_dialog_save_recent_folders( const QStringList& folders ){
+	QSettings settings;
+	settings.setValue( "FileDialog/recentFolders", folders );
+}
+
+QStringList file_dialog_sanitize_recent_folders( const QStringList& folders ){
+	QStringList cleaned;
+	cleaned.reserve( folders.size() );
+	for ( const QString& folder : folders ) {
+		const QString trimmed = QDir::cleanPath( folder );
+		if ( trimmed.isEmpty() ) {
+			continue;
+		}
+		if ( !QDir( trimmed ).exists() ) {
+			continue;
+		}
+		const auto match = [&trimmed]( const QString& other ){
+			return trimmed.compare( other, Qt::CaseInsensitive ) == 0;
+		};
+		if ( std::none_of( cleaned.cbegin(), cleaned.cend(), match ) ) {
+			cleaned.push_back( trimmed );
+		}
+	}
+	return cleaned;
+}
+
+void file_dialog_add_recent_folder( const QString& folder ){
+	if ( folder.isEmpty() ) {
+		return;
+	}
+	QStringList folders = file_dialog_sanitize_recent_folders( file_dialog_recent_folders() );
+	const QString cleaned = QDir::cleanPath( folder );
+	if ( cleaned.isEmpty() ) {
+		return;
+	}
+	folders.erase( std::remove_if( folders.begin(), folders.end(),
+		[&cleaned]( const QString& other ){
+			return cleaned.compare( other, Qt::CaseInsensitive ) == 0;
+		} ), folders.end() );
+	if ( QDir( cleaned ).exists() ) {
+		folders.push_front( cleaned );
+	}
+	if ( folders.size() > kRecentFolderLimit ) {
+		folders.erase( folders.begin() + kRecentFolderLimit, folders.end() );
+	}
+	file_dialog_save_recent_folders( folders );
+}
+
+void file_dialog_apply_recent_folders( QFileDialog& dialog ){
+	const QStringList folders = file_dialog_sanitize_recent_folders( file_dialog_recent_folders() );
+	if ( folders.isEmpty() ) {
+		return;
+	}
+	QList<QUrl> urls;
+	urls.reserve( folders.size() );
+	for ( const QString& folder : folders ) {
+		urls.push_back( QUrl::fromLocalFile( folder ) );
+	}
+	dialog.setSidebarUrls( urls );
+	dialog.setHistory( folders );
+}
+} // namespace
+
 const char* file_dialog( QWidget* parent, bool open, const char* title, const char* path, const char* pattern, bool want_load, bool want_import, bool want_save ){
 	if ( pattern == 0 ) {
 		pattern = "*";
@@ -147,9 +224,43 @@ const char* file_dialog( QWidget* parent, bool open, const char* title, const ch
 	// input path may be either folder or file
 	// only existing file path may be chosen for open; overwriting is prompted on save
 	QString selectedFilter;
-	g_file_dialog_file = open
-		? QFileDialog::getOpenFileName( parent, title, path, filter, &selectedFilter ).toLatin1()
-		: QFileDialog::getSaveFileName( parent, title, path, filter, &selectedFilter ).toLatin1();
+	QFileDialog dialog( parent, title );
+	dialog.setAcceptMode( open ? QFileDialog::AcceptOpen : QFileDialog::AcceptSave );
+	dialog.setFileMode( open ? QFileDialog::ExistingFile : QFileDialog::AnyFile );
+	dialog.setOption( QFileDialog::DontConfirmOverwrite, false );
+	if ( !filter.isEmpty() ) {
+		dialog.setNameFilter( filter );
+	}
+
+	if ( path != 0 && !string_empty( path ) ) {
+		const QString initialPath = QString::fromLatin1( path );
+		const QFileInfo info( initialPath );
+		if ( info.isDir() ) {
+			dialog.setDirectory( info.absoluteFilePath() );
+		}
+		else{
+			dialog.setDirectory( info.absolutePath() );
+			dialog.selectFile( info.absoluteFilePath() );
+		}
+	}
+
+	const QStringList recentFolders = file_dialog_recent_folders();
+	if ( !recentFolders.isEmpty() ) {
+		dialog.setOption( QFileDialog::DontUseNativeDialog, true );
+	}
+	file_dialog_apply_recent_folders( dialog );
+
+	if ( dialog.exec() != QDialog::Accepted ) {
+		g_file_dialog_file.clear();
+		return nullptr;
+	}
+	const QStringList selectedFiles = dialog.selectedFiles();
+	if ( selectedFiles.isEmpty() ) {
+		g_file_dialog_file.clear();
+		return nullptr;
+	}
+	selectedFilter = dialog.selectedNameFilter();
+	g_file_dialog_file = selectedFiles.front().toLatin1();
 
 	/* validate extension: it is possible to pick existing file, not respecting the filter...
 	   some dialog implementations may return file name w/o autoappended extension too */
@@ -163,11 +274,19 @@ const char* file_dialog( QWidget* parent, bool open, const char* title, const ch
 			}
 		}
 		else{ // add extension
-			selectedFilter = selectedFilter.right( selectedFilter.size() - ( selectedFilter.indexOf( "*." ) + 1 ) );
-			selectedFilter = selectedFilter.left( selectedFilter.indexOf( ')' ) );
-			selectedFilter = selectedFilter.left( selectedFilter.indexOf( ' ' ) ); // left() is preferred over truncate(), since it returns entire string on negative input
-			g_file_dialog_file.append( selectedFilter.toLatin1() );
+			if ( !selectedFilter.isEmpty() ) {
+				selectedFilter = selectedFilter.right( selectedFilter.size() - ( selectedFilter.indexOf( "*." ) + 1 ) );
+				selectedFilter = selectedFilter.left( selectedFilter.indexOf( ')' ) );
+				selectedFilter = selectedFilter.left( selectedFilter.indexOf( ' ' ) ); // left() is preferred over truncate(), since it returns entire string on negative input
+				g_file_dialog_file.append( selectedFilter.toLatin1() );
+			}
 		}
+	}
+
+	if ( !g_file_dialog_file.isEmpty() ) {
+		const QFileInfo info( QString::fromLatin1( g_file_dialog_file.constData() ) );
+		const QString folder = info.isDir() ? info.absoluteFilePath() : info.absolutePath();
+		file_dialog_add_recent_folder( folder );
 	}
 
 	// don't return an empty filename

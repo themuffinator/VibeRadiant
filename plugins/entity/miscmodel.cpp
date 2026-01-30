@@ -149,7 +149,7 @@ class MiscModel :
 	ScaleKey m_scaleKey;
 	Vector3 m_scale;
 
-	SingletonModel m_model;
+	MultiModel m_model;
 
 	ClassnameFilter m_filter;
 	NamedEntity m_named;
@@ -161,13 +161,16 @@ class MiscModel :
 	Callback<void()> m_evaluateTransform;
 
 	void modelKeyChanged( const char* ){
+		const EntityClass& eclass = m_entity.getEntityClass();
+		const char* model = m_entity.getKeyValue( eclass.miscmodel_key() );
+		if ( string_empty( model ) ) {
+			model = EntityClass_valueForKey( eclass, eclass.miscmodel_key() );
+		}
 		const char* model2 = m_entity.getKeyValue( "model2" );
-		if ( !string_empty( model2 ) ) {
-			m_model.modelChanged( model2 );
+		if ( string_empty( model2 ) ) {
+			model2 = EntityClass_valueForKey( eclass, "model2" );
 		}
-		else {
-			m_model.modelChanged( m_entity.getKeyValue( m_entity.getEntityClass().miscmodel_key() ) );
-		}
+		m_model.setModels( model, model2 );
 	}
 	typedef MemberCaller<MiscModel, void(const char*), &MiscModel::modelKeyChanged> ModelKeyChangedCaller;
 
@@ -211,8 +214,10 @@ public:
 	typedef MemberCaller<MiscModel, void(), &MiscModel::scaleChanged> ScaleChangedCaller;
 
 	void skinChanged(){
-		scene::Node* node = m_model.getNode();
-		if ( node != 0 ) {
+		if ( scene::Node* node = m_model.getPrimaryNode() ) {
+			Node_modelSkinChanged( *node );
+		}
+		if ( scene::Node* node = m_model.getSecondaryNode() ) {
 			Node_modelSkinChanged( *node );
 		}
 	}
@@ -265,13 +270,7 @@ public:
 			m_entity.attach( m_keyObservers );
 			m_entity.attach( m_remapKeysObserver );
 			m_linkedGroupObserver.attach( m_entity );
-			{ // handle set default model key value
-				const EntityClass& eclass = m_entity.getEntityClass();
-				const char *key = eclass.miscmodel_key();
-				const char *model = EntityClass_valueForKey( eclass, key );
-				if( !string_empty( model ) && !m_entity.hasKeyValue( key ) )
-					m_model.modelChanged( model );
-			}
+			modelKeyChanged( "" );
 		}
 	}
 	void instanceDetach( const scene::Path& path ){

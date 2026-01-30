@@ -22,6 +22,11 @@
 #include "brushmanip.h"
 
 
+#include <array>
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 #include "gtkutil/widget.h"
 #include "gtkmisc.h"
 #include "gtkutil/i18n.h"
@@ -34,6 +39,7 @@
 #include "dialog.h"
 #include "xywindow.h"
 #include "preferences.h"
+#include "eclasslib.h"
 
 void Brush_ConstructCuboid( Brush& brush, const AABB& bounds, const char* shader, const TextureProjection& projection ){
 	const unsigned char box[3][2] = { { 0, 1 }, { 2, 0 }, { 1, 2 } };
@@ -816,6 +822,472 @@ void Scene_BrushConstructPrefab( scene::Graph& graph, EBrushPrefab type, std::si
 	}
 }
 
+static Vector3 BrushAxisVector( std::size_t axis ){
+	Vector3 v( 0.0f, 0.0f, 0.0f );
+	v[axis] = 1.0f;
+	return v;
+}
+
+static Vector3 BrushNormalisedOr( const Vector3& value, const Vector3& fallback ){
+	Vector3 v = value;
+	if ( vector3_length_squared( v ) > 0.0f ) {
+		vector3_normalise( v );
+		return v;
+	}
+	return fallback;
+}
+
+static void Brush_AddPlaneOriented( Brush& brush,
+                                    const Vector3& p0,
+                                    const Vector3& p1,
+                                    const Vector3& p2,
+                                    const Vector3& outward,
+                                    const char* shader,
+                                    const TextureProjection& projection ){
+	Vector3 normal = vector3_cross( p1 - p0, p2 - p0 );
+	if ( vector3_length_squared( normal ) <= 0.0f ) {
+		return;
+	}
+	if ( vector3_dot( normal, outward ) < 0.0f ) {
+		brush.addPlane( p0, p2, p1, shader, projection );
+	}
+	else{
+		brush.addPlane( p0, p1, p2, shader, projection );
+	}
+}
+
+static void Brush_ConstructFrustum( Brush& brush,
+                                   const Vector3& startCenter,
+                                   const Vector3& endCenter,
+                                   const Vector3& startLeft,
+                                   const Vector3& startUp,
+                                   const Vector3& endLeft,
+                                   const Vector3& endUp,
+                                   const Vector3& startCapNormal,
+                                   const Vector3& endCapNormal,
+                                   float radiusStart,
+                                   float radiusEnd,
+                                   std::size_t sides,
+                                   const char* shader,
+                                   const TextureProjection& projection ){
+	if ( sides < c_brushPrism_minSides ) {
+		return;
+	}
+	constexpr float kRadiusEpsilon = 0.001f;
+	const float startRadius = std::max( 0.0f, radiusStart );
+	const float endRadius = std::max( 0.0f, radiusEnd );
+	const bool startTip = startRadius <= kRadiusEpsilon;
+	const bool endTip = endRadius <= kRadiusEpsilon;
+	if ( startTip && endTip ) {
+		brush.clear();
+		return;
+	}
+
+	constexpr float kPi = 3.14159265358979323846f;
+	std::vector<Vector3> startRing;
+	std::vector<Vector3> endRing;
+	startRing.reserve( sides );
+	endRing.reserve( sides );
+
+	for ( std::size_t i = 0; i < sides; ++i ) {
+		const float angle = static_cast<float>( i ) * ( 2.0f * kPi / static_cast<float>( sides ) );
+		const float c = std::cos( angle );
+		const float s = std::sin( angle );
+		const Vector3 startPoint = vector3_added(
+		    startCenter,
+		    vector3_added(
+		        vector3_scaled( startLeft, c * startRadius ),
+		        vector3_scaled( startUp, s * startRadius ) ) );
+		const Vector3 endPoint = vector3_added(
+		    endCenter,
+		    vector3_added(
+		        vector3_scaled( endLeft, c * endRadius ),
+		        vector3_scaled( endUp, s * endRadius ) ) );
+		startRing.push_back( startPoint );
+		endRing.push_back( endPoint );
+	}
+
+	brush.clear();
+	brush.reserve( sides + 2 );
+
+	const Vector3 segmentCenter = vector3_mid( startCenter, endCenter );
+
+	for ( std::size_t i = 0; i < sides; ++i ) {
+		const std::size_t next = ( i + 1 ) % sides;
+		Vector3 p0;
+		Vector3 p1;
+		Vector3 p2;
+		if ( startTip ) {
+			p0 = startCenter;
+			p1 = endRing[i];
+			p2 = endRing[next];
+		}
+		else if ( endTip ) {
+			p0 = startRing[i];
+			p1 = startRing[next];
+			p2 = endCenter;
+		}
+		else{
+			p0 = startRing[i];
+			p1 = endRing[i];
+			p2 = endRing[next];
+		}
+
+		const Vector3 mid = ( p0 + p1 + p2 ) * ( 1.0f / 3.0f );
+		const Vector3 outward = mid - segmentCenter;
+		Brush_AddPlaneOriented( brush, p0, p1, p2, outward, shader, projection );
+	}
+
+	if ( !startTip ) {
+		Brush_AddPlaneOriented( brush, startRing[0], startRing[1], startRing[2], startCapNormal, shader, projection );
+	}
+
+	if ( !endTip ) {
+		Brush_AddPlaneOriented( brush, endRing[0], endRing[1], endRing[2], endCapNormal, shader, projection );
+	}
+}
+
+static bool Brush_ConstructHemisphere( Brush& brush,
+                                      const Vector3& center,
+                                      const Vector3& cutNormal,
+                                      const Vector3& left,
+                                      const Vector3& up,
+                                      float radius,
+                                      std::size_t sides,
+                                      const char* shader,
+                                      const TextureProjection& projection ){
+	if ( radius <= 0.0f ) {
+		return false;
+	}
+
+	const std::size_t capSides = std::min<std::size_t>( sides, c_brushSphere_maxSides );
+	Brush_ConstructSphere( brush, AABB( center, Vector3( radius ) ), capSides, shader, projection );
+	if ( brush.empty() ) {
+		return false;
+	}
+
+	const Vector3 p0 = vector3_added( center, vector3_scaled( left, radius ) );
+	const Vector3 p1 = vector3_added( center, vector3_scaled( up, radius ) );
+	const Vector3 p2 = vector3_added( center, vector3_scaled( left, -radius ) );
+	Brush_AddPlaneOriented( brush, p0, p1, p2, cutNormal, shader, projection );
+
+	brush.removeEmptyFaces();
+	brush.evaluateBRep();
+	return !brush.empty() && brush.hasContributingFaces();
+}
+
+void Scene_BrushConstructSillySausage( std::size_t divisions, std::size_t sides ){
+	if ( divisions < 2 ) {
+		divisions = 2;
+	}
+	if ( sides < c_brushPrism_minSides ) {
+		sides = c_brushPrism_minSides;
+	}
+	if ( sides > c_brushPrism_maxSides ) {
+		sides = c_brushPrism_maxSides;
+	}
+
+	if ( GlobalSelectionSystem().countSelected() > 1 ) {
+		globalWarningStream() << "Silly Sausage Tool: select a single brush (or faces from a single brush) before running the tool.\n";
+		return;
+	}
+
+	BrushInstance* sourceInstance = nullptr;
+	scene::Path sourcePath;
+
+	if ( GlobalSelectionSystem().countSelected() == 1 ) {
+		scene::Instance& selectedInstance = GlobalSelectionSystem().ultimateSelected();
+		sourceInstance = Instance_getBrush( selectedInstance );
+		if ( sourceInstance != nullptr ) {
+			sourcePath = selectedInstance.path();
+		}
+	}
+
+	if ( sourceInstance == nullptr ) {
+		std::size_t componentBrushCount = 0;
+		class ComponentBrushFinder final : public SelectionSystem::Visitor
+		{
+			BrushInstance*& m_brush;
+			scene::Path& m_path;
+			std::size_t& m_count;
+		public:
+			ComponentBrushFinder( BrushInstance*& brush, scene::Path& path, std::size_t& count )
+				: m_brush( brush ), m_path( path ), m_count( count ){
+			}
+			void visit( scene::Instance& instance ) const override {
+				if ( BrushInstance* brush = Instance_getBrush( instance ) ) {
+					++m_count;
+					if ( m_brush == nullptr ) {
+						m_brush = brush;
+						m_path = instance.path();
+					}
+				}
+			}
+		};
+
+		ComponentBrushFinder finder( sourceInstance, sourcePath, componentBrushCount );
+		GlobalSelectionSystem().foreachSelectedComponent( finder );
+		if ( componentBrushCount > 1 ) {
+			globalWarningStream() << "Silly Sausage Tool: select a single brush (or faces from a single brush) before running the tool.\n";
+			return;
+		}
+	}
+
+	if ( sourceInstance == nullptr ) {
+		globalWarningStream() << "Silly Sausage Tool: select a single brush (or faces from a single brush) before running the tool.\n";
+		return;
+	}
+
+	Brush* sourceBrush = &sourceInstance->getBrush();
+
+	const AABB bounds = sourceBrush->localAABB();
+	if ( !aabb_valid( bounds ) ) {
+		globalWarningStream() << "Silly Sausage Tool: selected brush bounds are invalid.\n";
+		return;
+	}
+
+	const auto command = StringStream<64>( "sillySausage", " -divisions ", divisions, " -sides ", sides );
+	UndoableCommand undo( command );
+
+	CopiedString shaderName;
+	TextureProjection projection = TextureTransform_getDefault();
+	const char* shader = TextureBrowser_GetSelectedShader();
+	if ( Scene_BrushGetShaderTexdef_Selected( GlobalSceneGraph(), shaderName, projection ) && !shaderName.empty() ) {
+		shader = shaderName.c_str();
+	}
+
+	scene::Traversable* rootTraversable = Node_getTraversable( GlobalSceneGraph().root() );
+	if ( rootTraversable == nullptr ) {
+		return;
+	}
+
+	EntityClass* groupClass = GlobalEntityClassManager().findOrInsert( "func_group", true );
+	NodeSmartReference groupNode( GlobalEntityCreator().createEntity( groupClass ) );
+	rootTraversable->insert( groupNode );
+
+	scene::Traversable* groupTraversable = Node_getTraversable( groupNode.get() );
+	if ( groupTraversable == nullptr ) {
+		rootTraversable->erase( groupNode );
+		return;
+	}
+
+	const Vector3 mins( bounds.origin - bounds.extents );
+	const Vector3 maxs( bounds.origin + bounds.extents );
+
+	float size[3] = {
+		maxs[0] - mins[0],
+		maxs[1] - mins[1],
+		maxs[2] - mins[2]
+	};
+
+	std::size_t lengthAxis = 0;
+	std::size_t bowAxis = 1;
+	std::size_t circumAxis = 2;
+
+	{
+		std::array<std::size_t, 3> order = { 0, 1, 2 };
+		std::sort( order.begin(), order.end(), [&]( std::size_t a, std::size_t b ){
+			return size[a] > size[b];
+		} );
+		lengthAxis = order[0];
+		bowAxis = order[1];
+		circumAxis = order[2];
+	}
+
+	const Face* selectedFace = nullptr;
+	if ( !g_SelectedFaceInstances.empty() ) {
+		Face& candidate = g_SelectedFaceInstances.last().getFace();
+		for ( const auto& facePtr : *sourceBrush ) {
+			if ( facePtr.get() == &candidate ) {
+				selectedFace = &candidate;
+				break;
+			}
+		}
+	}
+
+	if ( selectedFace != nullptr ) {
+		const Vector3 normal = selectedFace->plane3().normal();
+		float absn[3] = { std::fabs( normal[0] ), std::fabs( normal[1] ), std::fabs( normal[2] ) };
+		std::size_t normalAxis = 0;
+		if ( absn[1] > absn[normalAxis] ) {
+			normalAxis = 1;
+		}
+		if ( absn[2] > absn[normalAxis] ) {
+			normalAxis = 2;
+		}
+		circumAxis = normalAxis;
+		std::size_t a = ( circumAxis + 1 ) % 3;
+		std::size_t b = ( circumAxis + 2 ) % 3;
+		if ( size[a] >= size[b] ) {
+			lengthAxis = a;
+			bowAxis = b;
+		}
+		else{
+			lengthAxis = b;
+			bowAxis = a;
+		}
+	}
+
+	const float length = size[lengthAxis];
+	if ( length <= 0.0f ) {
+		rootTraversable->erase( groupNode );
+		return;
+	}
+
+	const float crossDiameter = size[circumAxis];
+	const float clampedDiameter = std::min( crossDiameter, length );
+	const float radius = clampedDiameter * 0.5f;
+	if ( radius <= 0.0f ) {
+		globalWarningStream() << "Silly Sausage Tool: selected brush has no usable diameter.\n";
+		rootTraversable->erase( groupNode );
+		return;
+	}
+	const float bowDepth = std::max( 0.0f, size[bowAxis] - clampedDiameter );
+	const float bowAmplitude = bowDepth * 0.5f;
+
+	const Vector3 lengthDir = BrushAxisVector( lengthAxis );
+	const Vector3 bowDir = BrushAxisVector( bowAxis );
+	const Vector3 planeNormal = BrushNormalisedOr( vector3_cross( lengthDir, bowDir ), BrushAxisVector( circumAxis ) );
+
+	Vector3 forward = lengthDir;
+	Vector3 up = bowDir - vector3_scaled( forward, vector3_dot( bowDir, forward ) );
+	up = BrushNormalisedOr( up, BrushNormalisedOr( vector3_cross( planeNormal, forward ), bowDir ) );
+	Vector3 left = BrushNormalisedOr( vector3_cross( up, forward ), BrushAxisVector( circumAxis ) );
+	up = BrushNormalisedOr( vector3_cross( forward, left ), up );
+
+	const float capRadius = radius;
+	const float bodyLength = std::max( 0.0f, length - 2.0f * capRadius );
+
+	std::vector<float> samples;
+	if ( bodyLength > 0.0f ) {
+		samples.reserve( divisions + 1 );
+		for ( std::size_t i = 0; i <= divisions; ++i ) {
+			samples.push_back( capRadius + bodyLength * ( static_cast<float>( i ) / static_cast<float>( divisions ) ) );
+		}
+	}
+
+	const std::size_t sampleCount = samples.size();
+	std::vector<Vector3> centers( sampleCount );
+
+	for ( std::size_t i = 0; i < sampleCount; ++i ) {
+		const float s = samples[i];
+		const float t = length > 0.0f ? ( s / length ) : 0.0f;
+		const float bow = bowAmplitude * std::sin( static_cast<float>( c_pi ) * t );
+		centers[i] = bounds.origin
+		    + vector3_scaled( lengthDir, s - length * 0.5f )
+		    + vector3_scaled( bowDir, bow );
+	}
+
+	std::size_t createdCount = 0;
+	for ( std::size_t i = 0; i + 1 < sampleCount; ++i ) {
+		const Vector3& center0 = centers[i];
+		const Vector3& center1 = centers[i + 1];
+
+		const Vector3 startCapNormal = vector3_scaled( forward, -1.0f );
+		const Vector3 endCapNormal = forward;
+
+		const float radius0 = radius;
+		const float radius1 = radius;
+
+		NodeSmartReference brushNode( GlobalBrushCreator().createBrush() );
+		groupTraversable->insert( brushNode );
+
+		Brush* brush = Node_getBrush( brushNode );
+		if ( brush == nullptr ) {
+			groupTraversable->erase( brushNode );
+			continue;
+		}
+
+		Brush_ConstructFrustum( *brush,
+		                        center0,
+		                        center1,
+		                        left,
+		                        up,
+		                        left,
+		                        up,
+		                        startCapNormal,
+		                        endCapNormal,
+		                        radius0,
+		                        radius1,
+		                        sides,
+		                        shader,
+		                        projection );
+		brush->evaluateBRep();
+		if ( brush->empty() || !brush->hasContributingFaces() ) {
+			groupTraversable->erase( brushNode );
+			continue;
+		}
+		++createdCount;
+	}
+
+	const float startS = capRadius;
+	const float endS = length - capRadius;
+	const float startT = length > 0.0f ? ( startS / length ) : 0.0f;
+	const float endT = length > 0.0f ? ( endS / length ) : 1.0f;
+	const float startBow = bowAmplitude * std::sin( static_cast<float>( c_pi ) * startT );
+	const float endBow = bowAmplitude * std::sin( static_cast<float>( c_pi ) * endT );
+
+	const Vector3 startCenter = bounds.origin
+	    + vector3_scaled( lengthDir, startS - length * 0.5f )
+	    + vector3_scaled( bowDir, startBow );
+	const Vector3 endCenter = bounds.origin
+	    + vector3_scaled( lengthDir, endS - length * 0.5f )
+	    + vector3_scaled( bowDir, endBow );
+
+	if ( capRadius > 0.0f ) {
+		{
+			NodeSmartReference capNode( GlobalBrushCreator().createBrush() );
+			groupTraversable->insert( capNode );
+			Brush* capBrush = Node_getBrush( capNode );
+			if ( capBrush == nullptr ) {
+				groupTraversable->erase( capNode );
+			}
+			else if ( Brush_ConstructHemisphere( *capBrush, startCenter, forward, left, up, capRadius, sides, shader, projection ) ) {
+				++createdCount;
+			}
+			else{
+				groupTraversable->erase( capNode );
+			}
+		}
+		{
+			NodeSmartReference capNode( GlobalBrushCreator().createBrush() );
+			groupTraversable->insert( capNode );
+			Brush* capBrush = Node_getBrush( capNode );
+			if ( capBrush == nullptr ) {
+				groupTraversable->erase( capNode );
+			}
+			else if ( Brush_ConstructHemisphere( *capBrush, endCenter, vector3_negated( forward ), left, up, capRadius, sides, shader, projection ) ) {
+				++createdCount;
+			}
+			else{
+				groupTraversable->erase( capNode );
+			}
+		}
+	}
+
+	if ( createdCount == 0 ) {
+		rootTraversable->erase( groupNode );
+		globalWarningStream() << "Silly Sausage Tool: failed to build any valid brushes.\n";
+		return;
+	}
+
+	scene::Path parentPath( sourcePath );
+	parentPath.pop();
+	Path_deleteTop( sourcePath );
+	if ( Node_isEntity( parentPath.top() )
+	  && parentPath.top().get_pointer() != Map_FindWorldspawn( g_map )
+	  && Node_getTraversable( parentPath.top() )->empty() ) {
+		Path_deleteTop( parentPath );
+	}
+
+	GlobalSelectionSystem().setSelectedAllComponents( false );
+	GlobalSelectionSystem().setSelectedAll( false );
+	scene::Path groupPath( makeReference( GlobalSceneGraph().root() ) );
+	groupPath.push( makeReference( groupNode.get() ) );
+	selectPath( groupPath, true );
+	SceneChangeNotify();
+}
+
 scene::Node* Scene_BrushCreate_Cuboid( const AABB& bounds, const char* shader ){
 	scene::Node& worldspawn = Map_FindOrInsertWorldspawn( g_map );
 	scene::Traversable* traversable = Node_getTraversable( worldspawn );
@@ -1570,6 +2042,7 @@ void Brush_registerCommands(){
 	GlobalCommands_insert( "BrushSphere", BrushPrefab::SetCaller( g_brushsphere ) );
 	GlobalCommands_insert( "BrushRock", BrushPrefab::SetCaller( g_brushrock ) );
 	GlobalCommands_insert( "BrushIcosahedron", BrushPrefab::SetCaller( g_brushicosahedron ) );
+	GlobalCommands_insert( "BrushSillySausage", makeCallbackF( DoSillySausage ) );
 
 	GlobalCommands_insert( "Brush3Sided", BrushMakeSided::SetCaller( g_brushmakesided3 ), QKeySequence( "Ctrl+3" ) );
 	GlobalCommands_insert( "Brush4Sided", BrushMakeSided::SetCaller( g_brushmakesided4 ), QKeySequence( "Ctrl+4" ) );
@@ -1589,6 +2062,7 @@ void Brush_constructMenu( QMenu* menu ){
 	create_menu_item_with_mnemonic( menu, "Sphere...", "BrushSphere" );
 	create_menu_item_with_mnemonic( menu, "Rock...", "BrushRock" );
 	create_menu_item_with_mnemonic( menu, "Icosahedron...", "BrushIcosahedron" );
+	create_menu_item_with_mnemonic( menu, "Silly Sausage Tool...", "BrushSillySausage" );
 	menu->addSeparator();
 	{
 		QMenu* submenu = menu->addMenu( i18n::tr( "CSG" ) );

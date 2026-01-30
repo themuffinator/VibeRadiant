@@ -201,4 +201,4 @@ pack WoPPack           proprietary git    https://github.com/PadWorld-Entertainm
 pack XonoticPack       GPL         git    https://gitlab.com/xonotic/netradiant-xonoticpack.git
 pack ZEQ2LitePack      unknown     git    https://gitlab.com/netradiant/gamepacks/zeq2lite-mapeditor-support.git
 
-pack NRCPack           allinone    zip1    https://www.dropbox.com/s/b1xpajzfa6yjlzf/viberadiant-extra-gamepacks.zip
+pack VibePack          allinone    zip1    https://www.dropbox.com/s/b1xpajzfa6yjlzf/viberadiant-extra-gamepacks.zip

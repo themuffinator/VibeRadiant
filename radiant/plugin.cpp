@@ -336,11 +336,14 @@ bool Radiant_Construct( ModuleServer& server ){
 	return g_RadiantInitialised;
 }
 void Radiant_Destroy(){
-	if ( g_RadiantInitialised ) {
+	if ( g_Radiant != nullptr ) {
 		delete g_Radiant;
+		g_Radiant = nullptr;
 	}
+	g_RadiantInitialised = false;
 
 	delete g_RadiantDependencies;
+	g_RadiantDependencies = nullptr;
 }
 
 ImageModules& Radiant_getImageModules(){

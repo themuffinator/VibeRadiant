@@ -42,6 +42,7 @@ void Game_constructPreferences( class PreferencesPage& page );
 
 enum class EBrushPrefab;
 void DoSides( EBrushPrefab type );
+void DoSillySausage();
 void DoAbout();
 
 

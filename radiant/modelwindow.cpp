@@ -40,6 +40,8 @@
 #include "stream/stringstream.h"
 #include "generic/callback.h"
 #include "assetdrop.h"
+#include "timer.h"
+#include "assetbrowserprefs.h"
 
 #include "gtkutil/glwidget.h"
 #include "gtkutil/toolbar.h"
@@ -75,9 +77,11 @@
 #include "gtkmisc.h"
 
 namespace {
-constexpr float kAssetBrowserHoverScale = 1.05f;
-constexpr float kAssetBrowserHoverLerp = 0.2f;
-constexpr float kAssetBrowserHoverEpsilon = 0.001f;
+	constexpr float kAssetBrowserHoverScale = 1.05f;
+	constexpr float kAssetBrowserHoverLerp = 0.2f;
+	constexpr float kAssetBrowserHoverEpsilon = 0.001f;
+	constexpr float kAssetBrowserHoverRotateDegrees = 12.0f;
+	constexpr float kAssetBrowserHoverSpinDegreesPerSecond = 90.0f;
 
 float AssetBrowser_approachHoverScale( float current, float target ){
 	return current + ( target - current ) * kAssetBrowserHoverLerp;
@@ -575,7 +579,7 @@ class ModelBrowser final : public scene::Instantiable::Observer
 	std::vector<scene::Instance*> m_modelInstances;
 public:
 	ModelFS m_modelFS;
-	CopiedString m_prefFoldersToLoad = "*models/99*";
+	CopiedString m_prefFoldersToLoad = "*models/mapobjects/99*";
 	ModelBrowser() : m_scrollAdjustment( [this]( int value ){
 		//globalOutputStream() << "vertical scroll\n";
 		setOriginZ( -value );
@@ -605,6 +609,10 @@ public:
 	int m_hoverModelId = -1;
 	float m_hoverScale = 1.0f;
 	float m_hoverScaleTarget = 1.0f;
+	float m_hoverRotate = 0.0f;
+	float m_hoverRotateTarget = 0.0f;
+	float m_hoverSpin = 0.0f;
+	Timer m_hoverSpinTimer;
 
 	CellPos constructCellPos() const {
 		return CellPos( m_width, m_cellSize, GlobalOpenGL().m_font->getPixelHeight() );
@@ -629,6 +637,9 @@ public:
 	float hoverScaleForIndex( int index ) const {
 		return index == m_hoverModelId ? m_hoverScale : 1.0f;
 	}
+	float hoverRotationForIndex( int index ) const {
+		return index == m_hoverModelId ? ( m_hoverRotate + m_hoverSpin ) : 0.0f;
+	}
 	float hoverAlpha() const {
 		if ( m_hoverModelId < 0 ) {
 			return 0.0f;
@@ -636,23 +647,51 @@ public:
 		return std::clamp( ( m_hoverScale - 1.0f ) / ( kAssetBrowserHoverScale - 1.0f ), 0.0f, 1.0f );
 	}
 	bool updateHoverAnimation(){
+		const float previousSpin = m_hoverSpin;
 		if ( m_hoverModelId < 0 ) {
+			const bool rotateChanged = std::fabs( m_hoverRotate ) > kAssetBrowserHoverEpsilon;
+			const bool spinChanged = std::fabs( m_hoverSpin ) > kAssetBrowserHoverEpsilon;
 			m_hoverScale = 1.0f;
 			m_hoverScaleTarget = 1.0f;
-			return false;
+			m_hoverRotate = 0.0f;
+			m_hoverRotateTarget = 0.0f;
+			m_hoverSpin = 0.0f;
+			return rotateChanged || spinChanged;
 		}
 		if ( m_hoverModelId >= static_cast<int>( m_modelInstances.size() ) ) {
+			const bool rotateChanged = std::fabs( m_hoverRotate ) > kAssetBrowserHoverEpsilon;
+			const bool spinChanged = std::fabs( m_hoverSpin ) > kAssetBrowserHoverEpsilon;
 			m_hoverModelId = -1;
 			m_hoverScale = 1.0f;
 			m_hoverScaleTarget = 1.0f;
-			return false;
+			m_hoverRotate = 0.0f;
+			m_hoverRotateTarget = 0.0f;
+			m_hoverSpin = 0.0f;
+			return rotateChanged || spinChanged;
 		}
 		const float previous = m_hoverScale;
+		const float previousRotate = m_hoverRotate;
 		m_hoverScale = AssetBrowser_approachHoverScale( m_hoverScale, m_hoverScaleTarget );
-		if ( std::fabs( m_hoverScale - m_hoverScaleTarget ) < kAssetBrowserHoverEpsilon ) {
+		m_hoverRotate = AssetBrowser_approachHoverScale( m_hoverRotate, m_hoverRotateTarget );
+		const bool scaleSettled = std::fabs( m_hoverScale - m_hoverScaleTarget ) < kAssetBrowserHoverEpsilon;
+		const bool rotateSettled = std::fabs( m_hoverRotate - m_hoverRotateTarget ) < kAssetBrowserHoverEpsilon;
+		if ( scaleSettled ) {
 			m_hoverScale = m_hoverScaleTarget;
 		}
-		else{
+		if ( rotateSettled ) {
+			m_hoverRotate = m_hoverRotateTarget;
+		}
+		const bool spinActive = m_hoverScaleTarget > 1.0f + kAssetBrowserHoverEpsilon;
+		if ( spinActive ) {
+			m_hoverSpin = static_cast<float>(
+				std::fmod( m_hoverSpinTimer.elapsed_sec() * kAssetBrowserHoverSpinDegreesPerSecond, 360.0 ) );
+		}
+		else
+		{
+			m_hoverSpin = 0.0f;
+		}
+		const bool spinChanged = std::fabs( m_hoverSpin - previousSpin ) > kAssetBrowserHoverEpsilon;
+		if ( spinActive || !( scaleSettled && rotateSettled ) || spinChanged ) {
 			queueDraw();
 		}
 		if ( m_hoverScaleTarget <= 1.0f + kAssetBrowserHoverEpsilon
@@ -660,8 +699,14 @@ public:
 			m_hoverScale = 1.0f;
 			m_hoverScaleTarget = 1.0f;
 			m_hoverModelId = -1;
+			m_hoverRotate = 0.0f;
+			m_hoverRotateTarget = 0.0f;
+			m_hoverSpin = 0.0f;
 		}
-		return std::fabs( m_hoverScale - previous ) > kAssetBrowserHoverEpsilon;
+		return ( std::fabs( m_hoverScale - previous ) > kAssetBrowserHoverEpsilon )
+			|| ( std::fabs( m_hoverRotate - previousRotate ) > kAssetBrowserHoverEpsilon )
+			|| spinChanged
+			|| spinActive;
 	}
 private:
 	void setHoverId( int hoverId ){
@@ -671,6 +716,9 @@ private:
 		if ( hoverId < 0 ) {
 			if ( m_hoverModelId >= 0 && m_hoverScaleTarget != 1.0f ) {
 				m_hoverScaleTarget = 1.0f;
+				m_hoverRotateTarget = 0.0f;
+				m_hoverRotate = 0.0f;
+				m_hoverSpin = 0.0f;
 				queueDraw();
 			}
 			return;
@@ -680,9 +728,14 @@ private:
 		if ( idChanged ) {
 			m_hoverModelId = hoverId;
 			m_hoverScale = 1.0f;
+			m_hoverRotate = 0.0f;
+			m_hoverSpin = 0.0f;
 		}
 		if ( idChanged || m_hoverScaleTarget != kAssetBrowserHoverScale ) {
 			m_hoverScaleTarget = kAssetBrowserHoverScale;
+			m_hoverRotateTarget = kAssetBrowserHoverRotateDegrees;
+			m_hoverSpinTimer.start();
+			m_hoverSpin = 0.0f;
 			queueDraw();
 		}
 	}
@@ -821,7 +874,7 @@ static QPixmap ModelBrowser_dragPixmap( ModelBrowser& browser ){
 
 static float ModelBrowser_maxExtent(){
 	float maxExtent = 0.0f;
-	const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( Vector3( 45, 0, 45 ) );
+	const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( AssetBrowser_defaultAngles() );
 	g_ModelBrowser.forEachModelInstance( [&]( scene::Instance* instance ){
 		if( Bounded *bounded = Instance_getBounded( *instance ) ){
 			AABB aabb = bounded->localAABB();
@@ -861,7 +914,11 @@ public:
 				}
 				const int index = m_cellPos.index();
 				const float scale = m_baseScale * g_ModelBrowser.hoverScaleForIndex( index );
-				const Matrix4 rotation = matrix4_rotation_for_euler_xyz_degrees( Vector3( 45, 0, 45 ) );
+				const float hoverRotate = g_ModelBrowser.hoverRotationForIndex( index );
+				const Matrix4 baseRotation = matrix4_rotation_for_euler_xyz_degrees( AssetBrowser_defaultAngles() );
+				const Matrix4 rotation = ( std::fabs( hoverRotate ) > 0.0f )
+					? matrix4_multiplied_by_matrix4( baseRotation, matrix4_rotation_for_z_degrees( hoverRotate ) )
+					: baseRotation;
 				const_cast<Matrix4&>( transformNode->localToParent() ) =
 				        matrix4_multiplied_by_matrix4(
 				            matrix4_translation_for_vec3( m_cellPos.getOrigin() ),
@@ -1444,7 +1501,7 @@ public:
 		}
 
 		if( m_modelFoldersMap.empty() )
-			m_modelFoldersMap.emplace( "models/", 99 );
+			m_modelFoldersMap.emplace( "models/mapobjects/", 99 );
 	}
 };
 
@@ -1646,6 +1703,9 @@ void ModelBrowser_constructPage( PreferenceGroup& group ){
 	page.appendSpinner( "Model View Size", 16, 8192,
 	                    IntImportCallback( CellSizeImportCaller( g_ModelBrowser.m_cellSize ) ),
 	                    IntExportCallback( IntExportCaller( g_ModelBrowser.m_cellSize ) ) );
+	page.appendEntry( "Default Model Angles (x y z)",
+	                  Vector3ImportStringCaller( AssetBrowser_defaultAngles() ),
+	                  Vector3ExportStringCaller( AssetBrowser_defaultAngles() ) );
 	page.appendEntry( "List of *folderToLoad/depth*",
 	                  StringImportCallback( FoldersToLoadImportCaller( g_ModelBrowser.m_prefFoldersToLoad ) ),
 	                  StringExportCallback( StringExportCaller( g_ModelBrowser.m_prefFoldersToLoad ) ) );
@@ -1658,6 +1718,7 @@ void ModelBrowser_Construct(){
 	GlobalPreferenceSystem().registerPreference( "ModelBrowserFolders", CopiedStringImportStringCaller( g_ModelBrowser.m_prefFoldersToLoad ), CopiedStringExportStringCaller( g_ModelBrowser.m_prefFoldersToLoad ) );
 	GlobalPreferenceSystem().registerPreference( "ModelBrowserCellSize", IntImportStringCaller( g_ModelBrowser.m_cellSize ), IntExportStringCaller( g_ModelBrowser.m_cellSize ) );
 	GlobalPreferenceSystem().registerPreference( "ColorModBroBackground", Vector3ImportStringCaller( g_ModelBrowser.m_background_color ), Vector3ExportStringCaller( g_ModelBrowser.m_background_color ) );
+	GlobalPreferenceSystem().registerPreference( "AssetBrowserDefaultAngles", Vector3ImportStringCaller( AssetBrowser_defaultAngles() ), Vector3ExportStringCaller( AssetBrowser_defaultAngles() ) );
 
 	ModelBrowser_registerPreferencesPage();
 
