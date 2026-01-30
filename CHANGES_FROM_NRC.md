@@ -31,6 +31,7 @@ Sources used:
 - Build system: updated default Qt dependency to Qt6 (Core/Gui/Widgets/Svg/Network) and aligned MSYS2 packaging plus Qt6 input event handling.
 - Build fixes: restored missing includes for entity/sound browser builds, clarified shader highlighter depth handling, updated preview-lighting scene-change callback wiring, and resolved Qt updater parsing/formatting warnings.
 - Build fixes: refreshed Qt6 mouse event handling in browser widgets and entity list hover handling, plus safer `.def` flag parsing to silence warnings.
+- Build fixes: resolved MinGW/GCC build breaks in the new preview lighting code caused by float/double `std::max` template deduction, and aligned CamWnd member initializer order to silence `-Wreorder`.
 - Runtime stability: relaxed mapfile lookup in preview graphs so empty paths no longer trigger mapfile lookup crashes in browser views.
 - Runtime stability: preview lighting now registers scene-change callbacks only when enabled and disables the preview shader pass if its GLSL shaders fail to load.
 - Startup stability: guarded OpenGL widget FBO setup in editor viewports and asset browser previews to prevent early paint crashes before valid sizing.
@@ -73,6 +74,7 @@ Sources used:
 - Shortcuts: warn on duplicate shortcut bindings at startup.
 - Camera view: added a real-time lighting preview mode using point lights, surface lights, and sky/worldspawn sun keys to approximate map lighting.
 - Camera view: added a menu toggle for lighting preview.
+- Camera view: overhauled the lighting preview to render a fullbright base pass with an on-the-fly, shadowed lightmap overlay (time-sliced rebuilds and per-brush dirty updates) for a closer baked-lighting look.
 - Input: camera key-move handling now ignores Caps Lock state so arrow/WASD navigation works with Caps Lock enabled.
 - Gamepack model types: added `md5mesh` and `iqm` to explicit `modeltypes` lists so MD5/IQM models are available in the editor for non-wildcard game configs.
 - Releases/updates: added a `VERSION` file, release packaging workflow with update manifest generation, and an in-app auto-updater that checks GitHub releases and installs updates (Windows zip, Linux AppImage).

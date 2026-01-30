@@ -13,3 +13,4 @@
 
 void PreviewLighting_Enable( bool enable );
 void PreviewLighting_UpdateIfNeeded();
+void PreviewLighting_RenderOverlay();

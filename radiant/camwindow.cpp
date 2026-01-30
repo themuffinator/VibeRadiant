@@ -1811,10 +1811,10 @@ CamWnd::CamWnd() :
 	m_gl_widget( OpenGLWidgetsDisabled()
 		? glwidget_createDisabledPlaceholder( "OpenGL disabled (Camera)", nullptr )
 		: static_cast<QWidget*>( new CamGLWidget( *this ) ) ),
+	m_shaderAnimTimer( nullptr ),
 	m_window_observer( NewWindowObserver() ),
 	m_deferredDraw( WidgetQueueDrawCaller( *m_gl_widget ) ),
 	m_deferred_motion( [this]( const QMouseEvent& event ){ selection_motion( event, m_window_observer ); } ),
-	m_shaderAnimTimer( nullptr ),
 	m_drawing( false )
 {
 	m_bFreeMove = false;
@@ -2120,9 +2120,9 @@ void CamWnd::Cam_Draw(){
 	extern void Cull_ResetStats();
 	Cull_ResetStats();
 
-	if ( m_Camera.draw_mode == cd_lighting ) {
-		PreviewLighting_UpdateIfNeeded();
-	}
+	// Lighting preview needs a valid GL context for background rebuilds and cleanup,
+	// so keep the update loop running even if the view mode changes mid-frame.
+	PreviewLighting_UpdateIfNeeded();
 
 	gl().glMatrixMode( GL_PROJECTION );
 	gl().glLoadMatrixf( reinterpret_cast<const float*>( &m_Camera.projection ) );
@@ -2186,14 +2186,12 @@ void CamWnd::Cam_Draw(){
 		            | RENDER_PROGRAM;
 		break;
 	case cd_lighting:
+		// Fullbright base + shadowed lightmap overlay (PreviewLighting_RenderOverlay).
 		globalstate |= RENDER_FILL
-		            | RENDER_LIGHTING
 		            | RENDER_TEXTURE
 		            | RENDER_SMOOTH
 		            | RENDER_SCALED
-		            | RENDER_BUMP
-		            | RENDER_PROGRAM
-		            | RENDER_SCREEN;
+		            | RENDER_PROGRAM;
 		break;
 	default:
 		globalstate = 0;
@@ -2223,6 +2221,10 @@ void CamWnd::Cam_Draw(){
 		}
 
 		renderer.render( m_Camera.modelview, m_Camera.projection );
+	}
+
+	if ( m_Camera.draw_mode == cd_lighting ) {
+		PreviewLighting_RenderOverlay();
 	}
 
 	// prepare for 2d stuff

@@ -15,7 +15,7 @@
 
 #include "iscenegraph.h"
 #include "ientity.h"
-#include "irender.h"
+#include "igl.h"
 #include "ishaders.h"
 #include "ifilesystem.h"
 #include "iarchive.h"
@@ -36,11 +36,18 @@
 #include "math/vector.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
+#include <cstring>
+#include <deque>
 #include <map>
-#include <memory>
 #include <set>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -63,57 +70,133 @@ struct ShaderLightInfo
 	std::vector<SunInfo> suns;
 };
 
-class PreviewLight : public RendererLight
+enum class PreviewLightKind
 {
-	AABB m_aabb;
-	Vector3 m_colour;
-	Vector3 m_offset;
-	Matrix4 m_rotation;
-	Matrix4 m_projection;
-	bool m_projected;
-public:
-	PreviewLight( const AABB& aabb, const Vector3& colour )
-		: m_aabb( aabb ),
-		  m_colour( colour ),
-		  m_offset( 0, 0, 0 ),
-		  m_rotation( g_matrix4_identity ),
-		  m_projection( g_matrix4_identity ),
-		  m_projected( false ){
-	}
+	Point,
+	Directional,
+};
 
-	Shader* getShader() const override {
-		return nullptr;
+struct PreviewLightSource
+{
+	PreviewLightKind kind = PreviewLightKind::Point;
+	Vector3 origin = Vector3( 0, 0, 0 );      // point
+	Vector3 direction = Vector3( 0, 0, -1 );  // directional: direction of light rays (light -> scene)
+	Vector3 colour = Vector3( 1, 1, 1 );      // linear RGB, 0..n (will be clamped for preview)
+	float radius = 0.0f;                      // point
+	bool linearFalloff = false;               // point
+	AABB influence = AABB();                  // coarse bounds for dirty marking/light culling
+};
+
+struct PreviewLightKey
+{
+	enum class Kind : std::uint8_t
+	{
+		Entity,
+		SurfaceFace,
+		SurfacePatch,
+		WorldspawnSun,
+		ShaderSun,
+	};
+
+	Kind kind = Kind::Entity;
+	scene::Node* node = nullptr;          // for everything except ShaderSun
+	std::uint32_t index = 0;              // face index for SurfaceFace
+	std::uint64_t shaderNameHash = 0;     // for ShaderSun
+
+	friend bool operator==( const PreviewLightKey& a, const PreviewLightKey& b ){
+		return a.kind == b.kind && a.node == b.node && a.index == b.index && a.shaderNameHash == b.shaderNameHash;
 	}
-	const AABB& aabb() const override {
-		return m_aabb;
+};
+
+struct PreviewLightKeyHash
+{
+	std::size_t operator()( const PreviewLightKey& key ) const noexcept {
+		std::size_t h = 0;
+		auto hashCombine = [&]( std::size_t v ){
+			h ^= v + 0x9e3779b97f4a7c15ull + ( h << 6 ) + ( h >> 2 );
+		};
+		hashCombine( std::size_t( key.kind ) );
+		hashCombine( std::size_t( reinterpret_cast<std::uintptr_t>( key.node ) ) );
+		hashCombine( std::size_t( key.index ) );
+		hashCombine( std::size_t( key.shaderNameHash ) );
+		return h;
 	}
-	bool testAABB( const AABB& other ) const override {
-		return aabb_intersects_aabb( m_aabb, other );
-	}
-	const Matrix4& rotation() const override {
-		return m_rotation;
-	}
-	const Vector3& offset() const override {
-		return m_offset;
-	}
-	const Vector3& colour() const override {
-		return m_colour;
-	}
-	bool isProjected() const override {
-		return m_projected;
-	}
-	const Matrix4& projection() const override {
-		return m_projection;
+};
+
+struct PreviewLightEntry
+{
+	std::uint64_t hash = 0;
+	PreviewLightSource light;
+};
+
+struct FaceLightmap
+{
+	GLuint texture = 0;
+	int width = 0;
+	int height = 0;
+	Vector4 planeS = Vector4( 0, 0, 0, 0 );
+	Vector4 planeT = Vector4( 0, 0, 0, 0 );
+};
+
+struct BrushLightingCache
+{
+	BrushInstance* instance = nullptr;
+	std::uint64_t hash = 0;
+	AABB worldAabb = AABB();
+	std::vector<FaceLightmap> faces;
+};
+
+struct PatchLightingCache
+{
+	PatchInstance* instance = nullptr;
+	std::uint64_t hash = 0;
+	AABB worldAabb = AABB();
+	std::vector<unsigned char> coloursRGBA; // 4 * tess vertex count
+};
+
+struct Triangle
+{
+	Vector3 v0;
+	Vector3 v1;
+	Vector3 v2;
+	AABB aabb;
+};
+
+struct BvhNode
+{
+	AABB aabb;
+	std::uint32_t left = 0;
+	std::uint32_t right = 0;
+	std::uint32_t firstTri = 0;
+	std::uint32_t triCount = 0;
+
+	bool isLeaf() const {
+		return triCount != 0;
 	}
 };
 
 struct PreviewLightingState
 {
 	bool active = false;
-	bool dirty = true;
+	bool sceneDirty = true;
 	bool callbackRegistered = false;
-	std::vector<std::unique_ptr<PreviewLight>> lights;
+	bool pendingClearGL = false;
+
 	std::map<CopiedString, ShaderLightInfo> shaderCache;
+
+	std::unordered_map<PreviewLightKey, PreviewLightEntry, PreviewLightKeyHash> lights;
+	std::unordered_map<scene::Node*, BrushLightingCache> brushes;
+	std::unordered_map<scene::Node*, PatchLightingCache> patches;
+
+	// Shadow ray acceleration.
+	std::vector<Triangle> triangles;
+	std::vector<std::uint32_t> triIndices;
+	std::vector<BvhNode> bvh;
+	bool geometryDirty = true;
+
+	// Work queue.
+	std::deque<scene::Node*> dirtyBrushes;
+	std::deque<scene::Node*> dirtyPatches;
 };
 
 PreviewLightingState g_previewLighting;
@@ -226,20 +309,6 @@ Vector3 scaled_colour( const Vector3& colour, float intensity, float reference )
 float clamped_area_scale( float area ){
 	const float scale = std::sqrt( std::max( area, 0.0f ) ) / 128.0f;
 	return std::clamp( scale, 0.25f, 4.0f );
-}
-
-void preview_lighting_clear(){
-	for ( const auto& light : g_previewLighting.lights )
-	{
-		GlobalShaderCache().detach( *light );
-	}
-	g_previewLighting.lights.clear();
-}
-
-void preview_lighting_add( const AABB& aabb, const Vector3& colour ){
-	auto light = std::make_unique<PreviewLight>( aabb, colour );
-	GlobalShaderCache().attach( *light );
-	g_previewLighting.lights.push_back( std::move( light ) );
 }
 
 bool spawnflags_linear( int flags ){
@@ -545,6 +614,7 @@ bool patch_area_centroid( const PatchTesselation& tess, const Matrix4& localToWo
 	return area > 0.0f;
 }
 
+#if 0
 void add_sun_lights( const std::vector<SunInfo>& suns, const AABB& mapBounds, bool hasBounds, float reference ){
 	Vector3 center( 0, 0, 0 );
 	Vector3 extents( 2048, 2048, 2048 );
@@ -826,9 +896,1448 @@ void preview_lighting_rebuild(){
 		preview_lighting_add( AABB( origin, extents ), colourScaled );
 	} );
 }
+#endif
+
+// --------------------------------------------------------------------------------------
+// Shadowed "baked-ish" light preview:
+// - CPU lightmap for brush faces (texgen onto per-face textures)
+// - Per-vertex lighting for patches (using patch tesselation vertices)
+// - Incremental: rescan on scene changes, then time-slice lightmap rebuilds
+// --------------------------------------------------------------------------------------
+
+namespace preview_lighting_impl
+{
+constexpr float kAmbient = 0.12f;
+constexpr float kShadowBias = 0.5f;
+constexpr float kLuxelSize = 24.0f; // world units per preview luxel (brush faces)
+constexpr int kMinLightmapRes = 4;
+constexpr int kMaxLightmapRes = 64;
+constexpr std::uint32_t kBvhLeafSize = 8;
+constexpr double kWorkBudgetMs = 6.0;
+constexpr float kLightCutoff = 0.002f;
+
+inline std::uint64_t hash_combine_u64( std::uint64_t seed, std::uint64_t value ){
+	seed ^= value + 0x9e3779b97f4a7c15ull + ( seed << 6 ) + ( seed >> 2 );
+	return seed;
+}
+
+inline void hash_u32( std::uint64_t& seed, std::uint32_t value ){
+	seed = hash_combine_u64( seed, value );
+}
+
+inline void hash_u64( std::uint64_t& seed, std::uint64_t value ){
+	seed = hash_combine_u64( seed, value );
+}
+
+inline void hash_float( std::uint64_t& seed, float value ){
+	static_assert( sizeof( float ) == sizeof( std::uint32_t ) );
+	std::uint32_t bits = 0;
+	std::memcpy( &bits, &value, sizeof( bits ) );
+	hash_u32( seed, bits );
+}
+
+inline void hash_vec3( std::uint64_t& seed, const Vector3& v ){
+	hash_float( seed, v.x() );
+	hash_float( seed, v.y() );
+	hash_float( seed, v.z() );
+}
+
+inline void hash_string( std::uint64_t& seed, const char* s ){
+	hash_u64( seed, std::hash<std::string_view>{}( s != nullptr ? std::string_view( s ) : std::string_view() ) );
+}
+
+inline Vector3 aabb_min( const AABB& aabb ){
+	return aabb.origin - aabb.extents;
+}
+
+inline Vector3 aabb_max( const AABB& aabb ){
+	return aabb.origin + aabb.extents;
+}
+
+inline AABB aabb_union( const AABB& a, const AABB& b ){
+	AABB out = a;
+	aabb_extend_by_aabb_safe( out, b );
+	return out;
+}
+
+inline AABB aabb_from_min_max( const Vector3& mins, const Vector3& maxs ){
+	const Vector3 extents = ( maxs - mins ) * 0.5f;
+	return AABB( mins + extents, extents );
+}
+
+inline bool ray_intersects_aabb( const Vector3& origin, const Vector3& dir, const AABB& aabb, float maxDistance ){
+	const Vector3 mins = aabb_min( aabb );
+	const Vector3 maxs = aabb_max( aabb );
+
+	float tmin = 0.0f;
+	float tmax = maxDistance;
+
+	for ( int axis = 0; axis < 3; ++axis )
+	{
+		const float o = origin[axis];
+		const float d = dir[axis];
+		if ( std::fabs( d ) < 1e-8f ) {
+			if ( o < mins[axis] || o > maxs[axis] ) {
+				return false;
+			}
+			continue;
+		}
+
+		const float inv = 1.0f / d;
+		float t1 = ( mins[axis] - o ) * inv;
+		float t2 = ( maxs[axis] - o ) * inv;
+		if ( t1 > t2 ) {
+			std::swap( t1, t2 );
+		}
+		tmin = std::max( tmin, t1 );
+		tmax = std::min( tmax, t2 );
+		if ( tmin > tmax ) {
+			return false;
+		}
+	}
+
+	return tmax > 0.0f;
+}
+
+inline bool ray_intersects_triangle( const Vector3& origin, const Vector3& dir, const Triangle& tri, float maxDistance ){
+	constexpr float eps = 1e-6f;
+
+	const Vector3 e1 = tri.v1 - tri.v0;
+	const Vector3 e2 = tri.v2 - tri.v0;
+	const Vector3 pvec = vector3_cross( dir, e2 );
+	const float det = vector3_dot( e1, pvec );
+	if ( std::fabs( det ) < eps ) {
+		return false;
+	}
+
+	const float invDet = 1.0f / det;
+	const Vector3 tvec = origin - tri.v0;
+	const float u = vector3_dot( tvec, pvec ) * invDet;
+	if ( u < 0.0f || u > 1.0f ) {
+		return false;
+	}
+
+	const Vector3 qvec = vector3_cross( tvec, e1 );
+	const float v = vector3_dot( dir, qvec ) * invDet;
+	if ( v < 0.0f || ( u + v ) > 1.0f ) {
+		return false;
+	}
+
+	const float t = vector3_dot( e2, qvec ) * invDet;
+	return t > eps && t < maxDistance;
+}
+
+inline AABB triangle_aabb( const Vector3& a, const Vector3& b, const Vector3& c ){
+	Vector3 mins = a;
+	Vector3 maxs = a;
+	for ( const Vector3& v : { b, c } )
+	{
+		for ( int i = 0; i < 3; ++i )
+		{
+			mins[i] = std::min( mins[i], v[i] );
+			maxs[i] = std::max( maxs[i], v[i] );
+		}
+	}
+	return aabb_from_min_max( mins, maxs );
+}
+
+inline Vector3 triangle_centroid( const Triangle& tri ){
+	return ( tri.v0 + tri.v1 + tri.v2 ) * ( 1.0f / 3.0f );
+}
+
+std::uint32_t bvh_build( std::vector<BvhNode>& outNodes, const std::vector<Triangle>& triangles, std::vector<std::uint32_t>& triIndices, std::uint32_t begin, std::uint32_t end ){
+	BvhNode node;
+
+	bool hasBounds = false;
+	AABB bounds;
+	Vector3 centroidMin( 0, 0, 0 );
+	Vector3 centroidMax( 0, 0, 0 );
+	bool hasCentroids = false;
+
+	for ( std::uint32_t i = begin; i < end; ++i )
+	{
+		const Triangle& tri = triangles[triIndices[i]];
+		if ( !hasBounds ) {
+			bounds = tri.aabb;
+			hasBounds = true;
+		}
+		else
+		{
+			aabb_extend_by_aabb_safe( bounds, tri.aabb );
+		}
+
+		const Vector3 c = triangle_centroid( tri );
+		if ( !hasCentroids ) {
+			centroidMin = centroidMax = c;
+			hasCentroids = true;
+		}
+		else
+		{
+			for ( int axis = 0; axis < 3; ++axis )
+			{
+				centroidMin[axis] = std::min( centroidMin[axis], c[axis] );
+				centroidMax[axis] = std::max( centroidMax[axis], c[axis] );
+			}
+		}
+	}
+
+	node.aabb = hasBounds ? bounds : AABB();
+
+	const std::uint32_t nodeIndex = std::uint32_t( outNodes.size() );
+	outNodes.push_back( node );
+
+	const std::uint32_t count = end - begin;
+	if ( count <= kBvhLeafSize ) {
+		outNodes[nodeIndex].firstTri = begin;
+		outNodes[nodeIndex].triCount = count;
+		return nodeIndex;
+	}
+
+	const Vector3 centroidExtents = centroidMax - centroidMin;
+	int axis = 0;
+	if ( centroidExtents.y() > centroidExtents.x() ) {
+		axis = 1;
+	}
+	if ( centroidExtents.z() > centroidExtents[axis] ) {
+		axis = 2;
+	}
+
+	const std::uint32_t mid = begin + count / 2;
+	std::nth_element(
+	    triIndices.begin() + begin,
+	    triIndices.begin() + mid,
+	    triIndices.begin() + end,
+	    [&]( std::uint32_t a, std::uint32_t b ){
+		    return triangle_centroid( triangles[a] )[axis] < triangle_centroid( triangles[b] )[axis];
+	    }
+	);
+
+	outNodes[nodeIndex].left = bvh_build( outNodes, triangles, triIndices, begin, mid );
+	outNodes[nodeIndex].right = bvh_build( outNodes, triangles, triIndices, mid, end );
+	return nodeIndex;
+}
+
+bool bvh_shadowed( const Vector3& origin, const Vector3& dir, float maxDistance ){
+	if ( g_previewLighting.bvh.empty() || g_previewLighting.triangles.empty() ) {
+		return false;
+	}
+
+	std::vector<std::uint32_t> stack;
+	stack.reserve( 64 );
+	stack.push_back( 0 );
+
+	while ( !stack.empty() )
+	{
+		const std::uint32_t nodeIndex = stack.back();
+		stack.pop_back();
+		const BvhNode& node = g_previewLighting.bvh[nodeIndex];
+
+		if ( !ray_intersects_aabb( origin, dir, node.aabb, maxDistance ) ) {
+			continue;
+		}
+
+		if ( node.isLeaf() ) {
+			for ( std::uint32_t i = 0; i < node.triCount; ++i )
+			{
+				const Triangle& tri = g_previewLighting.triangles[g_previewLighting.triIndices[node.firstTri + i]];
+				if ( ray_intersects_triangle( origin, dir, tri, maxDistance ) ) {
+					return true;
+				}
+			}
+			continue;
+		}
+
+		stack.push_back( node.left );
+		stack.push_back( node.right );
+	}
+
+	return false;
+}
+
+void delete_brush_textures( BrushLightingCache& cache ){
+	std::vector<GLuint> textures;
+	textures.reserve( cache.faces.size() );
+	for ( const auto& face : cache.faces )
+	{
+		if ( face.texture != 0 ) {
+			textures.push_back( face.texture );
+		}
+	}
+
+	if ( !textures.empty() ) {
+		gl().glDeleteTextures( GLsizei( textures.size() ), textures.data() );
+	}
+
+	cache.faces.clear();
+}
+
+void clear_all_gl(){
+	for ( auto& [ node, brush ] : g_previewLighting.brushes )
+	{
+		delete_brush_textures( brush );
+	}
+
+	g_previewLighting.brushes.clear();
+	g_previewLighting.patches.clear();
+	g_previewLighting.lights.clear();
+	g_previewLighting.triangles.clear();
+	g_previewLighting.triIndices.clear();
+	g_previewLighting.bvh.clear();
+	g_previewLighting.dirtyBrushes.clear();
+	g_previewLighting.dirtyPatches.clear();
+	g_previewLighting.geometryDirty = true;
+	g_previewLighting.sceneDirty = true;
+}
+
+std::uint64_t hash_brush_instance( BrushInstance& brush ){
+	std::uint64_t seed = 0;
+
+	const Matrix4& localToWorld = brush.localToWorld();
+	const auto* m = reinterpret_cast<const float*>( &localToWorld );
+	for ( int i = 0; i < 16; ++i )
+	{
+		hash_float( seed, m[i] );
+	}
+
+	std::uint32_t faceCount = 0;
+	Brush_ForEachFaceInstance( brush, [&]( FaceInstance& faceInstance ){
+		Face& face = faceInstance.getFace();
+		hash_u32( seed, face.contributes() ? 1u : 0u );
+		hash_u32( seed, face.isFiltered() ? 1u : 0u );
+
+		const Plane3& p = face.plane3();
+		hash_vec3( seed, p.normal() );
+		hash_float( seed, p.dist() );
+
+		hash_string( seed, face.GetShader() );
+		hash_u32( seed, std::uint32_t( face.getShader().shaderFlags() ) );
+
+		++faceCount;
+	} );
+
+	hash_u32( seed, faceCount );
+	return seed;
+}
+
+std::uint64_t hash_patch_instance( PatchInstance& patch ){
+	std::uint64_t seed = 0;
+
+	const Matrix4& localToWorld = patch.localToWorld();
+	const auto* m = reinterpret_cast<const float*>( &localToWorld );
+	for ( int i = 0; i < 16; ++i )
+	{
+		hash_float( seed, m[i] );
+	}
+
+	Patch& patchRef = patch.getPatch();
+	hash_string( seed, patchRef.GetShader() );
+	hash_u32( seed, std::uint32_t( patchRef.getShaderFlags() ) );
+
+	const PatchTesselation& tess = patchRef.getTesselation();
+	hash_u32( seed, std::uint32_t( tess.m_vertices.size() ) );
+	hash_u32( seed, std::uint32_t( tess.m_indices.size() ) );
+
+	return seed;
+}
+
+void rebuild_bvh_from_scene(){
+	g_previewLighting.triangles.clear();
+
+	for ( auto& [ node, brushCache ] : g_previewLighting.brushes )
+	{
+		BrushInstance* brush = brushCache.instance;
+		if ( brush == nullptr ) {
+			continue;
+		}
+
+		brush->getBrush().evaluateBRep();
+		const Matrix4& localToWorld = brush->localToWorld();
+
+		Brush_ForEachFaceInstance( *brush, [&]( FaceInstance& faceInstance ){
+			Face& face = faceInstance.getFace();
+			if ( !face.contributes() || face.isFiltered() ) {
+				return;
+			}
+
+			const Winding& w = face.getWinding();
+			if ( w.numpoints < 3 ) {
+				return;
+			}
+
+			const Vector3 v0 = matrix4_transformed_point( localToWorld, Vector3( w[0].vertex ) );
+			for ( std::size_t i = 1; i + 1 < w.numpoints; ++i )
+			{
+				const Vector3 v1 = matrix4_transformed_point( localToWorld, Vector3( w[i].vertex ) );
+				const Vector3 v2 = matrix4_transformed_point( localToWorld, Vector3( w[i + 1].vertex ) );
+
+				Triangle tri;
+				tri.v0 = v0;
+				tri.v1 = v1;
+				tri.v2 = v2;
+				tri.aabb = triangle_aabb( v0, v1, v2 );
+				g_previewLighting.triangles.push_back( tri );
+			}
+		} );
+	}
+
+	for ( auto& [ node, patchCache ] : g_previewLighting.patches )
+	{
+		PatchInstance* patch = patchCache.instance;
+		if ( patch == nullptr ) {
+			continue;
+		}
+
+		Patch& patchRef = patch->getPatch();
+		const PatchTesselation& tess = patchRef.getTesselation();
+		if ( tess.m_numStrips == 0 || tess.m_lenStrips < 4 ) {
+			continue;
+		}
+
+		const Matrix4& localToWorld = patch->localToWorld();
+		const RenderIndex* strip = tess.m_indices.data();
+		for ( std::size_t s = 0; s < tess.m_numStrips; ++s, strip += tess.m_lenStrips )
+		{
+			for ( std::size_t i = 0; i + 3 < tess.m_lenStrips; i += 2 )
+			{
+				const RenderIndex i0 = strip[i];
+				const RenderIndex i1 = strip[i + 1];
+				const RenderIndex i2 = strip[i + 2];
+				const RenderIndex i3 = strip[i + 3];
+
+				const Vector3 v0 = matrix4_transformed_point( localToWorld, tess.m_vertices[i0].vertex );
+				const Vector3 v1 = matrix4_transformed_point( localToWorld, tess.m_vertices[i1].vertex );
+				const Vector3 v2 = matrix4_transformed_point( localToWorld, tess.m_vertices[i2].vertex );
+				const Vector3 v3 = matrix4_transformed_point( localToWorld, tess.m_vertices[i3].vertex );
+
+				{
+					Triangle tri;
+					tri.v0 = v0;
+					tri.v1 = v1;
+					tri.v2 = v2;
+					tri.aabb = triangle_aabb( v0, v1, v2 );
+					g_previewLighting.triangles.push_back( tri );
+				}
+				{
+					Triangle tri;
+					tri.v0 = v2;
+					tri.v1 = v1;
+					tri.v2 = v3;
+					tri.aabb = triangle_aabb( tri.v0, tri.v1, tri.v2 );
+					g_previewLighting.triangles.push_back( tri );
+				}
+			}
+		}
+	}
+
+	g_previewLighting.triIndices.resize( g_previewLighting.triangles.size() );
+	for ( std::size_t i = 0; i < g_previewLighting.triIndices.size(); ++i )
+	{
+		g_previewLighting.triIndices[i] = std::uint32_t( i );
+	}
+
+	g_previewLighting.bvh.clear();
+	if ( !g_previewLighting.triangles.empty() ) {
+		g_previewLighting.bvh.reserve( g_previewLighting.triangles.size() * 2 );
+		bvh_build( g_previewLighting.bvh, g_previewLighting.triangles, g_previewLighting.triIndices, 0, std::uint32_t( g_previewLighting.triIndices.size() ) );
+	}
+
+	g_previewLighting.geometryDirty = false;
+}
+
+inline float point_attenuation( const PreviewLightSource& light, float dist ){
+	if ( light.radius <= 0.0f ) {
+		return 0.0f;
+	}
+	const float x = std::clamp( 1.0f - ( dist / light.radius ), 0.0f, 1.0f );
+	if ( light.linearFalloff ) {
+		return x;
+	}
+	return x * x;
+}
+
+Vector3 compute_lighting( const Vector3& worldPos, const Vector3& worldNormal, const std::vector<const PreviewLightSource*>& lights, float directionalDistance ){
+	Vector3 result( kAmbient, kAmbient, kAmbient );
+
+	const Vector3 normal = vector3_normalised( worldNormal );
+	const Vector3 biasedOrigin = worldPos + normal * kShadowBias;
+
+	for ( const PreviewLightSource* light : lights )
+	{
+		if ( light == nullptr ) {
+			continue;
+		}
+
+		if ( light->kind == PreviewLightKind::Directional ) {
+			const Vector3 L = vector3_normalised( -light->direction );
+			const float ndotl = std::max( 0.0f, static_cast<float>( vector3_dot( normal, L ) ) );
+			if ( ndotl <= 0.0f ) {
+				continue;
+			}
+			if ( bvh_shadowed( biasedOrigin, L, directionalDistance ) ) {
+				continue;
+			}
+			result += light->colour * ndotl;
+			continue;
+		}
+
+		const Vector3 toLight = light->origin - worldPos;
+		const float dist = vector3_length( toLight );
+		if ( dist <= 1e-4f || dist > light->radius ) {
+			continue;
+		}
+
+		const Vector3 L = toLight / dist;
+		const float ndotl = std::max( 0.0f, static_cast<float>( vector3_dot( normal, L ) ) );
+		if ( ndotl <= 0.0f ) {
+			continue;
+		}
+
+		const float atten = point_attenuation( *light, dist );
+		if ( atten <= kLightCutoff ) {
+			continue;
+		}
+
+		if ( bvh_shadowed( biasedOrigin, L, std::max( dist - kShadowBias, 0.0f ) ) ) {
+			continue;
+		}
+
+		result += light->colour * ( ndotl * atten );
+	}
+
+	result[0] = std::clamp( result[0], 0.0f, 1.0f );
+	result[1] = std::clamp( result[1], 0.0f, 1.0f );
+	result[2] = std::clamp( result[2], 0.0f, 1.0f );
+	return result;
+}
+
+void update_face_lightmap_texture( FaceLightmap& out, const std::vector<unsigned char>& rgb, int width, int height ){
+	if ( width <= 0 || height <= 0 ) {
+		return;
+	}
+
+	if ( out.texture == 0 ) {
+		gl().glGenTextures( 1, &out.texture );
+	}
+
+	out.width = width;
+	out.height = height;
+
+	gl().glActiveTexture( GL_TEXTURE0 );
+	gl().glClientActiveTexture( GL_TEXTURE0 );
+	gl().glBindTexture( GL_TEXTURE_2D, out.texture );
+
+	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+
+	gl().glPixelStorei( GL_UNPACK_ALIGNMENT, 1 );
+	gl().glTexImage2D( GL_TEXTURE_2D, 0, GL_RGB8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb.data() );
+}
+
+inline PreviewLightEntry make_point_light( const Vector3& origin, const Vector3& colour, float radius, bool linearFalloff ){
+	PreviewLightEntry entry;
+	entry.light.kind = PreviewLightKind::Point;
+	entry.light.origin = origin;
+	entry.light.colour = colour;
+	entry.light.radius = std::max( radius, 0.0f );
+	entry.light.linearFalloff = linearFalloff;
+	entry.light.influence = AABB( origin, Vector3( entry.light.radius, entry.light.radius, entry.light.radius ) );
+
+	hash_u32( entry.hash, std::uint32_t( entry.light.kind ) );
+	hash_vec3( entry.hash, entry.light.origin );
+	hash_vec3( entry.hash, entry.light.colour );
+	hash_float( entry.hash, entry.light.radius );
+	hash_u32( entry.hash, entry.light.linearFalloff ? 1u : 0u );
+
+	return entry;
+}
+
+inline PreviewLightEntry make_directional_light( const Vector3& direction, const Vector3& colour, const AABB& influence ){
+	PreviewLightEntry entry;
+	entry.light.kind = PreviewLightKind::Directional;
+	entry.light.direction = vector3_normalised( direction );
+	entry.light.colour = colour;
+	entry.light.influence = influence;
+
+	hash_u32( entry.hash, std::uint32_t( entry.light.kind ) );
+	hash_vec3( entry.hash, entry.light.direction );
+	hash_vec3( entry.hash, entry.light.colour );
+
+	return entry;
+}
+
+void build_brush_lightmaps( BrushLightingCache& cache, const AABB& mapBounds, bool hasBounds ){
+	BrushInstance* brush = cache.instance;
+	if ( brush == nullptr ) {
+		return;
+	}
+
+	const float directionalDistance = hasBounds ? std::max( 4096.0f, static_cast<float>( vector3_length( mapBounds.extents ) ) * 4.0f ) : 65536.0f;
+
+	std::vector<const PreviewLightSource*> affectingLights;
+	affectingLights.reserve( g_previewLighting.lights.size() );
+	for ( const auto& [ key, entry ] : g_previewLighting.lights )
+	{
+		if ( aabb_intersects_aabb( entry.light.influence, cache.worldAabb ) ) {
+			affectingLights.push_back( &entry.light );
+		}
+	}
+
+	brush->getBrush().evaluateBRep();
+	const Matrix4& localToWorld = brush->localToWorld();
+
+	// Ensure we have a face slot per visible face instance.
+	std::size_t faceCount = 0;
+	Brush_ForEachFaceInstance( *brush, [&]( FaceInstance& ){
+		++faceCount;
+	} );
+	cache.faces.resize( faceCount );
+
+	std::size_t faceIndex = 0;
+	Brush_ForEachFaceInstance( *brush, [&]( FaceInstance& faceInstance ){
+		Face& face = faceInstance.getFace();
+		FaceLightmap& out = cache.faces[faceIndex++];
+
+		const FaceShader& faceShader = face.getShader();
+		const int flags = faceShader.shaderFlags();
+		if ( !face.contributes() || face.isFiltered() || ( flags & QER_NODRAW ) != 0 || ( flags & QER_SKY ) != 0 ) {
+			return;
+		}
+
+		const Winding& w = face.getWinding();
+		if ( w.numpoints < 3 ) {
+			return;
+		}
+
+		const Plane3& plane = face.plane3();
+		const Vector3 normalLocal = Vector3( plane.normal() );
+
+		Vector3 uAxis = vector3_cross( normalLocal, Vector3( 0, 0, 1 ) );
+		if ( vector3_length( uAxis ) < 1e-4f ) {
+			uAxis = vector3_cross( normalLocal, Vector3( 0, 1, 0 ) );
+		}
+		uAxis = vector3_normalised( uAxis );
+		const Vector3 vAxis = vector3_normalised( vector3_cross( uAxis, normalLocal ) );
+
+		const Vector3 p0 = Vector3( w[0].vertex );
+
+		float minU = 0.0f;
+		float maxU = 0.0f;
+		float minV = 0.0f;
+		float maxV = 0.0f;
+		bool first = true;
+
+		for ( std::size_t i = 0; i < w.numpoints; ++i )
+		{
+			const Vector3 p = Vector3( w[i].vertex );
+			const Vector3 d = p - p0;
+			const float u = vector3_dot( d, uAxis );
+			const float v = vector3_dot( d, vAxis );
+			if ( first ) {
+				minU = maxU = u;
+				minV = maxV = v;
+				first = false;
+			}
+			else
+			{
+				minU = std::min( minU, u );
+				maxU = std::max( maxU, u );
+				minV = std::min( minV, v );
+				maxV = std::max( maxV, v );
+			}
+		}
+
+		const float rangeU = maxU - minU;
+		const float rangeV = maxV - minV;
+		if ( rangeU <= 1e-3f || rangeV <= 1e-3f ) {
+			return;
+		}
+
+		const int width = std::clamp( int( std::ceil( rangeU / kLuxelSize ) ), kMinLightmapRes, kMaxLightmapRes );
+		const int height = std::clamp( int( std::ceil( rangeV / kLuxelSize ) ), kMinLightmapRes, kMaxLightmapRes );
+
+		const float stepU = rangeU / float( width );
+		const float stepV = rangeV / float( height );
+
+		{
+			const float invU = 1.0f / rangeU;
+			const float invV = 1.0f / rangeV;
+			const float dU = ( -vector3_dot( p0, uAxis ) - minU ) * invU;
+			const float dV = ( -vector3_dot( p0, vAxis ) - minV ) * invV;
+			out.planeS = Vector4( uAxis.x() * invU, uAxis.y() * invU, uAxis.z() * invU, dU );
+			out.planeT = Vector4( vAxis.x() * invV, vAxis.y() * invV, vAxis.z() * invV, dV );
+		}
+
+		std::vector<unsigned char> rgb;
+		rgb.resize( std::size_t( width ) * std::size_t( height ) * 3 );
+
+		const Vector3 normalWorld = matrix4_transformed_normal( localToWorld, normalLocal );
+
+		for ( int y = 0; y < height; ++y )
+		{
+			for ( int x = 0; x < width; ++x )
+			{
+				const float u = minU + ( float( x ) + 0.5f ) * stepU;
+				const float v = minV + ( float( y ) + 0.5f ) * stepV;
+				const Vector3 localPos = p0 + uAxis * u + vAxis * v;
+				const Vector3 worldPos = matrix4_transformed_point( localToWorld, localPos );
+
+				const Vector3 lit = compute_lighting( worldPos, normalWorld, affectingLights, directionalDistance );
+
+				const std::size_t idx = ( std::size_t( y ) * std::size_t( width ) + std::size_t( x ) ) * 3;
+				rgb[idx + 0] = static_cast<unsigned char>( std::clamp( lit.x() * 255.0f, 0.0f, 255.0f ) );
+				rgb[idx + 1] = static_cast<unsigned char>( std::clamp( lit.y() * 255.0f, 0.0f, 255.0f ) );
+				rgb[idx + 2] = static_cast<unsigned char>( std::clamp( lit.z() * 255.0f, 0.0f, 255.0f ) );
+			}
+		}
+
+		update_face_lightmap_texture( out, rgb, width, height );
+	} );
+}
+
+void build_patch_colours( PatchLightingCache& cache, const AABB& mapBounds, bool hasBounds ){
+	PatchInstance* patch = cache.instance;
+	if ( patch == nullptr ) {
+		return;
+	}
+
+	const float directionalDistance = hasBounds ? std::max( 4096.0f, static_cast<float>( vector3_length( mapBounds.extents ) ) * 4.0f ) : 65536.0f;
+
+	std::vector<const PreviewLightSource*> affectingLights;
+	affectingLights.reserve( g_previewLighting.lights.size() );
+	for ( const auto& [ key, entry ] : g_previewLighting.lights )
+	{
+		if ( aabb_intersects_aabb( entry.light.influence, cache.worldAabb ) ) {
+			affectingLights.push_back( &entry.light );
+		}
+	}
+
+	Patch& patchRef = patch->getPatch();
+	const PatchTesselation& tess = patchRef.getTesselation();
+	if ( tess.m_vertices.empty() ) {
+		cache.coloursRGBA.clear();
+		return;
+	}
+
+	const Matrix4& localToWorld = patch->localToWorld();
+	cache.coloursRGBA.resize( tess.m_vertices.size() * 4 );
+
+	for ( std::size_t i = 0; i < tess.m_vertices.size(); ++i )
+	{
+		const auto& v = tess.m_vertices[i];
+		const Vector3 worldPos = matrix4_transformed_point( localToWorld, v.vertex );
+		const Vector3 worldNormal = matrix4_transformed_normal( localToWorld, v.normal );
+		const Vector3 lit = compute_lighting( worldPos, worldNormal, affectingLights, directionalDistance );
+
+		cache.coloursRGBA[i * 4 + 0] = static_cast<unsigned char>( std::clamp( lit.x() * 255.0f, 0.0f, 255.0f ) );
+		cache.coloursRGBA[i * 4 + 1] = static_cast<unsigned char>( std::clamp( lit.y() * 255.0f, 0.0f, 255.0f ) );
+		cache.coloursRGBA[i * 4 + 2] = static_cast<unsigned char>( std::clamp( lit.z() * 255.0f, 0.0f, 255.0f ) );
+		cache.coloursRGBA[i * 4 + 3] = 255;
+	}
+}
+
+struct RescanResult
+{
+	std::unordered_map<PreviewLightKey, PreviewLightEntry, PreviewLightKeyHash> lights;
+	std::unordered_map<scene::Node*, BrushLightingCache> brushes;
+	std::unordered_map<scene::Node*, PatchLightingCache> patches;
+
+	AABB mapBounds = AABB();
+	bool hasBounds = false;
+
+	std::vector<AABB> changedLightInfluences;
+	std::vector<AABB> changedOccluderAabbs;
+
+	std::unordered_set<scene::Node*> dirtyBrushes;
+	std::unordered_set<scene::Node*> dirtyPatches;
+
+	bool geometryDirty = false;
+};
+
+RescanResult rescan_scene();
+void apply_rescan( RescanResult& scan );
+void update();
+void render_overlay();
+
+RescanResult rescan_scene(){
+	RescanResult out;
+
+	auto oldLights = std::move( g_previewLighting.lights );
+	auto oldBrushes = std::move( g_previewLighting.brushes );
+	auto oldPatches = std::move( g_previewLighting.patches );
+
+	std::map<CopiedString, Vector3> targets;
+	Entity* worldspawnEntity = nullptr;
+	scene::Node* worldspawnNode = nullptr;
+
+	struct LightEntityCandidate
+	{
+		scene::Node* node = nullptr;
+		Entity* entity = nullptr;
+		AABB worldAabb = AABB();
+	};
+	std::vector<LightEntityCandidate> lightEntities;
+
+	Scene_forEachEntity( [&]( scene::Instance& instance ){
+		scene::Node& node = instance.path().top().get();
+		if ( !node.visible() ) {
+			return;
+		}
+		Entity* entity = Node_getEntity( node );
+		if ( entity == nullptr ) {
+			return;
+		}
+
+		if ( string_equal_nocase( entity->getClassName(), "worldspawn" ) ) {
+			worldspawnEntity = entity;
+			worldspawnNode = &node;
+		}
+
+		const char* targetname = entity->getKeyValue( "targetname" );
+		if ( !string_empty( targetname ) ) {
+			Vector3 origin( 0, 0, 0 );
+			if ( !parse_vec3_key( *entity, "origin", origin ) ) {
+				origin = instance.worldAABB().origin;
+			}
+			targets.emplace( CopiedString( targetname ), origin );
+		}
+
+		const char* classname = entity->getClassName();
+		if ( string_equal_nocase_n( classname, "light", 5 ) && !string_equal_nocase( classname, "worldspawn" ) ) {
+			lightEntities.push_back( LightEntityCandidate{ &node, entity, instance.worldAABB() } );
+		}
+	} );
+
+	auto add_bounds = [&]( const AABB& aabb ){
+		if ( !out.hasBounds ) {
+			out.mapBounds = aabb;
+			out.hasBounds = true;
+		}
+		else
+		{
+			aabb_extend_by_aabb_safe( out.mapBounds, aabb );
+		}
+	};
+
+	std::vector<SunInfo> worldSuns;
+	std::vector<std::pair<std::uint64_t, SunInfo>> shaderSuns;
+
+	const bool suppressShaderSun = worldspawnEntity != nullptr && key_bool( worldspawnEntity->getKeyValue( "_noshadersun" ) );
+	std::set<CopiedString> seenSkyShaders;
+
+	Scene_forEachVisibleBrush( GlobalSceneGraph(), [&]( BrushInstance& brush ){
+		add_bounds( brush.worldAABB() );
+
+		scene::Node* node = &brush.path().top().get();
+		const std::uint64_t hash = hash_brush_instance( brush );
+
+		BrushLightingCache cache;
+		cache.instance = &brush;
+		cache.hash = hash;
+		cache.worldAabb = brush.worldAABB();
+
+		auto oldIt = oldBrushes.find( node );
+		if ( oldIt != oldBrushes.end() && oldIt->second.hash == hash ) {
+			cache.faces = std::move( oldIt->second.faces );
+			oldBrushes.erase( oldIt );
+		}
+		else
+		{
+			out.geometryDirty = true;
+			out.dirtyBrushes.insert( node );
+			if ( oldIt != oldBrushes.end() ) {
+				out.changedOccluderAabbs.push_back( oldIt->second.worldAabb );
+				delete_brush_textures( oldIt->second );
+				oldBrushes.erase( oldIt );
+			}
+			out.changedOccluderAabbs.push_back( cache.worldAabb );
+		}
+
+		out.brushes.emplace( node, std::move( cache ) );
+
+		const Matrix4& localToWorld = brush.localToWorld();
+		std::uint32_t faceIndex = 0;
+		Brush_ForEachFaceInstance( brush, [&]( FaceInstance& faceInstance ){
+			Face& face = faceInstance.getFace();
+			const FaceShader& faceShader = face.getShader();
+			const int flags = faceShader.shaderFlags();
+			const char* shaderName = face.GetShader();
+			const std::uint64_t shaderNameHash = std::hash<std::string_view>{}( shaderName != nullptr ? std::string_view( shaderName ) : std::string_view() );
+
+			if ( !face.contributes() || face.isFiltered() ) {
+				++faceIndex;
+				return;
+			}
+
+			if ( ( flags & QER_SKY ) != 0 ) {
+				if ( !suppressShaderSun && seenSkyShaders.insert( shaderName ).second ) {
+					ShaderLightInfo& info = shader_light_info( shaderName );
+					for ( const auto& sun : info.suns )
+					{
+						shaderSuns.emplace_back( shaderNameHash, sun );
+					}
+				}
+				++faceIndex;
+				return;
+			}
+
+			if ( ( flags & QER_NODRAW ) != 0 ) {
+				++faceIndex;
+				return;
+			}
+
+			ShaderLightInfo& info = shader_light_info( shaderName );
+			if ( !info.hasSurfaceLight ) {
+				++faceIndex;
+				return;
+			}
+
+			float area = 0.0f;
+			Vector3 centroid( 0, 0, 0 );
+			if ( !winding_area_centroid( face.getWinding(), localToWorld, area, centroid ) ) {
+				++faceIndex;
+				return;
+			}
+
+			const float areaScale = clamped_area_scale( area );
+			const float intensity = std::fabs( info.surfaceLight ) * areaScale;
+			const float radius = light_radius( intensity, 1.0f );
+			if ( radius <= 0.0f ) {
+				++faceIndex;
+				return;
+			}
+
+			Vector3 colour = info.hasSurfaceLightColor ? info.surfaceLightColor : faceShader.state()->getTexture().color;
+			colour = normalize_colour( colour );
+			colour = scaled_colour( colour, intensity, 300.0f );
+
+			PreviewLightKey key;
+			key.kind = PreviewLightKey::Kind::SurfaceFace;
+			key.node = node;
+			key.index = faceIndex;
+
+			out.lights.emplace( key, make_point_light( centroid, colour, radius, false ) );
+
+			++faceIndex;
+		} );
+	} );
+
+	Scene_forEachVisiblePatchInstance( [&]( PatchInstance& patch ){
+		add_bounds( patch.worldAABB() );
+
+		scene::Node* node = &patch.path().top().get();
+		const std::uint64_t hash = hash_patch_instance( patch );
+
+		PatchLightingCache cache;
+		cache.instance = &patch;
+		cache.hash = hash;
+		cache.worldAabb = patch.worldAABB();
+
+		auto oldIt = oldPatches.find( node );
+		if ( oldIt != oldPatches.end() && oldIt->second.hash == hash ) {
+			cache.coloursRGBA = std::move( oldIt->second.coloursRGBA );
+			oldPatches.erase( oldIt );
+		}
+		else
+		{
+			out.geometryDirty = true;
+			out.dirtyPatches.insert( node );
+			if ( oldIt != oldPatches.end() ) {
+				out.changedOccluderAabbs.push_back( oldIt->second.worldAabb );
+				oldPatches.erase( oldIt );
+			}
+			out.changedOccluderAabbs.push_back( cache.worldAabb );
+		}
+
+		out.patches.emplace( node, std::move( cache ) );
+
+		Patch& patchRef = patch.getPatch();
+		const Shader* shaderState = patchRef.getShader();
+		const int flags = patchRef.getShaderFlags();
+		const char* shaderName = patchRef.GetShader();
+		const std::uint64_t shaderNameHash = std::hash<std::string_view>{}( shaderName != nullptr ? std::string_view( shaderName ) : std::string_view() );
+
+		if ( ( flags & QER_SKY ) != 0 ) {
+			if ( !suppressShaderSun && seenSkyShaders.insert( shaderName ).second ) {
+				ShaderLightInfo& info = shader_light_info( shaderName );
+				for ( const auto& sun : info.suns )
+				{
+					shaderSuns.emplace_back( shaderNameHash, sun );
+				}
+			}
+			return;
+		}
+
+		if ( ( flags & QER_NODRAW ) != 0 ) {
+			return;
+		}
+
+		ShaderLightInfo& info = shader_light_info( shaderName );
+		if ( !info.hasSurfaceLight ) {
+			return;
+		}
+
+		float area = 0.0f;
+		Vector3 centroid( 0, 0, 0 );
+		if ( !patch_area_centroid( patchRef.getTesselation(), patch.localToWorld(), area, centroid ) ) {
+			return;
+		}
+
+		const float areaScale = clamped_area_scale( area );
+		const float intensity = std::fabs( info.surfaceLight ) * areaScale;
+		const float radius = light_radius( intensity, 1.0f );
+		if ( radius <= 0.0f ) {
+			return;
+		}
+
+		Vector3 colour = info.hasSurfaceLightColor ? info.surfaceLightColor : shaderState->getTexture().color;
+		colour = normalize_colour( colour );
+		colour = scaled_colour( colour, intensity, 300.0f );
+
+		PreviewLightKey key;
+		key.kind = PreviewLightKey::Kind::SurfacePatch;
+		key.node = node;
+
+		out.lights.emplace( key, make_point_light( centroid, colour, radius, false ) );
+	} );
+
+	// Removed brushes/paches.
+	for ( auto& [ node, cache ] : oldBrushes )
+	{
+		out.geometryDirty = true;
+		out.changedOccluderAabbs.push_back( cache.worldAabb );
+		delete_brush_textures( cache );
+	}
+	for ( auto& [ node, cache ] : oldPatches )
+	{
+		out.geometryDirty = true;
+		out.changedOccluderAabbs.push_back( cache.worldAabb );
+	}
+
+	// World/Shader suns.
+	const Vector3 mapCenter = out.hasBounds ? out.mapBounds.origin : Vector3( 0, 0, 0 );
+	if ( worldspawnEntity != nullptr ) {
+		SunInfo sun;
+		if ( parse_worldspawn_sun( *worldspawnEntity, targets, mapCenter, sun ) ) {
+			worldSuns.push_back( sun );
+		}
+	}
+
+	const bool allowShaderSuns = worldSuns.empty() && !suppressShaderSun;
+	const AABB sunInfluence = out.hasBounds ? out.mapBounds : AABB( Vector3( 0, 0, 0 ), Vector3( 8192, 8192, 8192 ) );
+
+	if ( !worldSuns.empty() ) {
+		const SunInfo& sun = worldSuns.front();
+		const Vector3 colour = scaled_colour( sun.colour, sun.intensity, 100.0f );
+
+		PreviewLightKey key;
+		key.kind = PreviewLightKey::Kind::WorldspawnSun;
+		key.node = worldspawnNode;
+
+		out.lights.emplace( key, make_directional_light( sun.direction, colour, sunInfluence ) );
+	}
+	else if ( allowShaderSuns && !shaderSuns.empty() ) {
+		for ( const auto& [ shaderHash, sun ] : shaderSuns )
+		{
+			const Vector3 colour = scaled_colour( sun.colour, sun.intensity, 100.0f );
+
+			PreviewLightKey key;
+			key.kind = PreviewLightKey::Kind::ShaderSun;
+			key.shaderNameHash = shaderHash;
+
+			out.lights.emplace( key, make_directional_light( sun.direction, colour, sunInfluence ) );
+		}
+	}
+
+	// Light entities (point + directional).
+	for ( const auto& c : lightEntities )
+	{
+		if ( c.node == nullptr || c.entity == nullptr ) {
+			continue;
+		}
+
+		Vector3 origin( 0, 0, 0 );
+		if ( !parse_vec3_key( *c.entity, "origin", origin ) ) {
+			origin = c.worldAabb.origin;
+		}
+
+		Vector3 colour( 1, 1, 1 );
+		bool colourFromKey = false;
+		parse_vec3_key( *c.entity, "_color", colour );
+
+		float intensity = 300.0f;
+		parse_light_intensity( *c.entity, colour, colourFromKey, intensity );
+
+		Vector3 radiusVector( 0, 0, 0 );
+		const bool hasRadius = parse_light_radius( *c.entity, radiusVector );
+
+		float scale = 1.0f;
+		parse_float_key( *c.entity, "scale", scale );
+		if ( scale <= 0.0f ) {
+			scale = 1.0f;
+		}
+
+		int spawnflags = 0;
+		parse_int_key( *c.entity, "spawnflags", spawnflags );
+		const bool linear = spawnflags_linear( spawnflags );
+
+		const float intensityScaled = std::fabs( intensity * scale );
+		Vector3 colourScaled = normalize_colour( colour );
+		colourScaled = scaled_colour( colourScaled, intensityScaled, 300.0f );
+
+		const char* classname = c.entity->getClassName();
+
+		PreviewLightKey key;
+		key.kind = PreviewLightKey::Kind::Entity;
+		key.node = c.node;
+
+		if ( string_equal_nocase( classname, "light_environment" ) || key_bool( c.entity->getKeyValue( "_sun" ) ) ) {
+			Vector3 direction( 0, 0, 1 );
+			const char* target = c.entity->getKeyValue( "target" );
+			auto it = targets.find( target );
+			if ( !string_empty( target ) && it != targets.end() ) {
+				direction = origin - it->second;
+			}
+			else
+			{
+				float yaw = 0.0f;
+				float pitch = 0.0f;
+				parse_entity_angles( *c.entity, yaw, pitch );
+				direction = vector3_for_spherical( degrees_to_radians( yaw ), degrees_to_radians( pitch ) );
+			}
+			if ( vector3_length( direction ) == 0.0f ) {
+				direction = Vector3( 0, 0, 1 );
+			}
+			direction = vector3_normalised( direction );
+
+			out.lights.emplace( key, make_directional_light( direction, colourScaled, sunInfluence ) );
+			continue;
+		}
+
+		float radius = 0.0f;
+		Vector3 extents( 0, 0, 0 );
+		if ( hasRadius ) {
+			extents = Vector3( std::fabs( radiusVector.x() ), std::fabs( radiusVector.y() ), std::fabs( radiusVector.z() ) );
+			radius = std::max( extents.x(), std::max( extents.y(), extents.z() ) );
+		}
+		if ( radius <= 0.0f ) {
+			radius = linear ? light_radius_linear( intensityScaled, 1.0f ) : light_radius( intensityScaled, 1.0f );
+			extents = Vector3( radius, radius, radius );
+		}
+		if ( radius <= 0.0f ) {
+			continue;
+		}
+
+		out.lights.emplace( key, make_point_light( origin, colourScaled, radius, linear ) );
+	}
+
+	// Diff lights.
+	for ( const auto& [ key, entry ] : out.lights )
+	{
+		auto oldIt = oldLights.find( key );
+		if ( oldIt == oldLights.end() ) {
+			out.changedLightInfluences.push_back( entry.light.influence );
+			continue;
+		}
+
+		if ( oldIt->second.hash != entry.hash ) {
+			out.changedLightInfluences.push_back( aabb_union( oldIt->second.light.influence, entry.light.influence ) );
+		}
+		oldLights.erase( oldIt );
+	}
+	for ( const auto& [ key, entry ] : oldLights )
+	{
+		out.changedLightInfluences.push_back( entry.light.influence );
+	}
+
+	return out;
+}
+
+void apply_rescan( RescanResult& scan ){
+	// Dirty marking: if a light changes, relight receivers in its influence.
+	for ( const AABB& influence : scan.changedLightInfluences )
+	{
+		for ( const auto& [ node, brush ] : scan.brushes )
+		{
+			if ( aabb_intersects_aabb( influence, brush.worldAabb ) ) {
+				scan.dirtyBrushes.insert( node );
+			}
+		}
+		for ( const auto& [ node, patch ] : scan.patches )
+		{
+			if ( aabb_intersects_aabb( influence, patch.worldAabb ) ) {
+				scan.dirtyPatches.insert( node );
+			}
+		}
+	}
+
+	// Shadowing changes: if geometry changes, relight receivers for lights that overlap it.
+	for ( const AABB& occluder : scan.changedOccluderAabbs )
+	{
+		for ( const auto& [ key, light ] : scan.lights )
+		{
+			if ( !aabb_intersects_aabb( occluder, light.light.influence ) ) {
+				continue;
+			}
+			for ( const auto& [ node, brush ] : scan.brushes )
+			{
+				if ( aabb_intersects_aabb( light.light.influence, brush.worldAabb ) ) {
+					scan.dirtyBrushes.insert( node );
+				}
+			}
+			for ( const auto& [ node, patch ] : scan.patches )
+			{
+				if ( aabb_intersects_aabb( light.light.influence, patch.worldAabb ) ) {
+					scan.dirtyPatches.insert( node );
+				}
+			}
+		}
+	}
+
+	// Replace caches.
+	g_previewLighting.lights = std::move( scan.lights );
+	g_previewLighting.brushes = std::move( scan.brushes );
+	g_previewLighting.patches = std::move( scan.patches );
+	g_previewLighting.geometryDirty = scan.geometryDirty;
+
+	if ( g_previewLighting.geometryDirty ) {
+		rebuild_bvh_from_scene();
+	}
+
+	// Merge dirty queues.
+	std::unordered_set<scene::Node*> brushQueueSet( scan.dirtyBrushes.begin(), scan.dirtyBrushes.end() );
+	for ( scene::Node* node : g_previewLighting.dirtyBrushes )
+	{
+		brushQueueSet.insert( node );
+	}
+	std::unordered_set<scene::Node*> patchQueueSet( scan.dirtyPatches.begin(), scan.dirtyPatches.end() );
+	for ( scene::Node* node : g_previewLighting.dirtyPatches )
+	{
+		patchQueueSet.insert( node );
+	}
+
+	g_previewLighting.dirtyBrushes.clear();
+	for ( scene::Node* node : brushQueueSet )
+	{
+		if ( g_previewLighting.brushes.find( node ) != g_previewLighting.brushes.end() ) {
+			g_previewLighting.dirtyBrushes.push_back( node );
+		}
+	}
+
+	g_previewLighting.dirtyPatches.clear();
+	for ( scene::Node* node : patchQueueSet )
+	{
+		if ( g_previewLighting.patches.find( node ) != g_previewLighting.patches.end() ) {
+			g_previewLighting.dirtyPatches.push_back( node );
+		}
+	}
+}
+
+void update(){
+	if ( g_previewLighting.pendingClearGL ) {
+		clear_all_gl();
+		g_previewLighting.pendingClearGL = false;
+	}
+
+	if ( !g_previewLighting.active ) {
+		return;
+	}
+
+	if ( g_previewLighting.sceneDirty ) {
+		g_previewLighting.sceneDirty = false;
+		RescanResult scan = rescan_scene();
+		apply_rescan( scan );
+	}
+
+	// Map bounds for directional shadow rays.
+	AABB mapBounds = AABB();
+	bool hasBounds = false;
+	for ( const auto& [ node, brush ] : g_previewLighting.brushes )
+	{
+		if ( !hasBounds ) {
+			mapBounds = brush.worldAabb;
+			hasBounds = true;
+		}
+		else
+		{
+			aabb_extend_by_aabb_safe( mapBounds, brush.worldAabb );
+		}
+	}
+	for ( const auto& [ node, patch ] : g_previewLighting.patches )
+	{
+		if ( !hasBounds ) {
+			mapBounds = patch.worldAabb;
+			hasBounds = true;
+		}
+		else
+		{
+			aabb_extend_by_aabb_safe( mapBounds, patch.worldAabb );
+		}
+	}
+
+	// Time-sliced updates.
+	const auto start = std::chrono::steady_clock::now();
+	auto within_budget = [&](){
+		const auto now = std::chrono::steady_clock::now();
+		return std::chrono::duration<double, std::milli>( now - start ).count() < kWorkBudgetMs;
+	};
+
+	while ( !g_previewLighting.dirtyBrushes.empty() && within_budget() )
+	{
+		scene::Node* node = g_previewLighting.dirtyBrushes.front();
+		g_previewLighting.dirtyBrushes.pop_front();
+
+		auto it = g_previewLighting.brushes.find( node );
+		if ( it == g_previewLighting.brushes.end() ) {
+			continue;
+		}
+
+		build_brush_lightmaps( it->second, mapBounds, hasBounds );
+	}
+
+	while ( !g_previewLighting.dirtyPatches.empty() && within_budget() )
+	{
+		scene::Node* node = g_previewLighting.dirtyPatches.front();
+		g_previewLighting.dirtyPatches.pop_front();
+
+		auto it = g_previewLighting.patches.find( node );
+		if ( it == g_previewLighting.patches.end() ) {
+			continue;
+		}
+
+		build_patch_colours( it->second, mapBounds, hasBounds );
+	}
+}
+
+void render_overlay(){
+	if ( !g_previewLighting.active ) {
+		return;
+	}
+
+	gl().glEnableClientState( GL_VERTEX_ARRAY );
+
+	gl().glDepthMask( GL_FALSE );
+	gl().glEnable( GL_DEPTH_TEST );
+	gl().glDepthFunc( GL_LEQUAL );
+	gl().glDisable( GL_LIGHTING );
+
+	// Multiplicative blend: dst = dst * src
+	gl().glEnable( GL_BLEND );
+	gl().glBlendFunc( GL_ZERO, GL_SRC_COLOR );
+
+	// --- Brush lightmaps (textured) ---
+	gl().glActiveTexture( GL_TEXTURE0 );
+	gl().glClientActiveTexture( GL_TEXTURE0 );
+	gl().glEnable( GL_TEXTURE_2D );
+	gl().glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
+
+	gl().glEnable( GL_TEXTURE_GEN_S );
+	gl().glEnable( GL_TEXTURE_GEN_T );
+	gl().glTexGeni( GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+	gl().glTexGeni( GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR );
+
+	for ( auto& [ node, cache ] : g_previewLighting.brushes )
+	{
+		BrushInstance* brush = cache.instance;
+		if ( brush == nullptr ) {
+			continue;
+		}
+
+		brush->getBrush().evaluateBRep();
+		const Matrix4& localToWorld = brush->localToWorld();
+
+		gl().glPushMatrix();
+		gl().glMultMatrixf( reinterpret_cast<const float*>( &localToWorld ) );
+
+		std::size_t faceIndex = 0;
+		Brush_ForEachFaceInstance( *brush, [&]( FaceInstance& faceInstance ){
+			if ( faceIndex >= cache.faces.size() ) {
+				++faceIndex;
+				return;
+			}
+
+			Face& face = faceInstance.getFace();
+			const FaceShader& faceShader = face.getShader();
+			const int flags = faceShader.shaderFlags();
+			if ( !face.contributes() || face.isFiltered() || ( flags & QER_NODRAW ) != 0 || ( flags & QER_SKY ) != 0 ) {
+				++faceIndex;
+				return;
+			}
+
+			FaceLightmap& lm = cache.faces[faceIndex++];
+			if ( lm.texture == 0 ) {
+				return;
+			}
+
+			const Winding& w = face.getWinding();
+			if ( w.numpoints < 3 ) {
+				return;
+			}
+
+			gl().glBindTexture( GL_TEXTURE_2D, lm.texture );
+
+			const float planeS[4] = { lm.planeS.x(), lm.planeS.y(), lm.planeS.z(), lm.planeS.w() };
+			const float planeT[4] = { lm.planeT.x(), lm.planeT.y(), lm.planeT.z(), lm.planeT.w() };
+			gl().glTexGenfv( GL_S, GL_OBJECT_PLANE, planeS );
+			gl().glTexGenfv( GL_T, GL_OBJECT_PLANE, planeT );
+
+			gl().glVertexPointer( 3, GL_DOUBLE, sizeof( WindingVertex ), &w.points.data()->vertex );
+			gl().glDrawArrays( GL_POLYGON, 0, GLsizei( w.numpoints ) );
+		} );
+
+		gl().glPopMatrix();
+	}
+
+	gl().glDisable( GL_TEXTURE_GEN_S );
+	gl().glDisable( GL_TEXTURE_GEN_T );
+
+	// --- Patch lighting (vertex colours) ---
+	gl().glDisable( GL_TEXTURE_2D );
+	gl().glEnableClientState( GL_COLOR_ARRAY );
+
+	for ( auto& [ node, cache ] : g_previewLighting.patches )
+	{
+		PatchInstance* patch = cache.instance;
+		if ( patch == nullptr ) {
+			continue;
+		}
+
+		Patch& patchRef = patch->getPatch();
+		const PatchTesselation& tess = patchRef.getTesselation();
+		if ( tess.m_vertices.empty() ) {
+			continue;
+		}
+		if ( cache.coloursRGBA.size() != tess.m_vertices.size() * 4 ) {
+			continue;
+		}
+
+		const Matrix4& localToWorld = patch->localToWorld();
+		gl().glPushMatrix();
+		gl().glMultMatrixf( reinterpret_cast<const float*>( &localToWorld ) );
+
+		gl().glVertexPointer( 3, GL_FLOAT, sizeof( ArbitraryMeshVertex ), &tess.m_vertices.data()->vertex );
+		gl().glColorPointer( 4, GL_UNSIGNED_BYTE, 0, cache.coloursRGBA.data() );
+
+		const RenderIndex* strip_indices = tess.m_indices.data();
+		for ( std::size_t i = 0; i < tess.m_numStrips; ++i, strip_indices += tess.m_lenStrips )
+		{
+			gl().glDrawElements( GL_QUAD_STRIP, GLsizei( tess.m_lenStrips ), RenderIndexTypeID, strip_indices );
+		}
+
+		gl().glPopMatrix();
+	}
+
+	gl().glDisableClientState( GL_COLOR_ARRAY );
+
+	gl().glDisable( GL_BLEND );
+	gl().glDepthMask( GL_TRUE );
+}
+
+} // namespace preview_lighting_impl
 
 void preview_lighting_mark_dirty(){
-	g_previewLighting.dirty = true;
+	g_previewLighting.sceneDirty = true;
 }
 using PreviewLightingChangedCaller = BindFirstOpaque<detail::FreeCallerWrapper<void()>>;
 }
@@ -847,20 +2356,20 @@ void PreviewLighting_Enable( bool enable ){
 	}
 
 	g_previewLighting.active = enable;
-	g_previewLighting.dirty = true;
-
-	if ( !enable ) {
-		preview_lighting_clear();
-	}
+	g_previewLighting.sceneDirty = true;
+	g_previewLighting.pendingClearGL = !enable;
 }
 
 void PreviewLighting_UpdateIfNeeded(){
-	if ( !g_previewLighting.active || game_is_doom3() ) {
+	if ( game_is_doom3() ) {
 		return;
 	}
+	preview_lighting_impl::update();
+}
 
-	if ( g_previewLighting.dirty ) {
-		g_previewLighting.dirty = false;
-		preview_lighting_rebuild();
+void PreviewLighting_RenderOverlay(){
+	if ( game_is_doom3() ) {
+		return;
 	}
+	preview_lighting_impl::render_overlay();
 }
