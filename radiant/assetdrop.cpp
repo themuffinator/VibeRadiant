@@ -1,5 +1,6 @@
 #include "assetdrop.h"
 
+#include <cmath>
 #include <limits>
 
 #include "entity.h"
@@ -125,9 +126,13 @@ void applyShaderToBrush( Brush& brush, const char* shader ){
 	}
 }
 
-bool createTexturedBrushAtPoint( const Vector3& point, const char* shader ){
+ bool createTexturedBrushAtPoint( const Vector3& point, const char* shader, bool alignToSurfaceZ ){
 	const Vector3 extents( 32.0f, 32.0f, 32.0f );
-	const AABB bounds( point, extents );
+	Vector3 origin = point;
+	if ( alignToSurfaceZ ) {
+		origin.z() += extents.z();
+	}
+	const AABB bounds( origin, extents );
 
 	scene::Node* node = Scene_BrushCreate_Cuboid( bounds, shader );
 	if ( node == nullptr ) {
@@ -162,6 +167,16 @@ bool createTargetSpeakerAtPoint( const Vector3& point, const char* soundPath ){
 		transform->setType( TRANSFORM_PRIMITIVE );
 		transform->setTranslation( point );
 		transform->freezeTransform();
+
+		const AABB bounds = instance.worldAABB();
+		const float boundsMinZ = bounds.origin.z() - bounds.extents.z();
+		const float deltaZ = point.z() - boundsMinZ;
+		if ( std::isfinite( deltaZ ) && std::fabs( deltaZ ) > 1e-4f ) {
+			Vector3 placed = point;
+			placed.z() += deltaZ;
+			transform->setTranslation( placed );
+			transform->freezeTransform();
+		}
 	}
 
 	if ( Entity* entity = Node_getEntity( node ) ) {
@@ -185,12 +200,12 @@ bool AssetDrop_handleEntityClass( const char* classname, const Vector3& point ){
 		bool createdBrush = false;
 		if ( !selectWorldBrushAtPoint( snapped ) ) {
 			const CopiedString shader = GetCommonShader( "notex" );
-			if ( !createTexturedBrushAtPoint( snapped, shader.c_str() ) ) {
+			if ( !createTexturedBrushAtPoint( snapped, shader.c_str(), true ) ) {
 				return false;
 			}
 			createdBrush = true;
 		}
-		Entity_createFromSelection( classname, snapped );
+		Entity_createFromSelection( classname, snapped, true );
 		if ( createdBrush && string_equal_nocase_n( classname, "trigger_", 8 ) ) {
 			const CopiedString shader = GetCommonShader( "notex" );
 			Scene_forEachSelectedBrush( [&]( BrushInstance& brush ){
@@ -200,7 +215,7 @@ bool AssetDrop_handleEntityClass( const char* classname, const Vector3& point ){
 		return true;
 	}
 
-	Entity_createFromSelection( classname, snapped );
+	Entity_createFromSelection( classname, snapped, true );
 	return true;
 }
 
@@ -233,7 +248,7 @@ bool AssetDrop_handleTexture( const char* shader, const Vector3& point ){
 		return true;
 	}
 
-	return createTexturedBrushAtPoint( snapped, shader );
+	return createTexturedBrushAtPoint( snapped, shader, false );
 }
 
 bool AssetDrop_handleModelPath( const char* modelPath, const Vector3& point ){
@@ -256,14 +271,24 @@ bool AssetDrop_handleModelPath( const char* modelPath, const Vector3& point ){
 	entitypath.push( makeReference( node.get() ) );
 	scene::Instance& instance = findInstance( entitypath );
 
+	if ( Entity* entity = Node_getEntity( node ) ) {
+		entity->setKeyValue( entityClass->miscmodel_key(), modelPath );
+	}
+
 	if ( Transformable* transform = Instance_getTransformable( instance ) ) {
 		transform->setType( TRANSFORM_PRIMITIVE );
 		transform->setTranslation( snapped );
 		transform->freezeTransform();
-	}
 
-	if ( Entity* entity = Node_getEntity( node ) ) {
-		entity->setKeyValue( entityClass->miscmodel_key(), modelPath );
+		const AABB bounds = instance.worldAABB();
+		const float boundsMinZ = bounds.origin.z() - bounds.extents.z();
+		const float originToMinZ = snapped.z() - boundsMinZ;
+		if ( std::isfinite( originToMinZ ) && std::fabs( originToMinZ ) > 1e-4f ) {
+			Vector3 placed = snapped;
+			placed.z() += originToMinZ;
+			transform->setTranslation( placed );
+			transform->freezeTransform();
+		}
 	}
 
 	GlobalSelectionSystem().setSelectedAll( false );

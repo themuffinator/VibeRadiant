@@ -23,7 +23,11 @@
 
 #include "math/vectorfwd.h"
 
-void Entity_createFromSelection( const char* name, const Vector3& origin );
+void Entity_createFromSelection( const char* name, const Vector3& origin, bool alignToSurfaceZ );
+
+inline void Entity_createFromSelection( const char* name, const Vector3& origin ){
+	Entity_createFromSelection( name, origin, false );
+}
 
 void Scene_EntitySetKeyValue_Selected( const char* key, const char* value );
 void Scene_EntitySetClassname_Selected( const char* classname );

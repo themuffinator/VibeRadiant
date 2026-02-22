@@ -2107,10 +2107,7 @@ void CamWnd::Cam_Draw(){
 	gl().glDepthMask( GL_TRUE );
 	gl().glPolygonMode( GL_FRONT_AND_BACK, GL_FILL );
 
-	Vector3 clearColour( 0, 0, 0 );
-	if ( m_Camera.draw_mode != cd_lighting ) {
-		clearColour = g_camwindow_globals.color_cameraback;
-	}
+	Vector3 clearColour = g_camwindow_globals.color_cameraback;
 
 	gl().glClearColor( clearColour[0], clearColour[1], clearColour[2], 0 );
 	gl().glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
@@ -2526,6 +2523,19 @@ void RenderModeExport( const IntImportCallback& importer ){
 }
 typedef FreeCaller<void(const IntImportCallback&), RenderModeExport> RenderModeExportCaller;
 
+void PreviewLightingModelImport( int value ){
+	PreviewLighting_SetModel( value );
+	if ( g_camwnd != nullptr ) {
+		CamWnd_Update( *g_camwnd );
+	}
+}
+typedef FreeCaller<void(int), PreviewLightingModelImport> PreviewLightingModelImportCaller;
+
+void PreviewLightingModelExport( const IntImportCallback& importer ){
+	importer( PreviewLighting_GetModel() );
+}
+typedef FreeCaller<void(const IntImportCallback&), PreviewLightingModelExport> PreviewLightingModelExportCaller;
+
 void CameraModeNext(){
 	CamWnd_SetMode( static_cast<camera_draw_mode>( ( CamWnd_GetMode() + 1 ) % camera_draw_mode_count ) );
 }
@@ -2605,6 +2615,14 @@ void Camera_constructPreferences( PreferencesPage& page ){
 	    StringArrayRange( render_modes ),
 	    IntImportCallback( RenderModeImportCaller() ),
 	    IntExportCallback( RenderModeExportCaller() )
+	);
+
+	const char* lighting_preview_models[]{ "Baked Overlay (Quality)", "Fast Interaction (DarkRadiant-style)" };
+	page.appendCombo(
+	    "Lighting Preview Model",
+	    StringArrayRange( lighting_preview_models ),
+	    IntImportCallback( PreviewLightingModelImportCaller() ),
+	    IntExportCallback( PreviewLightingModelExportCaller() )
 	);
 
 	{
@@ -2729,6 +2747,7 @@ void CamWnd_Construct(){
 	GlobalPreferenceSystem().registerPreference( "ColorCameraBackground", Vector3ImportStringCaller( g_camwindow_globals.color_cameraback ), Vector3ExportStringCaller( g_camwindow_globals.color_cameraback ) );
 	GlobalPreferenceSystem().registerPreference( "ColorCameraSelection", Vector3ImportStringCaller( g_camwindow_globals.color_selbrushes3d ), Vector3ExportStringCaller( g_camwindow_globals.color_selbrushes3d ) );
 	GlobalPreferenceSystem().registerPreference( "CameraRenderMode", makeIntStringImportCallback( RenderModeImportCaller() ), makeIntStringExportCallback( RenderModeExportCaller() ) );
+	GlobalPreferenceSystem().registerPreference( "LightingPreviewModel", makeIntStringImportCallback( PreviewLightingModelImportCaller() ), makeIntStringExportCallback( PreviewLightingModelExportCaller() ) );
 	GlobalPreferenceSystem().registerPreference( "CameraMSAA", IntImportStringCaller( g_camwindow_globals_private.m_MSAA ), IntExportStringCaller( g_camwindow_globals_private.m_MSAA ) );
 	GlobalPreferenceSystem().registerPreference( "StrafeMode", IntImportStringCaller( g_camwindow_globals_private.m_strafeMode ), IntExportStringCaller( g_camwindow_globals_private.m_strafeMode ) );
 	GlobalPreferenceSystem().registerPreference( "CameraFaceWire", BoolImportStringCaller( g_camwindow_globals_private.m_bFaceWire ), BoolExportStringCaller( g_camwindow_globals_private.m_bFaceWire ) );

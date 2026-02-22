@@ -484,7 +484,7 @@ AABB Doom3Light_getBounds( const AABB& workzone ){
 
 int g_iLastLightIntensity = 300;
 
-void Entity_createFromSelection( const char* name, const Vector3& origin ){
+void Entity_createFromSelection( const char* name, const Vector3& origin, bool alignToSurfaceZ ){
 #if 0
 	if ( string_equal_nocase( name, "worldspawn" ) ) {
 		qt_MessageBox( MainFrame_getWindow(), "Can't create an entity with worldspawn.", "info" );
@@ -538,14 +538,30 @@ void Entity_createFromSelection( const char* name, const Vector3& origin ){
 
 	Entity* entity = Node_getEntity( node );
 
+	Transformable* placedTransform = nullptr;
+	Vector3 placedTranslation = origin;
+	bool hasPlacedTranslation = false;
+
 	if ( entityClass->fixedsize || ( isModel && !worldBrushesSelected ) ) {
 		//Select_Delete();
 
-		Transformable* transform = Instance_getTransformable( instance );
-		if ( transform != 0 ) {
-			transform->setType( TRANSFORM_PRIMITIVE );
-			transform->setTranslation( origin );
-			transform->freezeTransform();
+		placedTransform = Instance_getTransformable( instance );
+		if ( placedTransform != 0 ) {
+			placedTransform->setType( TRANSFORM_PRIMITIVE );
+			placedTransform->setTranslation( placedTranslation );
+			placedTransform->freezeTransform();
+			hasPlacedTranslation = true;
+
+			if ( alignToSurfaceZ ) {
+				const AABB bounds = instance.worldAABB();
+				const float boundsMinZ = bounds.origin.z() - bounds.extents.z();
+				const float deltaZ = origin.z() - boundsMinZ;
+				if ( std::isfinite( deltaZ ) && std::fabs( deltaZ ) > 1e-4f ) {
+					placedTranslation.z() += deltaZ;
+					placedTransform->setTranslation( placedTranslation );
+					placedTransform->freezeTransform();
+				}
+			}
 		}
 
 		GlobalSelectionSystem().setSelectedAll( false );
@@ -602,6 +618,16 @@ void Entity_createFromSelection( const char* name, const Vector3& origin ){
 		const char* model = misc_model_dialog( MainFrame_getWindow() );
 		if ( model != 0 ) {
 			entity->setKeyValue( entityClass->miscmodel_key(), model );
+			if ( alignToSurfaceZ && placedTransform != nullptr && hasPlacedTranslation ) {
+				const AABB bounds = instance.worldAABB();
+				const float boundsMinZ = bounds.origin.z() - bounds.extents.z();
+				const float deltaZ = origin.z() - boundsMinZ;
+				if ( std::isfinite( deltaZ ) && std::fabs( deltaZ ) > 1e-4f ) {
+					placedTranslation.z() += deltaZ;
+					placedTransform->setTranslation( placedTranslation );
+					placedTransform->freezeTransform();
+				}
+			}
 		}
 	}
 }

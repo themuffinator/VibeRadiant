@@ -56,8 +56,19 @@ namespace
 struct SunInfo
 {
 	Vector3 colour;
-	Vector3 direction;
+	Vector3 direction;        // direction of light rays (sun -> scene)
 	float intensity;
+	float devianceRadians = 0.0f;
+	int samples = 1;
+};
+
+struct SkyLightInfo
+{
+	float value = 0.0f;
+	int iterations = 0;
+	int horizonMin = 0;
+	int horizonMax = 90;
+	bool sampleColor = true;
 };
 
 struct ShaderLightInfo
@@ -68,6 +79,7 @@ struct ShaderLightInfo
 	bool hasSurfaceLightColor = false;
 	Vector3 surfaceLightColor = Vector3( 1, 1, 1 );
 	std::vector<SunInfo> suns;
+	std::vector<SkyLightInfo> skylights;
 };
 
 enum class PreviewLightKind
@@ -96,10 +108,11 @@ struct PreviewLightKey
 		SurfacePatch,
 		WorldspawnSun,
 		ShaderSun,
+		ShaderSkyLight,
 	};
 
 	Kind kind = Kind::Entity;
-	scene::Node* node = nullptr;          // for everything except ShaderSun
+	scene::Node* node = nullptr;          // for everything except shader-based lights
 	std::uint32_t index = 0;              // face index for SurfaceFace
 	std::uint64_t shaderNameHash = 0;     // for ShaderSun
 
@@ -180,7 +193,7 @@ struct PreviewLightingState
 	bool active = false;
 	bool sceneDirty = true;
 	bool callbackRegistered = false;
-	bool pendingClearGL = false;
+	int model = PREVIEW_LIGHTING_MODEL_BAKED_OVERLAY;
 
 	std::map<CopiedString, ShaderLightInfo> shaderCache;
 
@@ -193,6 +206,8 @@ struct PreviewLightingState
 	std::vector<std::uint32_t> triIndices;
 	std::vector<BvhNode> bvh;
 	bool geometryDirty = true;
+	AABB mapBounds = AABB();
+	bool hasMapBounds = false;
 
 	// Work queue.
 	std::deque<scene::Node*> dirtyBrushes;
@@ -418,7 +433,7 @@ bool parse_worldspawn_sun( const Entity& worldspawn, const std::map<CopiedString
 			if ( std::sscanf( value, "%f %f %f %f %f %f", &r, &g, &b, &intensity, &degrees, &elevation ) == 6 ) {
 				sun.colour = normalize_colour( Vector3( r, g, b ) );
 				sun.intensity = intensity;
-				sun.direction = vector3_for_spherical( degrees_to_radians( degrees ), degrees_to_radians( elevation ) );
+				sun.direction = -vector3_for_spherical( degrees_to_radians( degrees ), degrees_to_radians( elevation ) );
 				return true;
 			}
 		}
@@ -454,6 +469,28 @@ bool parse_worldspawn_sun( const Entity& worldspawn, const std::map<CopiedString
 	return true;
 }
 
+inline bool Tokeniser_tryGetFloat( Tokeniser& tokeniser, float& f ){
+	const char* token = tokeniser.getToken();
+	if ( token != nullptr && string_parse_float( token, f ) ) {
+		return true;
+	}
+	if ( token != nullptr ) {
+		tokeniser.ungetToken();
+	}
+	return false;
+}
+
+inline bool Tokeniser_tryGetInteger( Tokeniser& tokeniser, int& i ){
+	const char* token = tokeniser.getToken();
+	if ( token != nullptr && string_parse_int( token, i ) ) {
+		return true;
+	}
+	if ( token != nullptr ) {
+		tokeniser.ungetToken();
+	}
+	return false;
+}
+
 void parse_shader_light_info( const char* shaderName, ShaderLightInfo& info ){
 	info.parsed = true;
 
@@ -473,6 +510,7 @@ void parse_shader_light_info( const char* shaderName, ShaderLightInfo& info ){
 	}
 
 	Tokeniser& tokeniser = GlobalScriptLibrary().m_pfnNewScriptTokeniser( file->getInputStream() );
+	tokeniser.nextLine();
 	bool inBlock = false;
 	int depth = 0;
 
@@ -522,9 +560,38 @@ void parse_shader_light_info( const char* shaderName, ShaderLightInfo& info ){
 			continue;
 		}
 
+		if ( string_equal_nocase( token, "q3map_skyLight" ) || string_equal_nocase( token, "q3map_skylight" ) ) {
+			float value = 0.0f;
+			int iterations = 0;
+			if ( Tokeniser_getFloat( tokeniser, value ) && Tokeniser_getInteger( tokeniser, iterations ) ) {
+				SkyLightInfo sky;
+				sky.value = std::max( value, 0.0f );
+				sky.iterations = std::max( iterations, 2 );
+
+				int horizonMin = 0;
+				if ( Tokeniser_tryGetInteger( tokeniser, horizonMin ) ) {
+					sky.horizonMin = std::clamp( horizonMin, -90, 90 );
+
+					int horizonMax = 0;
+					if ( Tokeniser_tryGetInteger( tokeniser, horizonMax ) ) {
+						sky.horizonMax = std::clamp( horizonMax, -90, 90 );
+
+						int sampleColour = 0;
+						if ( Tokeniser_tryGetInteger( tokeniser, sampleColour ) ) {
+							sky.sampleColor = sampleColour != 0;
+						}
+					}
+				}
+
+				info.skylights.push_back( sky );
+			}
+			continue;
+		}
+
 		if ( string_equal_nocase( token, "sun" )
 		  || string_equal_nocase( token, "q3map_sun" )
 		  || string_equal_nocase( token, "q3map_sunExt" ) ) {
+			const bool ext = string_equal_nocase( token, "q3map_sunExt" );
 			float r = 0.0f;
 			float g = 0.0f;
 			float b = 0.0f;
@@ -540,7 +607,20 @@ void parse_shader_light_info( const char* shaderName, ShaderLightInfo& info ){
 				SunInfo sun;
 				sun.colour = normalize_colour( Vector3( r, g, b ) );
 				sun.intensity = intensity;
-				sun.direction = vector3_for_spherical( degrees_to_radians( degrees ), degrees_to_radians( elevation ) );
+				sun.direction = -vector3_for_spherical( degrees_to_radians( degrees ), degrees_to_radians( elevation ) );
+
+				if ( ext ) {
+					float devianceDegrees = 0.0f;
+					if ( Tokeniser_tryGetFloat( tokeniser, devianceDegrees ) ) {
+						sun.devianceRadians = degrees_to_radians( std::max( devianceDegrees, 0.0f ) );
+
+						int samples = 0;
+						if ( Tokeniser_tryGetInteger( tokeniser, samples ) ) {
+							sun.samples = std::max( samples, 1 );
+						}
+					}
+				}
+
 				info.suns.push_back( sun );
 			}
 			continue;
@@ -612,6 +692,36 @@ bool patch_area_centroid( const PatchTesselation& tess, const Matrix4& localToWo
 	}
 
 	return area > 0.0f;
+}
+
+inline bool preview_node_participates( const scene::Node* node ){
+	return node != nullptr && node->visible();
+}
+
+inline bool brush_face_participates_in_preview( const scene::Node* node, const Face& face ){
+	return preview_node_participates( node ) && face.contributes() && !face.isFiltered();
+}
+
+inline bool patch_participates_in_preview( const scene::Node* node, Patch& patch ){
+	return preview_node_participates( node ) && !patch_filtered( patch );
+}
+
+inline bool shader_behaves_like_sky( int flags, const ShaderLightInfo& info ){
+	return ( flags & QER_SKY ) != 0 || !info.suns.empty() || !info.skylights.empty();
+}
+
+inline bool brush_face_receives_preview_lighting( const scene::Node* node, const Face& face ){
+	if ( !brush_face_participates_in_preview( node, face ) ) {
+		return false;
+	}
+
+	const int flags = face.getShader().shaderFlags();
+	return ( flags & QER_NODRAW ) == 0 && ( flags & QER_SKY ) == 0;
+}
+
+inline bool patch_receives_preview_lighting( const scene::Node* node, Patch& patch ){
+	// Keep receiver semantics aligned with the baked overlay patch path.
+	return patch_participates_in_preview( node, patch );
 }
 
 #if 0
@@ -1186,10 +1296,12 @@ void clear_all_gl(){
 	g_previewLighting.dirtyBrushes.clear();
 	g_previewLighting.dirtyPatches.clear();
 	g_previewLighting.geometryDirty = true;
+	g_previewLighting.mapBounds = AABB();
+	g_previewLighting.hasMapBounds = false;
 	g_previewLighting.sceneDirty = true;
 }
 
-std::uint64_t hash_brush_instance( BrushInstance& brush ){
+std::uint64_t hash_brush_instance( BrushInstance& brush, scene::Node* node ){
 	std::uint64_t seed = 0;
 
 	const Matrix4& localToWorld = brush.localToWorld();
@@ -1198,6 +1310,8 @@ std::uint64_t hash_brush_instance( BrushInstance& brush ){
 	{
 		hash_float( seed, m[i] );
 	}
+
+	hash_u32( seed, preview_node_participates( node ) ? 1u : 0u );
 
 	std::uint32_t faceCount = 0;
 	Brush_ForEachFaceInstance( brush, [&]( FaceInstance& faceInstance ){
@@ -1219,7 +1333,25 @@ std::uint64_t hash_brush_instance( BrushInstance& brush ){
 	return seed;
 }
 
-std::uint64_t hash_patch_instance( PatchInstance& patch ){
+void hash_patch_tesselation( std::uint64_t& seed, const PatchTesselation& tess ){
+	hash_u32( seed, std::uint32_t( tess.m_vertices.size() ) );
+	hash_u32( seed, std::uint32_t( tess.m_indices.size() ) );
+	hash_u32( seed, std::uint32_t( tess.m_numStrips ) );
+	hash_u32( seed, std::uint32_t( tess.m_lenStrips ) );
+
+	for ( const ArbitraryMeshVertex& v : tess.m_vertices )
+	{
+		hash_vec3( seed, Vector3( v.vertex ) );
+		hash_vec3( seed, Vector3( v.normal ) );
+	}
+
+	for ( const RenderIndex index : tess.m_indices )
+	{
+		hash_u32( seed, std::uint32_t( index ) );
+	}
+}
+
+std::uint64_t hash_patch_instance( PatchInstance& patch, scene::Node* node ){
 	std::uint64_t seed = 0;
 
 	const Matrix4& localToWorld = patch.localToWorld();
@@ -1229,13 +1361,14 @@ std::uint64_t hash_patch_instance( PatchInstance& patch ){
 		hash_float( seed, m[i] );
 	}
 
+	hash_u32( seed, preview_node_participates( node ) ? 1u : 0u );
+
 	Patch& patchRef = patch.getPatch();
 	hash_string( seed, patchRef.GetShader() );
 	hash_u32( seed, std::uint32_t( patchRef.getShaderFlags() ) );
+	hash_u32( seed, patch_filtered( patchRef ) ? 1u : 0u );
 
-	const PatchTesselation& tess = patchRef.getTesselation();
-	hash_u32( seed, std::uint32_t( tess.m_vertices.size() ) );
-	hash_u32( seed, std::uint32_t( tess.m_indices.size() ) );
+	hash_patch_tesselation( seed, patchRef.getTesselation() );
 
 	return seed;
 }
@@ -1245,6 +1378,10 @@ void rebuild_bvh_from_scene(){
 
 	for ( auto& [ node, brushCache ] : g_previewLighting.brushes )
 	{
+		if ( !preview_node_participates( node ) ) {
+			continue;
+		}
+
 		BrushInstance* brush = brushCache.instance;
 		if ( brush == nullptr ) {
 			continue;
@@ -1255,7 +1392,16 @@ void rebuild_bvh_from_scene(){
 
 		Brush_ForEachFaceInstance( *brush, [&]( FaceInstance& faceInstance ){
 			Face& face = faceInstance.getFace();
-			if ( !face.contributes() || face.isFiltered() ) {
+			if ( !brush_face_participates_in_preview( node, face ) ) {
+				return;
+			}
+
+			const FaceShader& faceShader = face.getShader();
+			const int flags = faceShader.shaderFlags();
+			const char* shaderName = face.GetShader();
+			ShaderLightInfo& info = shader_light_info( shaderName );
+			const bool isSky = shader_behaves_like_sky( flags, info );
+			if ( isSky ) {
 				return;
 			}
 
@@ -1288,6 +1434,17 @@ void rebuild_bvh_from_scene(){
 		}
 
 		Patch& patchRef = patch->getPatch();
+		if ( !patch_participates_in_preview( node, patchRef ) ) {
+			continue;
+		}
+
+		const int flags = patchRef.getShaderFlags();
+		const char* shaderName = patchRef.GetShader();
+		ShaderLightInfo& info = shader_light_info( shaderName );
+		const bool isSky = shader_behaves_like_sky( flags, info );
+		if ( isSky ) {
+			continue;
+		}
 		const PatchTesselation& tess = patchRef.getTesselation();
 		if ( tess.m_numStrips == 0 || tess.m_lenStrips < 4 ) {
 			continue;
@@ -1355,7 +1512,20 @@ inline float point_attenuation( const PreviewLightSource& light, float dist ){
 	return x * x;
 }
 
-Vector3 compute_lighting( const Vector3& worldPos, const Vector3& worldNormal, const std::vector<const PreviewLightSource*>& lights, float directionalDistance ){
+void gather_affecting_lights( const AABB& bounds, std::vector<const PreviewLightSource*>& out ){
+	out.clear();
+	out.reserve( g_previewLighting.lights.size() );
+
+	for ( const auto& lightPair : g_previewLighting.lights )
+	{
+		const PreviewLightEntry& entry = lightPair.second;
+		if ( aabb_intersects_aabb( entry.light.influence, bounds ) ) {
+			out.push_back( &entry.light );
+		}
+	}
+}
+
+Vector3 compute_lighting( const Vector3& worldPos, const Vector3& worldNormal, const std::vector<const PreviewLightSource*>& lights, float directionalDistance, bool includeShadows ){
 	Vector3 result( kAmbient, kAmbient, kAmbient );
 
 	const Vector3 normal = vector3_normalised( worldNormal );
@@ -1373,7 +1543,7 @@ Vector3 compute_lighting( const Vector3& worldPos, const Vector3& worldNormal, c
 			if ( ndotl <= 0.0f ) {
 				continue;
 			}
-			if ( bvh_shadowed( biasedOrigin, L, directionalDistance ) ) {
+			if ( includeShadows && bvh_shadowed( biasedOrigin, L, directionalDistance ) ) {
 				continue;
 			}
 			result += light->colour * ndotl;
@@ -1397,7 +1567,7 @@ Vector3 compute_lighting( const Vector3& worldPos, const Vector3& worldNormal, c
 			continue;
 		}
 
-		if ( bvh_shadowed( biasedOrigin, L, std::max( dist - kShadowBias, 0.0f ) ) ) {
+		if ( includeShadows && bvh_shadowed( biasedOrigin, L, std::max( dist - kShadowBias, 0.0f ) ) ) {
 			continue;
 		}
 
@@ -1415,24 +1585,32 @@ void update_face_lightmap_texture( FaceLightmap& out, const std::vector<unsigned
 		return;
 	}
 
+	bool created = false;
 	if ( out.texture == 0 ) {
 		gl().glGenTextures( 1, &out.texture );
+		created = true;
 	}
-
-	out.width = width;
-	out.height = height;
 
 	gl().glActiveTexture( GL_TEXTURE0 );
 	gl().glClientActiveTexture( GL_TEXTURE0 );
 	gl().glBindTexture( GL_TEXTURE_2D, out.texture );
 
-	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
-	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
-	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
-	gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+	if ( created ) {
+		gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+		gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+		gl().glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+	}
 
 	gl().glPixelStorei( GL_UNPACK_ALIGNMENT, 1 );
-	gl().glTexImage2D( GL_TEXTURE_2D, 0, GL_RGB8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb.data() );
+
+	if ( out.width != width || out.height != height ) {
+		gl().glTexImage2D( GL_TEXTURE_2D, 0, GL_RGB8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr );
+		out.width = width;
+		out.height = height;
+	}
+
+	gl().glTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb.data() );
 }
 
 inline PreviewLightEntry make_point_light( const Vector3& origin, const Vector3& colour, float radius, bool linearFalloff ){
@@ -1476,16 +1654,11 @@ void build_brush_lightmaps( BrushLightingCache& cache, const AABB& mapBounds, bo
 	const float directionalDistance = hasBounds ? std::max( 4096.0f, static_cast<float>( vector3_length( mapBounds.extents ) ) * 4.0f ) : 65536.0f;
 
 	std::vector<const PreviewLightSource*> affectingLights;
-	affectingLights.reserve( g_previewLighting.lights.size() );
-	for ( const auto& [ key, entry ] : g_previewLighting.lights )
-	{
-		if ( aabb_intersects_aabb( entry.light.influence, cache.worldAabb ) ) {
-			affectingLights.push_back( &entry.light );
-		}
-	}
+	gather_affecting_lights( cache.worldAabb, affectingLights );
 
 	brush->getBrush().evaluateBRep();
 	const Matrix4& localToWorld = brush->localToWorld();
+	scene::Node* node = &brush->path().top().get();
 
 	// Ensure we have a face slot per visible face instance.
 	std::size_t faceCount = 0;
@@ -1499,9 +1672,7 @@ void build_brush_lightmaps( BrushLightingCache& cache, const AABB& mapBounds, bo
 		Face& face = faceInstance.getFace();
 		FaceLightmap& out = cache.faces[faceIndex++];
 
-		const FaceShader& faceShader = face.getShader();
-		const int flags = faceShader.shaderFlags();
-		if ( !face.contributes() || face.isFiltered() || ( flags & QER_NODRAW ) != 0 || ( flags & QER_SKY ) != 0 ) {
+		if ( !brush_face_receives_preview_lighting( node, face ) ) {
 			return;
 		}
 
@@ -1583,7 +1754,7 @@ void build_brush_lightmaps( BrushLightingCache& cache, const AABB& mapBounds, bo
 				const Vector3 localPos = p0 + uAxis * u + vAxis * v;
 				const Vector3 worldPos = matrix4_transformed_point( localToWorld, localPos );
 
-				const Vector3 lit = compute_lighting( worldPos, normalWorld, affectingLights, directionalDistance );
+				const Vector3 lit = compute_lighting( worldPos, normalWorld, affectingLights, directionalDistance, true );
 
 				const std::size_t idx = ( std::size_t( y ) * std::size_t( width ) + std::size_t( x ) ) * 3;
 				rgb[idx + 0] = static_cast<unsigned char>( std::clamp( lit.x() * 255.0f, 0.0f, 255.0f ) );
@@ -1605,15 +1776,15 @@ void build_patch_colours( PatchLightingCache& cache, const AABB& mapBounds, bool
 	const float directionalDistance = hasBounds ? std::max( 4096.0f, static_cast<float>( vector3_length( mapBounds.extents ) ) * 4.0f ) : 65536.0f;
 
 	std::vector<const PreviewLightSource*> affectingLights;
-	affectingLights.reserve( g_previewLighting.lights.size() );
-	for ( const auto& [ key, entry ] : g_previewLighting.lights )
-	{
-		if ( aabb_intersects_aabb( entry.light.influence, cache.worldAabb ) ) {
-			affectingLights.push_back( &entry.light );
-		}
-	}
+	gather_affecting_lights( cache.worldAabb, affectingLights );
 
 	Patch& patchRef = patch->getPatch();
+	scene::Node* node = &patch->path().top().get();
+	if ( !patch_receives_preview_lighting( node, patchRef ) ) {
+		cache.coloursRGBA.clear();
+		return;
+	}
+
 	const PatchTesselation& tess = patchRef.getTesselation();
 	if ( tess.m_vertices.empty() ) {
 		cache.coloursRGBA.clear();
@@ -1628,13 +1799,162 @@ void build_patch_colours( PatchLightingCache& cache, const AABB& mapBounds, bool
 		const auto& v = tess.m_vertices[i];
 		const Vector3 worldPos = matrix4_transformed_point( localToWorld, v.vertex );
 		const Vector3 worldNormal = matrix4_transformed_normal( localToWorld, v.normal );
-		const Vector3 lit = compute_lighting( worldPos, worldNormal, affectingLights, directionalDistance );
+		const Vector3 lit = compute_lighting( worldPos, worldNormal, affectingLights, directionalDistance, true );
 
 		cache.coloursRGBA[i * 4 + 0] = static_cast<unsigned char>( std::clamp( lit.x() * 255.0f, 0.0f, 255.0f ) );
 		cache.coloursRGBA[i * 4 + 1] = static_cast<unsigned char>( std::clamp( lit.y() * 255.0f, 0.0f, 255.0f ) );
 		cache.coloursRGBA[i * 4 + 2] = static_cast<unsigned char>( std::clamp( lit.z() * 255.0f, 0.0f, 255.0f ) );
 		cache.coloursRGBA[i * 4 + 3] = 255;
 	}
+}
+
+inline float radical_inverse_vdc( std::uint32_t bits ){
+	bits = ( bits << 16 ) | ( bits >> 16 );
+	bits = ( ( bits & 0x55555555u ) << 1 ) | ( ( bits & 0xAAAAAAAAu ) >> 1 );
+	bits = ( ( bits & 0x33333333u ) << 2 ) | ( ( bits & 0xCCCCCCCCu ) >> 2 );
+	bits = ( ( bits & 0x0F0F0F0Fu ) << 4 ) | ( ( bits & 0xF0F0F0F0u ) >> 4 );
+	bits = ( ( bits & 0x00FF00FFu ) << 8 ) | ( ( bits & 0xFF00FF00u ) >> 8 );
+	return float( bits ) * 2.3283064365386963e-10f; // / 2^32
+}
+
+Vector3 jitter_direction( const Vector3& baseDirection, float devianceRadians, int sampleIndex, int sampleCount, std::uint32_t seed ){
+	if ( sampleCount <= 1 || sampleIndex <= 0 || devianceRadians <= 0.0f ) {
+		return vector3_normalised( baseDirection );
+	}
+
+	const double d = std::sqrt( double( baseDirection.x() ) * double( baseDirection.x() ) + double( baseDirection.y() ) * double( baseDirection.y() ) );
+	double angle = std::atan2( double( baseDirection.y() ), double( baseDirection.x() ) );
+	double elevation = std::atan2( double( baseDirection.z() ), d );
+
+	const float u = ( float( sampleIndex ) + 0.5f ) / float( sampleCount );
+	const float v = radical_inverse_vdc( std::uint32_t( sampleIndex ) ^ seed );
+	const float r = std::sqrt( std::clamp( u, 0.0f, 1.0f ) ) * devianceRadians;
+	const float phi = float( c_2pi ) * v;
+
+	angle += std::cos( phi ) * r;
+	elevation += std::sin( phi ) * r;
+
+	return vector3_normalised( vector3_for_spherical( angle, elevation ) );
+}
+
+struct SkyLightSample
+{
+	Vector3 direction; // direction of light rays (sky -> scene)
+	float intensity = 0.0f;
+};
+
+std::vector<SkyLightSample> make_skylight_samples( const SkyLightInfo& sky ){
+	std::vector<SkyLightSample> samples;
+
+	if ( sky.value <= 0.0f || sky.iterations < 2 || sky.horizonMin > sky.horizonMax ) {
+		return samples;
+	}
+
+	const int iterations = std::max( sky.iterations, 2 );
+	const int horizonMin = std::clamp( sky.horizonMin, -90, 90 );
+	const int horizonMax = std::clamp( sky.horizonMax, -90, 90 );
+
+	const int doBot = horizonMin == -90 ? 1 : 0;
+	const int doTop = horizonMax == 90 ? 1 : 0;
+
+	const int angleSteps = std::max( 1, ( iterations - 1 ) * 4 );
+	const float eleStep = 90.0f / float( iterations );
+	const float elevationStep = float( degrees_to_radians( eleStep ) );
+	const float angleStep = float( degrees_to_radians( 360.0f / float( angleSteps ) ) );
+
+	const float eleMin = doBot ? -90.0f + eleStep * 1.5f : float( horizonMin ) + eleStep * 0.5f;
+	const float eleMax = doTop ? 90.0f - eleStep * 1.5f : float( horizonMax ) - eleStep * 0.5f;
+
+	const float stepsF = 1.0f + std::max( 0.0f, ( eleMax - eleMin ) / eleStep );
+	const int elevationSteps = std::max( 1, int( std::floor( stepsF + 0.5f ) ) );
+
+	const int numSuns = angleSteps * elevationSteps + doBot + doTop;
+	const float horizonScale = std::max( 0.25f, float( horizonMax - horizonMin ) / 90.0f );
+	const float intensity = sky.value / float( std::max( numSuns, 1 ) ) * horizonScale;
+
+	samples.reserve( std::size_t( numSuns ) );
+
+	float elevation = float( degrees_to_radians( std::min( eleMin, float( horizonMax ) ) ) );
+	float angle = 0.0f;
+	for ( int i = 0; i < elevationSteps; ++i )
+	{
+		for ( int j = 0; j < angleSteps; ++j )
+		{
+			const Vector3 toSky = vector3_for_spherical( angle, elevation );
+			SkyLightSample s;
+			s.direction = vector3_normalised( -toSky );
+			s.intensity = intensity;
+			samples.push_back( s );
+
+			angle += angleStep;
+		}
+
+		elevation += elevationStep;
+		angle += angleStep / float( elevationSteps );
+	}
+
+	if ( doBot ) {
+		SkyLightSample s;
+		s.direction = g_vector3_axis_z;
+		s.intensity = intensity;
+		samples.push_back( s );
+	}
+	if ( doTop ) {
+		SkyLightSample s;
+		s.direction = -g_vector3_axis_z;
+		s.intensity = intensity;
+		samples.push_back( s );
+	}
+
+	return samples;
+}
+
+template<typename Functor>
+class BrushInstanceAllWalker final : public scene::Graph::Walker
+{
+	const Functor& m_functor;
+
+public:
+	explicit BrushInstanceAllWalker( const Functor& functor )
+		: m_functor( functor ){
+	}
+
+	bool pre( const scene::Path& path, scene::Instance& instance ) const override {
+		if ( BrushInstance* brush = Instance_getBrush( instance ) ) {
+			m_functor( *brush );
+		}
+		return true;
+	}
+};
+
+template<typename Functor>
+inline const Functor& Scene_forEachBrushInstanceAll( scene::Graph& graph, const Functor& functor ){
+	graph.traverse( BrushInstanceAllWalker<Functor>( functor ) );
+	return functor;
+}
+
+template<typename Functor>
+class PatchInstanceAllWalker final : public scene::Graph::Walker
+{
+	const Functor& m_functor;
+
+public:
+	explicit PatchInstanceAllWalker( const Functor& functor )
+		: m_functor( functor ){
+	}
+
+	bool pre( const scene::Path& path, scene::Instance& instance ) const override {
+		if ( PatchInstance* patch = Instance_getPatch( instance ) ) {
+			m_functor( *patch );
+		}
+		return true;
+	}
+};
+
+template<typename Functor>
+inline const Functor& Scene_forEachPatchInstanceAll( scene::Graph& graph, const Functor& functor ){
+	graph.traverse( PatchInstanceAllWalker<Functor>( functor ) );
+	return functor;
 }
 
 struct RescanResult
@@ -1681,9 +2001,6 @@ RescanResult rescan_scene(){
 
 	Scene_forEachEntity( [&]( scene::Instance& instance ){
 		scene::Node& node = instance.path().top().get();
-		if ( !node.visible() ) {
-			return;
-		}
 		Entity* entity = Node_getEntity( node );
 		if ( entity == nullptr ) {
 			return;
@@ -1721,16 +2038,31 @@ RescanResult rescan_scene(){
 	};
 
 	std::vector<SunInfo> worldSuns;
-	std::vector<std::pair<std::uint64_t, SunInfo>> shaderSuns;
+	struct ShaderSunCandidate
+	{
+		std::uint64_t shaderHash = 0;
+		std::uint32_t sunIndex = 0;
+		SunInfo sun;
+	};
+	std::vector<ShaderSunCandidate> shaderSuns;
+
+	struct ShaderSkyLightCandidate
+	{
+		std::uint64_t shaderHash = 0;
+		std::uint32_t skyLightIndex = 0;
+		SkyLightInfo skylight;
+		Vector3 colour = Vector3( 1, 1, 1 );
+	};
+	std::vector<ShaderSkyLightCandidate> shaderSkyLights;
 
 	const bool suppressShaderSun = worldspawnEntity != nullptr && key_bool( worldspawnEntity->getKeyValue( "_noshadersun" ) );
 	std::set<CopiedString> seenSkyShaders;
 
-	Scene_forEachVisibleBrush( GlobalSceneGraph(), [&]( BrushInstance& brush ){
+	Scene_forEachBrushInstanceAll( GlobalSceneGraph(), [&]( BrushInstance& brush ){
 		add_bounds( brush.worldAABB() );
 
 		scene::Node* node = &brush.path().top().get();
-		const std::uint64_t hash = hash_brush_instance( brush );
+		const std::uint64_t hash = hash_brush_instance( brush, node );
 
 		BrushLightingCache cache;
 		cache.instance = &brush;
@@ -1765,29 +2097,46 @@ RescanResult rescan_scene(){
 			const char* shaderName = face.GetShader();
 			const std::uint64_t shaderNameHash = std::hash<std::string_view>{}( shaderName != nullptr ? std::string_view( shaderName ) : std::string_view() );
 
-			if ( !face.contributes() || face.isFiltered() ) {
+			if ( !brush_face_participates_in_preview( node, face ) ) {
 				++faceIndex;
 				return;
 			}
 
-			if ( ( flags & QER_SKY ) != 0 ) {
-				if ( !suppressShaderSun && seenSkyShaders.insert( shaderName ).second ) {
-					ShaderLightInfo& info = shader_light_info( shaderName );
-					for ( const auto& sun : info.suns )
-					{
-						shaderSuns.emplace_back( shaderNameHash, sun );
+			ShaderLightInfo& info = shader_light_info( shaderName );
+			const bool isSky = shader_behaves_like_sky( flags, info );
+
+			if ( isSky ) {
+				if ( seenSkyShaders.insert( shaderName ).second ) {
+					if ( !suppressShaderSun ) {
+						for ( std::size_t i = 0; i < info.suns.size(); ++i )
+						{
+							ShaderSunCandidate c;
+							c.shaderHash = shaderNameHash;
+							c.sunIndex = std::uint32_t( i );
+							c.sun = info.suns[i];
+							shaderSuns.push_back( c );
+						}
+					}
+
+					if ( !info.skylights.empty() ) {
+						Vector3 colour = info.hasSurfaceLightColor ? info.surfaceLightColor : faceShader.state()->getTexture().color;
+						colour = normalize_colour( colour );
+
+						for ( std::size_t i = 0; i < info.skylights.size(); ++i )
+						{
+							ShaderSkyLightCandidate c;
+							c.shaderHash = shaderNameHash;
+							c.skyLightIndex = std::uint32_t( i );
+							c.skylight = info.skylights[i];
+							c.colour = colour;
+							shaderSkyLights.push_back( c );
+						}
 					}
 				}
 				++faceIndex;
 				return;
 			}
 
-			if ( ( flags & QER_NODRAW ) != 0 ) {
-				++faceIndex;
-				return;
-			}
-
-			ShaderLightInfo& info = shader_light_info( shaderName );
 			if ( !info.hasSurfaceLight ) {
 				++faceIndex;
 				return;
@@ -1823,11 +2172,11 @@ RescanResult rescan_scene(){
 		} );
 	} );
 
-	Scene_forEachVisiblePatchInstance( [&]( PatchInstance& patch ){
+	Scene_forEachPatchInstanceAll( GlobalSceneGraph(), [&]( PatchInstance& patch ){
 		add_bounds( patch.worldAABB() );
 
 		scene::Node* node = &patch.path().top().get();
-		const std::uint64_t hash = hash_patch_instance( patch );
+		const std::uint64_t hash = hash_patch_instance( patch, node );
 
 		PatchLightingCache cache;
 		cache.instance = &patch;
@@ -1853,27 +2202,48 @@ RescanResult rescan_scene(){
 		out.patches.emplace( node, std::move( cache ) );
 
 		Patch& patchRef = patch.getPatch();
+		if ( !patch_participates_in_preview( node, patchRef ) ) {
+			return;
+		}
+
 		const Shader* shaderState = patchRef.getShader();
 		const int flags = patchRef.getShaderFlags();
 		const char* shaderName = patchRef.GetShader();
 		const std::uint64_t shaderNameHash = std::hash<std::string_view>{}( shaderName != nullptr ? std::string_view( shaderName ) : std::string_view() );
 
-		if ( ( flags & QER_SKY ) != 0 ) {
-			if ( !suppressShaderSun && seenSkyShaders.insert( shaderName ).second ) {
-				ShaderLightInfo& info = shader_light_info( shaderName );
-				for ( const auto& sun : info.suns )
-				{
-					shaderSuns.emplace_back( shaderNameHash, sun );
+		ShaderLightInfo& info = shader_light_info( shaderName );
+		const bool isSky = shader_behaves_like_sky( flags, info );
+		if ( isSky ) {
+			if ( seenSkyShaders.insert( shaderName ).second ) {
+				if ( !suppressShaderSun ) {
+					for ( std::size_t i = 0; i < info.suns.size(); ++i )
+					{
+						ShaderSunCandidate c;
+						c.shaderHash = shaderNameHash;
+						c.sunIndex = std::uint32_t( i );
+						c.sun = info.suns[i];
+						shaderSuns.push_back( c );
+					}
+				}
+
+				if ( !info.skylights.empty() ) {
+					Vector3 colour = info.hasSurfaceLightColor ? info.surfaceLightColor : shaderState->getTexture().color;
+					colour = normalize_colour( colour );
+
+					for ( std::size_t i = 0; i < info.skylights.size(); ++i )
+					{
+						ShaderSkyLightCandidate c;
+						c.shaderHash = shaderNameHash;
+						c.skyLightIndex = std::uint32_t( i );
+						c.skylight = info.skylights[i];
+						c.colour = colour;
+						shaderSkyLights.push_back( c );
+					}
 				}
 			}
 			return;
 		}
 
-		if ( ( flags & QER_NODRAW ) != 0 ) {
-			return;
-		}
-
-		ShaderLightInfo& info = shader_light_info( shaderName );
 		if ( !info.hasSurfaceLight ) {
 			return;
 		}
@@ -1927,26 +2297,84 @@ RescanResult rescan_scene(){
 	const bool allowShaderSuns = worldSuns.empty() && !suppressShaderSun;
 	const AABB sunInfluence = out.hasBounds ? out.mapBounds : AABB( Vector3( 0, 0, 0 ), Vector3( 8192, 8192, 8192 ) );
 
+	// Shader skylights (q3map_skyLight / q3map_skylight).
+	{
+		constexpr std::size_t kMaxSkyLightSamples = 64;
+		for ( const ShaderSkyLightCandidate& c : shaderSkyLights )
+		{
+			if ( c.skylight.value <= 0.0f ) {
+				continue;
+			}
+
+			std::vector<SkyLightSample> samples = make_skylight_samples( c.skylight );
+			if ( samples.size() > kMaxSkyLightSamples ) {
+				const std::size_t step = std::max( std::size_t( 1 ), ( samples.size() + kMaxSkyLightSamples - 1 ) / kMaxSkyLightSamples );
+
+				std::vector<SkyLightSample> reduced;
+				reduced.reserve( ( samples.size() + step - 1 ) / step );
+				for ( std::size_t i = 0; i < samples.size(); i += step )
+				{
+					reduced.push_back( samples[i] );
+				}
+
+				if ( !reduced.empty() ) {
+					const float scale = float( samples.size() ) / float( reduced.size() );
+					for ( SkyLightSample& s : reduced )
+					{
+						s.intensity *= scale;
+					}
+				}
+
+				samples.swap( reduced );
+			}
+
+			for ( std::size_t i = 0; i < samples.size(); ++i )
+			{
+				const Vector3 colour = scaled_colour( c.colour, samples[i].intensity, 100.0f );
+
+				PreviewLightKey key;
+				key.kind = PreviewLightKey::Kind::ShaderSkyLight;
+				key.shaderNameHash = c.shaderHash;
+				key.index = ( c.skyLightIndex << 16 ) | std::uint32_t( i & 0xFFFFu );
+
+				out.lights.emplace( key, make_directional_light( samples[i].direction, colour, sunInfluence ) );
+			}
+		}
+	}
+
 	if ( !worldSuns.empty() ) {
 		const SunInfo& sun = worldSuns.front();
-		const Vector3 colour = scaled_colour( sun.colour, sun.intensity, 100.0f );
+		const int sampleCount = std::clamp( sun.samples, 1, 64 );
+		const Vector3 colour = scaled_colour( sun.colour, sun.intensity, 100.0f ) * ( 1.0f / float( sampleCount ) );
 
-		PreviewLightKey key;
-		key.kind = PreviewLightKey::Kind::WorldspawnSun;
-		key.node = worldspawnNode;
+		for ( int i = 0; i < sampleCount; ++i )
+		{
+			PreviewLightKey key;
+			key.kind = PreviewLightKey::Kind::WorldspawnSun;
+			key.node = worldspawnNode;
+			key.index = std::uint32_t( i );
 
-		out.lights.emplace( key, make_directional_light( sun.direction, colour, sunInfluence ) );
+			const Vector3 direction = jitter_direction( sun.direction, std::max( sun.devianceRadians, 0.0f ), i, sampleCount, 0x9e3779b9u );
+			out.lights.emplace( key, make_directional_light( direction, colour, sunInfluence ) );
+		}
 	}
 	else if ( allowShaderSuns && !shaderSuns.empty() ) {
-		for ( const auto& [ shaderHash, sun ] : shaderSuns )
+		for ( const ShaderSunCandidate& c : shaderSuns )
 		{
-			const Vector3 colour = scaled_colour( sun.colour, sun.intensity, 100.0f );
+			const int sampleCount = std::clamp( c.sun.samples, 1, 64 );
+			const Vector3 colour = scaled_colour( c.sun.colour, c.sun.intensity, 100.0f ) * ( 1.0f / float( sampleCount ) );
+			const std::uint32_t seed = std::uint32_t( c.shaderHash ) ^ ( c.sunIndex * 0x9e3779b9u );
 
-			PreviewLightKey key;
-			key.kind = PreviewLightKey::Kind::ShaderSun;
-			key.shaderNameHash = shaderHash;
+			for ( int i = 0; i < sampleCount; ++i )
+			{
+				PreviewLightKey key;
+				key.kind = PreviewLightKey::Kind::ShaderSun;
+				key.shaderNameHash = c.shaderHash;
+				key.index = ( c.sunIndex << 16 ) | std::uint32_t( i & 0xFFFFu );
 
-			out.lights.emplace( key, make_directional_light( sun.direction, colour, sunInfluence ) );
+				const Vector3 direction = jitter_direction( c.sun.direction, std::max( c.sun.devianceRadians, 0.0f ), i, sampleCount, seed );
+				out.lights.emplace( key, make_directional_light( direction, colour, sunInfluence ) );
+			}
 		}
 	}
 
@@ -2099,11 +2527,9 @@ void apply_rescan( RescanResult& scan ){
 	g_previewLighting.lights = std::move( scan.lights );
 	g_previewLighting.brushes = std::move( scan.brushes );
 	g_previewLighting.patches = std::move( scan.patches );
-	g_previewLighting.geometryDirty = scan.geometryDirty;
-
-	if ( g_previewLighting.geometryDirty ) {
-		rebuild_bvh_from_scene();
-	}
+	g_previewLighting.geometryDirty = g_previewLighting.geometryDirty || scan.geometryDirty;
+	g_previewLighting.mapBounds = scan.mapBounds;
+	g_previewLighting.hasMapBounds = scan.hasBounds;
 
 	// Merge dirty queues.
 	std::unordered_set<scene::Node*> brushQueueSet( scan.dirtyBrushes.begin(), scan.dirtyBrushes.end() );
@@ -2135,46 +2561,27 @@ void apply_rescan( RescanResult& scan ){
 }
 
 void update(){
-	if ( g_previewLighting.pendingClearGL ) {
-		clear_all_gl();
-		g_previewLighting.pendingClearGL = false;
+	if ( g_previewLighting.sceneDirty && g_previewLighting.active ) {
+		g_previewLighting.sceneDirty = false;
+		RescanResult scan = rescan_scene();
+		apply_rescan( scan );
 	}
 
 	if ( !g_previewLighting.active ) {
 		return;
 	}
 
-	if ( g_previewLighting.sceneDirty ) {
-		g_previewLighting.sceneDirty = false;
-		RescanResult scan = rescan_scene();
-		apply_rescan( scan );
+	if ( g_previewLighting.model != PREVIEW_LIGHTING_MODEL_FAST_INTERACTION && g_previewLighting.geometryDirty ) {
+		rebuild_bvh_from_scene();
 	}
 
-	// Map bounds for directional shadow rays.
-	AABB mapBounds = AABB();
-	bool hasBounds = false;
-	for ( const auto& [ node, brush ] : g_previewLighting.brushes )
-	{
-		if ( !hasBounds ) {
-			mapBounds = brush.worldAabb;
-			hasBounds = true;
-		}
-		else
-		{
-			aabb_extend_by_aabb_safe( mapBounds, brush.worldAabb );
-		}
+	if ( g_previewLighting.model == PREVIEW_LIGHTING_MODEL_FAST_INTERACTION ) {
+		return;
 	}
-	for ( const auto& [ node, patch ] : g_previewLighting.patches )
-	{
-		if ( !hasBounds ) {
-			mapBounds = patch.worldAabb;
-			hasBounds = true;
-		}
-		else
-		{
-			aabb_extend_by_aabb_safe( mapBounds, patch.worldAabb );
-		}
-	}
+
+	// Map bounds for directional shadow rays (cached from the latest scene rescan).
+	const AABB mapBounds = g_previewLighting.mapBounds;
+	const bool hasBounds = g_previewLighting.hasMapBounds;
 
 	// Time-sliced updates.
 	const auto start = std::chrono::steady_clock::now();
@@ -2210,12 +2617,159 @@ void update(){
 	}
 }
 
+void render_overlay_fast_interaction(){
+	// DarkRadiant-style fast mode: direct interaction approximation without shadow volumes.
+	gl().glUseProgram( 0 );
+	gl().glDisableClientState( GL_TEXTURE_COORD_ARRAY );
+	gl().glDisableClientState( GL_NORMAL_ARRAY );
+	gl().glEnableClientState( GL_VERTEX_ARRAY );
+	gl().glEnableClientState( GL_COLOR_ARRAY );
+	gl().glColor4f( 1, 1, 1, 1 );
+
+	gl().glDepthMask( GL_FALSE );
+	gl().glEnable( GL_DEPTH_TEST );
+	gl().glDepthFunc( GL_LEQUAL );
+	gl().glDisable( GL_LIGHTING );
+
+	gl().glDisable( GL_TEXTURE_2D );
+	gl().glDisable( GL_TEXTURE_GEN_S );
+	gl().glDisable( GL_TEXTURE_GEN_T );
+
+	gl().glEnable( GL_BLEND );
+	gl().glBlendFunc( GL_ZERO, GL_SRC_COLOR );
+
+	const float directionalDistance = g_previewLighting.hasMapBounds
+	                                  ? std::max( 4096.0f, static_cast<float>( vector3_length( g_previewLighting.mapBounds.extents ) ) * 4.0f )
+	                                  : 65536.0f;
+
+	std::vector<const PreviewLightSource*> affectingLights;
+	std::vector<unsigned char> coloursRGBA;
+
+	for ( auto& [ node, cache ] : g_previewLighting.brushes )
+	{
+		if ( !preview_node_participates( node ) ) {
+			continue;
+		}
+
+		BrushInstance* brush = cache.instance;
+		if ( brush == nullptr ) {
+			continue;
+		}
+
+		gather_affecting_lights( cache.worldAabb, affectingLights );
+
+		brush->getBrush().evaluateBRep();
+		const Matrix4& localToWorld = brush->localToWorld();
+
+		gl().glPushMatrix();
+		gl().glMultMatrixf( reinterpret_cast<const float*>( &localToWorld ) );
+
+		Brush_ForEachFaceInstance( *brush, [&]( FaceInstance& faceInstance ){
+			Face& face = faceInstance.getFace();
+			if ( !brush_face_receives_preview_lighting( node, face ) ) {
+				return;
+			}
+
+			const Winding& w = face.getWinding();
+			if ( w.numpoints < 3 ) {
+				return;
+			}
+
+			const Plane3& plane = face.plane3();
+			const Vector3 normalWorld = matrix4_transformed_normal( localToWorld, Vector3( plane.normal() ) );
+
+			coloursRGBA.resize( w.numpoints * 4 );
+			for ( std::size_t i = 0; i < w.numpoints; ++i )
+			{
+				const Vector3 worldPos = matrix4_transformed_point( localToWorld, Vector3( w[i].vertex ) );
+				const Vector3 lit = compute_lighting( worldPos, normalWorld, affectingLights, directionalDistance, false );
+				coloursRGBA[i * 4 + 0] = static_cast<unsigned char>( std::clamp( lit.x() * 255.0f, 0.0f, 255.0f ) );
+				coloursRGBA[i * 4 + 1] = static_cast<unsigned char>( std::clamp( lit.y() * 255.0f, 0.0f, 255.0f ) );
+				coloursRGBA[i * 4 + 2] = static_cast<unsigned char>( std::clamp( lit.z() * 255.0f, 0.0f, 255.0f ) );
+				coloursRGBA[i * 4 + 3] = 255;
+			}
+
+			gl().glVertexPointer( 3, GL_DOUBLE, sizeof( WindingVertex ), &w.points.data()->vertex );
+			gl().glColorPointer( 4, GL_UNSIGNED_BYTE, 0, coloursRGBA.data() );
+			gl().glDrawArrays( GL_POLYGON, 0, GLsizei( w.numpoints ) );
+		} );
+
+		gl().glPopMatrix();
+	}
+
+	for ( auto& [ node, cache ] : g_previewLighting.patches )
+	{
+		PatchInstance* patch = cache.instance;
+		if ( patch == nullptr ) {
+			continue;
+		}
+
+		Patch& patchRef = patch->getPatch();
+		if ( !patch_receives_preview_lighting( node, patchRef ) ) {
+			continue;
+		}
+
+		const PatchTesselation& tess = patchRef.getTesselation();
+		if ( tess.m_vertices.empty() ) {
+			continue;
+		}
+
+		gather_affecting_lights( cache.worldAabb, affectingLights );
+		coloursRGBA.resize( tess.m_vertices.size() * 4 );
+
+		const Matrix4& localToWorld = patch->localToWorld();
+		for ( std::size_t i = 0; i < tess.m_vertices.size(); ++i )
+		{
+			const auto& v = tess.m_vertices[i];
+			const Vector3 worldPos = matrix4_transformed_point( localToWorld, v.vertex );
+			const Vector3 worldNormal = matrix4_transformed_normal( localToWorld, v.normal );
+			const Vector3 lit = compute_lighting( worldPos, worldNormal, affectingLights, directionalDistance, false );
+
+			coloursRGBA[i * 4 + 0] = static_cast<unsigned char>( std::clamp( lit.x() * 255.0f, 0.0f, 255.0f ) );
+			coloursRGBA[i * 4 + 1] = static_cast<unsigned char>( std::clamp( lit.y() * 255.0f, 0.0f, 255.0f ) );
+			coloursRGBA[i * 4 + 2] = static_cast<unsigned char>( std::clamp( lit.z() * 255.0f, 0.0f, 255.0f ) );
+			coloursRGBA[i * 4 + 3] = 255;
+		}
+
+		gl().glPushMatrix();
+		gl().glMultMatrixf( reinterpret_cast<const float*>( &localToWorld ) );
+
+		gl().glVertexPointer( 3, GL_FLOAT, sizeof( ArbitraryMeshVertex ), &tess.m_vertices.data()->vertex );
+		gl().glColorPointer( 4, GL_UNSIGNED_BYTE, 0, coloursRGBA.data() );
+
+		const RenderIndex* strip_indices = tess.m_indices.data();
+		for ( std::size_t i = 0; i < tess.m_numStrips; ++i, strip_indices += tess.m_lenStrips )
+		{
+			gl().glDrawElements( GL_QUAD_STRIP, GLsizei( tess.m_lenStrips ), RenderIndexTypeID, strip_indices );
+		}
+
+		gl().glPopMatrix();
+	}
+
+	gl().glDisableClientState( GL_COLOR_ARRAY );
+	gl().glDisable( GL_BLEND );
+	gl().glDepthMask( GL_TRUE );
+	gl().glColor4f( 1, 1, 1, 1 );
+}
+
 void render_overlay(){
 	if ( !g_previewLighting.active ) {
 		return;
 	}
 
+	if ( g_previewLighting.model == PREVIEW_LIGHTING_MODEL_FAST_INTERACTION ) {
+		render_overlay_fast_interaction();
+		return;
+	}
+
 	gl().glEnableClientState( GL_VERTEX_ARRAY );
+
+	// Ensure fixed-function state for the overlay pass.
+	gl().glUseProgram( 0 );
+	gl().glDisableClientState( GL_COLOR_ARRAY );
+	gl().glDisableClientState( GL_TEXTURE_COORD_ARRAY );
+	gl().glDisableClientState( GL_NORMAL_ARRAY );
+	gl().glColor4f( 1, 1, 1, 1 );
 
 	gl().glDepthMask( GL_FALSE );
 	gl().glEnable( GL_DEPTH_TEST );
@@ -2230,7 +2784,7 @@ void render_overlay(){
 	gl().glActiveTexture( GL_TEXTURE0 );
 	gl().glClientActiveTexture( GL_TEXTURE0 );
 	gl().glEnable( GL_TEXTURE_2D );
-	gl().glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
+	gl().glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE );
 
 	gl().glEnable( GL_TEXTURE_GEN_S );
 	gl().glEnable( GL_TEXTURE_GEN_T );
@@ -2239,6 +2793,9 @@ void render_overlay(){
 
 	for ( auto& [ node, cache ] : g_previewLighting.brushes )
 	{
+		if ( node != nullptr && !node->visible() ) {
+			continue;
+		}
 		BrushInstance* brush = cache.instance;
 		if ( brush == nullptr ) {
 			continue;
@@ -2258,9 +2815,7 @@ void render_overlay(){
 			}
 
 			Face& face = faceInstance.getFace();
-			const FaceShader& faceShader = face.getShader();
-			const int flags = faceShader.shaderFlags();
-			if ( !face.contributes() || face.isFiltered() || ( flags & QER_NODRAW ) != 0 || ( flags & QER_SKY ) != 0 ) {
+			if ( !brush_face_receives_preview_lighting( node, face ) ) {
 				++faceIndex;
 				return;
 			}
@@ -2298,12 +2853,18 @@ void render_overlay(){
 
 	for ( auto& [ node, cache ] : g_previewLighting.patches )
 	{
+		if ( node != nullptr && !node->visible() ) {
+			continue;
+		}
 		PatchInstance* patch = cache.instance;
 		if ( patch == nullptr ) {
 			continue;
 		}
 
 		Patch& patchRef = patch->getPatch();
+		if ( !patch_receives_preview_lighting( node, patchRef ) ) {
+			continue;
+		}
 		const PatchTesselation& tess = patchRef.getTesselation();
 		if ( tess.m_vertices.empty() ) {
 			continue;
@@ -2356,8 +2917,26 @@ void PreviewLighting_Enable( bool enable ){
 	}
 
 	g_previewLighting.active = enable;
+	if ( enable ) {
+		g_previewLighting.sceneDirty = true;
+	}
+}
+
+void PreviewLighting_SetModel( int model ){
+	if ( model < 0 || model >= PREVIEW_LIGHTING_MODEL_COUNT ) {
+		model = PREVIEW_LIGHTING_MODEL_BAKED_OVERLAY;
+	}
+
+	if ( g_previewLighting.model == model ) {
+		return;
+	}
+
+	g_previewLighting.model = model;
 	g_previewLighting.sceneDirty = true;
-	g_previewLighting.pendingClearGL = !enable;
+}
+
+int PreviewLighting_GetModel(){
+	return g_previewLighting.model;
 }
 
 void PreviewLighting_UpdateIfNeeded(){

@@ -25,6 +25,7 @@ Sources used:
 - Build fixes: updated asset-drop worldspawn handling to match the reference-return signature and resolve a build break.
 - Build fixes: replaced texture hover shader clear with empty assignment to match CopiedString API and restore builds.
 - Build fixes: restored the missing cuboid brush creation helper used by asset drop to resolve linker errors.
+- Asset drop: model drag-and-drop now places created `misc_model` entities flush on top of the hit surface (accounts for entity origin and model bounds).
 - Build fixes: aligned patch insert/remove declarations with their implementations to resolve compilation errors.
 - Build fixes: declared Quake3 shader stage helpers before use so the shaders plugin builds cleanly.
 - Build fixes: include qtexture_t definition for shader preview, clamp FloatFormat output length, use Qt6 checkbox signals, pull in stringio helpers for tools prefs, and quiet missing DLL probes in MSYS2 packaging.
@@ -34,6 +35,15 @@ Sources used:
 - Build fixes: resolved MinGW/GCC build breaks in the new preview lighting code caused by float/double `std::max` template deduction, and aligned CamWnd member initializer order to silence `-Wreorder`.
 - Runtime stability: relaxed mapfile lookup in preview graphs so empty paths no longer trigger mapfile lookup crashes in browser views.
 - Runtime stability: preview lighting now registers scene-change callbacks only when enabled and disables the preview shader pass if its GLSL shaders fail to load.
+- Preview lighting: fixed shader-file tokenising so q3map2 directives (e.g. `q3map_surfacelight`, `q3map_skyLight`, `q3map_sunExt`) parse across newlines without console spam (and so skies/surfacelights contribute to the preview).
+- Preview lighting: preserve lighting/shadow caches when hiding geometry or leaving Lighting mode, and keep change tagging active while the preview is off so re-enabling only rebuilds affected geometry.
+- Preview lighting performance: defer scene rescans until Lighting mode is active, cache map bounds from rescans for directional shadow rays, and switch same-size lightmap texture refreshes from `glTexImage2D` to `glTexSubImage2D`.
+- Preview lighting: keep the camera-view void background using the standard camera background colour (grey) while in Lighting mode.
+- Preview lighting: reset GL state for the overlay pass (unbind program, disable stale client arrays, use `GL_REPLACE`) to avoid overly dark/tinted Lighting-mode output.
+- Preview lighting: treat shaders with q3map2 sky lighting directives as sky portals even if `QER_SKY` isn't set, and keep them out of the shadow BVH so directional lighting isn't blocked.
+- Preview lighting: fixed patch invalidation hashing to include tessellated vertex/normal/index data, and unified hidden/filtered participation checks so filtered or hidden brush/patch geometry no longer contributes to surfacelight/sky extraction or shadow BVH occlusion.
+- Preview lighting: replaced the fast stencil-shadow-volume experiment with a `Fast Interaction (DarkRadiant-style)` model that renders direct lighting overlays without stencil volumes, and kept model selection in camera preferences.
+- Preview lighting: fixed fast-interaction receiver filtering to match baked-overlay eligibility, so all eligible brush/patch surfaces participate consistently across both models.
 - Startup stability: guarded OpenGL widget FBO setup in editor viewports and asset browser previews to prevent early paint crashes before valid sizing.
 - Startup stability: defer text label texture allocation until a valid GL context exists and initialize Qt OpenGL functions to prevent early `glGenTextures` crashes.
 - Startup stability: defer update-check network manager initialization and bind async callbacks to the update manager lifetime to avoid network-thread crashes on launch.
@@ -75,6 +85,9 @@ Sources used:
 - Camera view: added a real-time lighting preview mode using point lights, surface lights, and sky/worldspawn sun keys to approximate map lighting.
 - Camera view: added a menu toggle for lighting preview.
 - Camera view: overhauled the lighting preview to render a fullbright base pass with an on-the-fly, shadowed lightmap overlay (time-sliced rebuilds and per-brush dirty updates) for a closer baked-lighting look.
+- Camera view: lighting preview now includes `q3map_surfacelight` emitters even when the shader is `nodraw`.
+- Camera view: lighting preview now supports q3map2 sky directives `q3map_skyLight` (sampled skylight) and `q3map_sunExt` (deviance/samples) for closer shader-based outdoor lighting.
+- Documentation: added `docs/lighting-preview.md` describing lighting preview features, supported q3map2 directives, and implementation details.
 - Input: camera key-move handling now ignores Caps Lock state so arrow/WASD navigation works with Caps Lock enabled.
 - Gamepack model types: added `md5mesh` and `iqm` to explicit `modeltypes` lists so MD5/IQM models are available in the editor for non-wildcard game configs.
 - Releases/updates: added a `VERSION` file, release packaging workflow with update manifest generation, and an in-app auto-updater that checks GitHub releases and installs updates (Windows zip, Linux AppImage).
@@ -92,6 +105,7 @@ Sources used:
 - Asset browser: fixed entity/sound hover hit-testing and drag start, and scale entity/model tiles proportionally using per-browser max extents.
 - Asset browser: hovered entity/model tiles now ease into a continuous Z-axis rotation and snap back to the default 45/0/45 orientation when not hovered.
 - Asset browser: brush-entity drops create a notex 64^3 cube when no world brush is under the drop point.
+- Asset browser: brush-entity drops now place the created cube flush on top of the hit surface (instead of centered/sinking into the floor).
 - Asset browser: cube entity tiles use a dedicated directional light pass, and tile scaling now accounts for 45/0/45 rotated extents so angled previews fit their frames.
 - Asset browser: entity/model tiles now default to 45/0/45 rotation, fixedsize entity tiles render colored cubes, and triggers render as double-sized trigger-textured cubes.
 - Asset browser: brush-model entities render as notex-textured cubes in entity tiles.
