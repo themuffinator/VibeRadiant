@@ -24,7 +24,9 @@
 
 #include <array>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <string>
 #include <vector>
 
 #include "gtkutil/widget.h"
@@ -1516,6 +1518,9 @@ class filter_face_contents : public FaceFilter
 public:
 	filter_face_contents( int contents ) : m_contents( contents ){
 	}
+	void setContents( int contents ){
+		m_contents = contents;
+	}
 	bool filter( const Face& face ) const override {
 		return ( face.getShader().getFlags().m_contentFlags & m_contents ) != 0;
 	}
@@ -1526,6 +1531,9 @@ class filter_face_surface : public FaceFilter
 	int m_flags;
 public:
 	filter_face_surface( int flags ) : m_flags( flags ){
+	}
+	void setFlags( int flags ){
+		m_flags = flags;
 	}
 	bool filter( const Face& face ) const override {
 		return ( face.getShader().getFlags().m_surfaceFlags & m_flags ) != 0;
@@ -1546,6 +1554,101 @@ const int Q2_CONTENTS_MIST = 0x00000040;
 const int Q2_CONTENTS_AREAPORTAL = 0x00008000;
 const int Q2_CONTENTS_PLAYERCLIP = 0x00010000;
 const int Q2_CONTENTS_MONSTERCLIP = 0x00020000;
+
+std::string idtech2_normalise_flag_label( const char* label ){
+	std::string normalised;
+	if ( string_empty( label ) ) {
+		return normalised;
+	}
+	for ( const unsigned char* c = reinterpret_cast<const unsigned char*>( label ); *c != '\0'; ++c )
+	{
+		if ( std::isalnum( *c ) ) {
+			normalised.push_back( static_cast<char>( std::tolower( *c ) ) );
+		}
+	}
+	return normalised;
+}
+
+bool idtech2_content_is_clip( const std::string& label ){
+	return label.find( "playerclip" ) != std::string::npos
+	       || label.find( "monsterclip" ) != std::string::npos
+	       || label.find( "actorclip" ) != std::string::npos
+	       || label.find( "aiclip" ) != std::string::npos
+	       || label == "clip";
+}
+
+bool idtech2_content_is_liquid( const std::string& label ){
+	return label.find( "water" ) != std::string::npos
+	       || label.find( "slime" ) != std::string::npos
+	       || label.find( "lava" ) != std::string::npos
+	       || label.find( "mist" ) != std::string::npos
+	       || label.find( "smoke" ) != std::string::npos;
+}
+
+bool idtech2_content_is_areaportal( const std::string& label ){
+	return label.find( "areaportal" ) != std::string::npos;
+}
+
+bool idtech2_surface_is_hint_or_skip( const std::string& label ){
+	return label.find( "hint" ) != std::string::npos
+	       || label.find( "skip" ) != std::string::npos;
+}
+
+bool idtech2_surface_is_translucent( const std::string& label ){
+	return label.find( "trans" ) != std::string::npos
+	       || label.find( "alpha" ) != std::string::npos
+	       || label.find( "window" ) != std::string::npos
+	       || label.find( "wndw" ) != std::string::npos;
+}
+
+bool idtech2_surface_is_sky( const std::string& label ){
+	return label.find( "sky" ) != std::string::npos;
+}
+
+void idtech2_accumulate_flag_masks_from_game_description( int& clipMask,
+                                                          int& liquidMask,
+                                                          int& areaportalMask,
+                                                          int& hintSkipMask,
+                                                          int& translucentMask,
+                                                          int& skyMask ){
+	for ( int i = 1; i <= 32; ++i )
+	{
+		const auto key = StringStream<16>( "cont", i );
+		const auto label = idtech2_normalise_flag_label( GlobalRadiant().getGameDescriptionKeyValue( key ) );
+		if ( label.empty() ) {
+			continue;
+		}
+		const int bit = 1 << ( i - 1 );
+		if ( idtech2_content_is_clip( label ) ) {
+			clipMask |= bit;
+		}
+		if ( idtech2_content_is_liquid( label ) ) {
+			liquidMask |= bit;
+		}
+		if ( idtech2_content_is_areaportal( label ) ) {
+			areaportalMask |= bit;
+		}
+	}
+
+	for ( int i = 1; i <= 32; ++i )
+	{
+		const auto key = StringStream<16>( "surf", i );
+		const auto label = idtech2_normalise_flag_label( GlobalRadiant().getGameDescriptionKeyValue( key ) );
+		if ( label.empty() ) {
+			continue;
+		}
+		const int bit = 1 << ( i - 1 );
+		if ( idtech2_surface_is_hint_or_skip( label ) ) {
+			hintSkipMask |= bit;
+		}
+		if ( idtech2_surface_is_translucent( label ) ) {
+			translucentMask |= bit;
+		}
+		if ( idtech2_surface_is_sky( label ) ) {
+			skyMask |= bit;
+		}
+	}
+}
 
 
 
@@ -1694,6 +1797,28 @@ filter_brush_any_face g_filter_brush_sky_q2_flags( &g_filter_face_sky_q2_flags )
 
 void BrushFilters_construct(){
 	const bool isQuake2 = string_equal( GlobalRadiant().getRequiredGameDescriptionKeyValue( "brushtypes" ), "quake2" );
+	if ( isQuake2 ) {
+		int clipMask = Q2_CONTENTS_PLAYERCLIP | Q2_CONTENTS_MONSTERCLIP;
+		int liquidMask = Q2_CONTENTS_WATER | Q2_CONTENTS_SLIME | Q2_CONTENTS_LAVA | Q2_CONTENTS_MIST;
+		int areaportalMask = Q2_CONTENTS_AREAPORTAL;
+		int hintSkipMask = Q2_SURF_HINT | Q2_SURF_SKIP;
+		int translucentMask = Q2_SURF_TRANS33 | Q2_SURF_TRANS66;
+		int skyMask = Q2_SURF_SKY;
+
+		idtech2_accumulate_flag_masks_from_game_description( clipMask,
+		                                                     liquidMask,
+		                                                     areaportalMask,
+		                                                     hintSkipMask,
+		                                                     translucentMask,
+		                                                     skyMask );
+
+		g_filter_face_clip_q2_flags.setContents( clipMask );
+		g_filter_face_liquids_q2_flags.setContents( liquidMask );
+		g_filter_face_areaportal_q2_flags.setContents( areaportalMask );
+		g_filter_face_hint_q2_flags.setFlags( hintSkipMask );
+		g_filter_face_translucent_q2_flags.setFlags( translucentMask );
+		g_filter_face_sky_q2_flags.setFlags( skyMask );
+	}
 
 	add_brush_filter( g_filter_brush_clip, EXCLUDE_CLIP );
 	add_brush_filter( g_filter_brush_clip_q2, EXCLUDE_CLIP );

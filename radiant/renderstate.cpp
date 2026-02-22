@@ -30,12 +30,15 @@
 #include "iglrender.h"
 #include "renderable.h"
 #include "qerplugin.h"
+#include "ientity.h"
 
 #include <algorithm>
+#include <cctype>
 #include <set>
 #include <vector>
 #include <list>
 #include <map>
+#include <string>
 
 #include "math/matrix.h"
 #include "math/aabb.h"
@@ -51,6 +54,7 @@
 #include "os/file.h"
 #include "preferences.h"
 
+#include "map.h"
 #include "xywindow.h"
 #include "camwindow.h"
 
@@ -87,6 +91,92 @@ inline void debug_colour( const char* comment ){
 	}
 	globalOutputStream() << '\n';
 #endif
+}
+
+const int c_q2SurfSkyFallbackMask = 0x00000004;
+
+bool game_uses_quake2_brushes(){
+	return string_equal( GlobalRadiant().getRequiredGameDescriptionKeyValue( "brushtypes" ), "quake2" );
+}
+
+std::string normalise_flag_label_for_lookup( const char* label ){
+	std::string normalised;
+	if ( string_empty( label ) ) {
+		return normalised;
+	}
+	for ( const unsigned char* c = reinterpret_cast<const unsigned char*>( label ); *c != '\0'; ++c )
+	{
+		if ( std::isalnum( *c ) ) {
+			normalised.push_back( static_cast<char>( std::tolower( *c ) ) );
+		}
+	}
+	return normalised;
+}
+
+int quake2_game_sky_surface_mask(){
+	int mask = c_q2SurfSkyFallbackMask;
+	if ( !game_uses_quake2_brushes() ) {
+		return mask;
+	}
+
+	for ( int i = 1; i <= 32; ++i )
+	{
+		const auto key = StringStream<16>( "surf", i );
+		const auto label = normalise_flag_label_for_lookup( GlobalRadiant().getGameDescriptionKeyValue( key ) );
+		if ( label.find( "sky" ) != std::string::npos ) {
+			mask |= ( 1 << ( i - 1 ) );
+		}
+	}
+
+	return mask;
+}
+
+std::string quake2_worldspawn_skybox_name(){
+	if ( !game_uses_quake2_brushes() ) {
+		return {};
+	}
+
+	scene::Node* worldspawnNode = Map_FindWorldspawn( g_map );
+	if ( worldspawnNode == nullptr ) {
+		return {};
+	}
+
+	Entity* worldspawn = Node_getEntity( *worldspawnNode );
+	if ( worldspawn == nullptr ) {
+		return {};
+	}
+
+	const char* sky = worldspawn->getKeyValue( "sky" );
+	if ( string_empty( sky ) ) {
+		return {};
+	}
+
+	std::string skyboxName = sky;
+	if ( !string_equal_nocase_n( skyboxName.c_str(), "env/", 4 ) ) {
+		skyboxName = std::string( "env/" ) + skyboxName;
+	}
+
+	return skyboxName;
+}
+
+bool shader_is_quake2_sky_surface( const IShader& shader ){
+	if ( !game_uses_quake2_brushes() ) {
+		return false;
+	}
+	qtexture_t* texture = shader.getTexture();
+	return texture != nullptr
+	       && ( texture->surfaceFlags & quake2_game_sky_surface_mask() ) != 0;
+}
+
+qtexture_t* capture_quake2_worldspawn_skybox(){
+	const std::string skyboxName = quake2_worldspawn_skybox_name();
+	if ( skyboxName.empty() ) {
+		return nullptr;
+	}
+	return GlobalTexturesCache().capture(
+		LoadImageCallback( 0, GlobalTexturesCache().defaultLoader().m_func, true ),
+		skyboxName.c_str()
+	);
 }
 
 #include "timer.h"
@@ -831,10 +921,11 @@ class OpenGLShader final : public Shader
 	typedef std::list<OpenGLStateBucket*> Passes;
 	Passes m_passes;
 	IShader* m_shader;
+	qtexture_t* m_quake2SkyBox;
 	std::size_t m_used;
 	ModuleObservers m_observers;
 public:
-	OpenGLShader() : m_shader( 0 ), m_used( 0 ){
+	OpenGLShader() : m_shader( 0 ), m_quake2SkyBox( 0 ), m_used( 0 ){
 	}
 	~OpenGLShader() = default;
 	void construct( const char* name );
@@ -843,6 +934,10 @@ public:
 			m_shader->DecRef();
 		}
 		m_shader = 0;
+		if ( m_quake2SkyBox != 0 ) {
+			GlobalTexturesCache().release( m_quake2SkyBox );
+			m_quake2SkyBox = 0;
+		}
 
 		for ( auto *bucket : m_passes )
 		{
@@ -2415,6 +2510,19 @@ void OpenGLShader::construct( const char* name ){
 		{
 			state.m_texture = m_shader->getTexture()->texture_number;
 			state.m_textureSkyBox = m_shader->getSkyBox()->texture_number;
+
+			state.m_state = RENDER_FILL | RENDER_CULLFACE | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_DEPTHWRITE | RENDER_COLOURWRITE | RENDER_PROGRAM;
+			state.m_colour = Vector4( m_shader->getTexture()->color, 1 );
+			state.m_sort = OpenGLState::eSortFullbright;
+
+			state.m_program = &g_skyboxGLSL;
+		}
+		else if ( shader_is_quake2_sky_surface( *m_shader )
+		       && ( m_quake2SkyBox = capture_quake2_worldspawn_skybox() ) != nullptr
+		       && m_quake2SkyBox->texture_number != 0 )
+		{
+			state.m_texture = m_shader->getTexture()->texture_number;
+			state.m_textureSkyBox = m_quake2SkyBox->texture_number;
 
 			state.m_state = RENDER_FILL | RENDER_CULLFACE | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_DEPTHWRITE | RENDER_COLOURWRITE | RENDER_PROGRAM;
 			state.m_colour = Vector4( m_shader->getTexture()->color, 1 );

@@ -25,7 +25,9 @@
 #include "iselection.h"
 #include "imodel.h"
 #include "ifilesystem.h"
+#include "ishaders.h"
 #include "iundo.h"
+#include "qerplugin.h"
 
 #include "eclasslib.h"
 #include "scenelib.h"
@@ -172,6 +174,11 @@ public:
 
 void Scene_EntitySetKeyValue_Selected( const char* key, const char* value ){
 	GlobalSceneGraph().traverse( EntitySetKeyValueSelected( key, value ) );
+	if ( string_equal_nocase( key, "sky" )
+	  && string_equal( GlobalRadiant().getRequiredGameDescriptionKeyValue( "brushtypes" ), "quake2" ) ) {
+		// Quake2-family env skyboxes are sourced from worldspawn "sky", so rebuild shader states when it changes.
+		GlobalShaderSystem().refresh();
+	}
 }
 
 void Scene_EntitySetClassname_Selected( const char* classname ){

@@ -132,6 +132,20 @@ void gamedetect(){
 			if ( gamedetect_check_game( "q1.game", "id1/pak0.pak", nullptr, buf, p - buf ) ) {
 				return;
 			}
+			// try to detect idTech2 installs
+			// check rerelease first because it also contains baseq2 assets
+			if ( gamedetect_check_game( "q2re.game", "baseq2/pak0.pak", "rerelease", buf, p - buf ) ) {
+				return;
+			}
+			if ( gamedetect_check_game( "q2.game", "baseq2/pak0.pak", nullptr, buf, p - buf ) ) {
+				return;
+			}
+			if ( gamedetect_check_game( "heretic2.game", "base/pak0.pak", nullptr, buf, p - buf ) ) {
+				return;
+			}
+			if ( gamedetect_check_game( "kingpin.game", "main/pak0.pak", nullptr, buf, p - buf ) ) {
+				return;
+			}
 			// try to detect Nexuiz installs
 #if defined( WIN32 )
 			if ( gamedetect_check_game( "nexuiz.game", "data/common-spog.pk3", "nexuiz.exe", buf, p - buf ) )
@@ -141,11 +155,6 @@ void gamedetect(){
 			if ( gamedetect_check_game( "nexuiz.game", "data/common-spog.pk3", "nexuiz-linux-glx.sh", buf, p - buf ) )
 #endif
 			{
-				return;
-			}
-
-			// try to detect Q2World installs
-			if ( gamedetect_check_game( "q2w.game", "default/quake2world.version", nullptr, buf, p - buf ) ) {
 				return;
 			}
 

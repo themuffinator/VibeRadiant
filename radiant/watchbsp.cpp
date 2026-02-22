@@ -169,8 +169,8 @@ public:
 template<bool isMP>
 CopiedString constructEngineArgs(){
 	StringOutputStream string( 256 );
-	if ( g_pGameDescription->mGameType == "q2"
-	  || g_pGameDescription->mGameType == "heretic2" ) {
+	const bool isIdTech2 = string_equal( g_pGameDescription->getRequiredKeyValue( "brushtypes" ), "quake2" );
+	if ( isIdTech2 ) {
 		string << ". +exec radiant.cfg +map %mapname%";
 	}
 	else{

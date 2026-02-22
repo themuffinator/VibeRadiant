@@ -69,6 +69,12 @@
 #include "brush.h"
 #include "grid.h"
 
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
 class NameObserver
 {
 	UniqueNames& m_names;
@@ -1539,93 +1545,472 @@ void Map_RegionBrush(){
 //Map_ImportFile
 //================
 //
+namespace
+{
+struct BspHeaderInfo
+{
+	char ident[5]{};
+	int version = 0;
+	bool valid = false;
+};
+
+bool read_bsp_header_info( const char* filename, BspHeaderInfo& header ){
+	FILE* file = fopen( filename, "rb" );
+	if ( file == nullptr ) {
+		return false;
+	}
+
+	std::array<unsigned char, 8> bytes{};
+	const auto read = fread( bytes.data(), 1, bytes.size(), file );
+	fclose( file );
+	if ( read != bytes.size() ) {
+		return false;
+	}
+
+	std::memcpy( header.ident, bytes.data(), 4 );
+	header.ident[4] = '\0';
+	const auto version = static_cast<uint32_t>( bytes[4] )
+	                   | ( static_cast<uint32_t>( bytes[5] ) << 8 )
+	                   | ( static_cast<uint32_t>( bytes[6] ) << 16 )
+	                   | ( static_cast<uint32_t>( bytes[7] ) << 24 );
+	header.version = static_cast<int>( version );
+	header.valid = true;
+	return true;
+}
+
+void append_unique_game( std::vector<CopiedString>& games, const char* game ){
+	if ( string_empty( game ) ) {
+		return;
+	}
+	for ( const auto& existing : games )
+	{
+		if ( string_equal_nocase( existing.c_str(), game ) ) {
+			return;
+		}
+	}
+	games.emplace_back( game );
+}
+
+const char* game_type_to_q3map2_type( const char* gameType ){
+	if ( string_empty( gameType ) ) {
+		return "";
+	}
+
+	if ( string_equal_nocase( gameType, "q3" ) ) {
+		return "quake3";
+	}
+	if ( string_equal_nocase( gameType, "trem" ) ) {
+		return "tremulous";
+	}
+	if ( string_equal_nocase( gameType, "stvef" ) ) {
+		return "ef";
+	}
+	if ( string_equal_nocase( gameType, "warsow" ) || string_equal_nocase( gameType, "warfork" ) ) {
+		return "qfusion";
+	}
+
+	static const char* knownQ3Map2Games[] = {
+		"quake3", "quakelive", "nexuiz", "xonotic", "tremulous", "unvanquished",
+		"tenebrae", "wolf", "et", "etut", "ef", "qfusion", "reaction",
+		"darkplaces", "dq", "prophecy", "sof2", "jk2", "ja"
+	};
+	for ( const char* known : knownQ3Map2Games )
+	{
+		if ( string_equal_nocase( gameType, known ) ) {
+			return known;
+		}
+	}
+	return "";
+}
+
+void append_games( std::vector<CopiedString>& games, const char* const* entries, std::size_t count ){
+	for ( std::size_t i = 0; i < count; ++i )
+	{
+		append_unique_game( games, entries[i] );
+	}
+}
+
+std::vector<CopiedString> build_q3map2_bsp_game_candidates( const BspHeaderInfo& header ){
+	std::vector<CopiedString> games;
+	append_unique_game( games, GlobalRadiant().getGameDescriptionKeyValue( "q3map2_type" ) );
+	append_unique_game( games, game_type_to_q3map2_type( GlobalRadiant().getGameDescriptionKeyValue( "type" ) ) );
+
+	static const char* idTech3IBSP46Games[] = {
+		"quake3", "ef", "nexuiz", "xonotic", "tremulous", "unvanquished",
+		"tenebrae", "reaction", "darkplaces", "dq", "prophecy"
+	};
+	static const char* idTech3IBSP47Games[] = { "quakelive", "et", "wolf", "etut" };
+	static const char* idTech3RBSPGames[] = { "sof2", "jk2", "ja" };
+	static const char* idTech3FallbackGames[] = {
+		"quake3", "quakelive", "nexuiz", "xonotic", "tremulous", "unvanquished",
+		"tenebrae", "wolf", "et", "etut", "ef", "qfusion", "reaction",
+		"darkplaces", "dq", "prophecy", "sof2", "jk2", "ja"
+	};
+
+	if ( header.valid ) {
+		if ( string_equal( header.ident, "IBSP" ) ) {
+			if ( header.version == 47 ) {
+				append_games( games, idTech3IBSP47Games, std::size( idTech3IBSP47Games ) );
+			}
+			else if ( header.version == 46 ) {
+				append_games( games, idTech3IBSP46Games, std::size( idTech3IBSP46Games ) );
+			}
+			else if ( header.version > 41 ) {
+				append_games( games, idTech3FallbackGames, std::size( idTech3FallbackGames ) );
+			}
+		}
+		else if ( string_equal( header.ident, "RBSP" ) ) {
+			if ( header.version == 1 ) {
+				append_games( games, idTech3RBSPGames, std::size( idTech3RBSPGames ) );
+			}
+		}
+		else if ( string_equal( header.ident, "FBSP" ) ) {
+			if ( header.version == 1 ) {
+				append_unique_game( games, "qfusion" );
+			}
+		}
+	}
+
+	if ( games.empty() && !string_equal( GlobalRadiant().getRequiredGameDescriptionKeyValue( "brushtypes" ), "quake2" ) ) {
+		append_unique_game( games, "quake3" );
+	}
+
+	return games;
+}
+
+bool prefer_mbspc_for_bsp( const BspHeaderInfo& header ){
+	const bool currentIsIdTech2 = string_equal( GlobalRadiant().getRequiredGameDescriptionKeyValue( "brushtypes" ), "quake2" );
+	if ( !header.valid ) {
+		return currentIsIdTech2;
+	}
+
+	if ( string_equal( header.ident, "IBSP" ) ) {
+		if ( header.version <= 41 ) {
+			return true;
+		}
+		if ( header.version >= 46 ) {
+			return false;
+		}
+	}
+
+	if ( string_equal( header.ident, "RBSP" ) && header.version == 1 ) {
+		return currentIsIdTech2; // ambiguous between SiN-derived idTech2 and Raven idTech3 RBSP
+	}
+
+	return currentIsIdTech2;
+}
+
+bool is_known_idtech3_bsp( const BspHeaderInfo& header ){
+	if ( !header.valid ) {
+		return false;
+	}
+
+	if ( string_equal( header.ident, "IBSP" ) ) {
+		return header.version > 41;
+	}
+
+	if ( string_equal( header.ident, "RBSP" ) && header.version == 1 ) {
+		return true;
+	}
+
+	if ( string_equal( header.ident, "FBSP" ) && header.version == 1 ) {
+		return true;
+	}
+
+	return false;
+}
+
+bool is_likely_idtech2_bsp( const BspHeaderInfo& header ){
+	const bool currentIsIdTech2 = string_equal( GlobalRadiant().getRequiredGameDescriptionKeyValue( "brushtypes" ), "quake2" );
+	if ( !header.valid ) {
+		return currentIsIdTech2;
+	}
+
+	if ( string_equal( header.ident, "IBSP" ) && header.version <= 41 ) {
+		return true;
+	}
+
+	// SiN RBSP collides with Raven RBSP v1; prefer current game context.
+	if ( string_equal( header.ident, "RBSP" ) && header.version == 1 && currentIsIdTech2 ) {
+		return true;
+	}
+
+	if ( is_known_idtech3_bsp( header ) ) {
+		return false;
+	}
+
+	return currentIsIdTech2;
+}
+
+bool file_exists( const char* filename ){
+	if ( FILE* file = fopen( filename, "rb" ) ) {
+		fclose( file );
+		return true;
+	}
+	return false;
+}
+
+bool import_map_resource( const char* filename ){
+	const EBrushType brush_type = GlobalBrushCreator().getFormat();
+
+	Resource* resource = GlobalReferenceCache().capture( filename );
+	resource->refresh(); // avoid loading old version if map has changed on disk since last import
+	if ( !resource->load() ) {
+		GlobalReferenceCache().release( filename );
+		if ( brush_type != GlobalBrushCreator().getFormat() ) {
+			GlobalBrushCreator().toggleFormat( brush_type );
+		}
+		return false;
+	}
+	if ( brush_type != GlobalBrushCreator().getFormat() ) {
+		Node_getTraversable( *resource->getNode() )->traverse( Convert_Brushes( BrushType_getTexdefType( GlobalBrushCreator().getFormat() ), BrushType_getTexdefType( brush_type ) ) );
+		GlobalBrushCreator().toggleFormat( brush_type );
+	}
+	NodeSmartReference clone( NewMapRoot( "" ) );
+	Node_getTraversable( *resource->getNode() )->traverse( CloneAll( clone ) );
+	Map_mergeLayers( clone, Node_getLayers( *resource->getNode() ) );
+	resource->flush(); /* wipe map from cache to not spoil namespace */
+	GlobalReferenceCache().release( filename );
+	Map_gatherNamespaced( clone );
+	Map_mergeClonedNames();
+	MergeMap( clone );
+	return true;
+}
+
+bool try_q3map2_decompile_import( const char* sourceFilename, bool readMap, const std::vector<CopiedString>& gameArgs ){
+	if ( gameArgs.empty() ) {
+		return false;
+	}
+
+	StringOutputStream convertedMap( 256 );
+	convertedMap( PathExtensionless( sourceFilename ), "_converted.map" );
+
+	for ( const auto& game : gameArgs )
+	{
+		globalOutputStream() << "Import attempt: q3map2 -game " << game.c_str() << '\n';
+		std::remove( convertedMap.c_str() );
+
+		StringOutputStream q3map2Executable( 256 );
+		q3map2Executable << AppPath_get() << "q3map2." << RADIANT_EXECUTABLE;
+
+		StringOutputStream command( 1024 );
+		command << Quoted( q3map2Executable.c_str() )
+		        << " -v -game " << game.c_str()
+		        << " -fs_basepath " << Quoted( EnginePath_get() )
+		        << " -fs_homepath " << Quoted( g_qeglobals.m_userEnginePath )
+		        << " -fs_game " << gamename_get()
+		        << " -convert -format " << ( BrushType_getTexdefType( GlobalBrushCreator().getFormat() ) == TEXDEFTYPEID_QUAKE ? "map" : "map_bp" );
+		if ( readMap ) {
+			command << " -readmap";
+		}
+		command << ' ' << Quoted( sourceFilename );
+
+		Q_Exec( nullptr, command.c_str(), nullptr, false, true );
+
+		if ( !file_exists( convertedMap.c_str() ) ) {
+			globalErrorStream() << "q3map2 did not produce " << convertedMap.c_str() << '\n';
+			continue;
+		}
+
+		if ( import_map_resource( convertedMap.c_str() ) ) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool try_bsputil_decompile_import( const char* bspFilename, bool ignoreBrushes ){
+	std::vector<CopiedString> decompiledMaps;
+	{
+		StringOutputStream decompiledMap( 512 );
+		decompiledMap << bspFilename << ".decompile.map";
+		append_unique_game( decompiledMaps, decompiledMap.c_str() );
+	}
+	{
+		StringOutputStream decompiledMap( 256 );
+		decompiledMap( PathExtensionless( bspFilename ), ".decompile.map" );
+		append_unique_game( decompiledMaps, decompiledMap.c_str() );
+	}
+
+	std::vector<CopiedString> bsputilExecutables;
+	{
+		StringOutputStream appExe( 256 );
+		appExe << AppPath_get() << "bsputil." << RADIANT_EXECUTABLE;
+		if ( file_exists( appExe.c_str() ) ) {
+			append_unique_game( bsputilExecutables, appExe.c_str() );
+		}
+	}
+	{
+		StringOutputStream appNoExt( 256 );
+		appNoExt << AppPath_get() << "bsputil";
+		if ( file_exists( appNoExt.c_str() ) ) {
+			append_unique_game( bsputilExecutables, appNoExt.c_str() );
+		}
+	}
+	{
+		StringOutputStream pathExe( 64 );
+		pathExe << "bsputil." << RADIANT_EXECUTABLE;
+		append_unique_game( bsputilExecutables, pathExe.c_str() );
+	}
+	append_unique_game( bsputilExecutables, "bsputil" );
+
+	for ( const auto& executable : bsputilExecutables )
+	{
+		globalOutputStream() << "Import attempt: bsputil "
+		                     << ( ignoreBrushes ? "--decompile-ignore-brushes" : "--decompile" )
+		                     << " (" << executable.c_str() << ")\n";
+		for ( const auto& decompiledMap : decompiledMaps )
+		{
+			std::remove( decompiledMap.c_str() );
+		}
+
+		StringOutputStream command( 1024 );
+		command << Quoted( executable.c_str() ) << ' '
+		        << ( ignoreBrushes ? "--decompile-ignore-brushes " : "--decompile " )
+		        << Quoted( bspFilename );
+
+		if ( !Q_Exec( nullptr, command.c_str(), nullptr, false, true ) ) {
+			globalErrorStream() << "Failed to execute " << executable.c_str() << '\n';
+			continue;
+		}
+
+		const char* producedMap = nullptr;
+		for ( const auto& decompiledMap : decompiledMaps )
+		{
+			if ( file_exists( decompiledMap.c_str() ) ) {
+				producedMap = decompiledMap.c_str();
+				break;
+			}
+		}
+
+		if ( producedMap == nullptr ) {
+			globalErrorStream() << "bsputil did not produce expected output:";
+			for ( const auto& decompiledMap : decompiledMaps )
+			{
+				globalErrorStream() << ' ' << decompiledMap.c_str();
+			}
+			globalErrorStream() << '\n';
+			continue;
+		}
+
+		if ( import_map_resource( producedMap ) ) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool try_mbspc_decompile_import( const char* bspFilename, bool valve220 ){
+	StringOutputStream decompiledMap( 256 );
+	decompiledMap( PathExtensionless( bspFilename ), "_decompiled.map" );
+
+	globalOutputStream() << "Import attempt: mbspc " << ( valve220 ? "-bsp2map220" : "-bsp2map" ) << '\n';
+	std::remove( decompiledMap.c_str() );
+
+	StringOutputStream mbspcExecutable( 256 );
+	mbspcExecutable << AppPath_get() << "mbspc." << RADIANT_EXECUTABLE;
+
+	StringOutputStream command( 1024 );
+	command << Quoted( mbspcExecutable.c_str() )
+	        << ( valve220 ? " -bsp2map220 " : " -bsp2map " ) << Quoted( bspFilename );
+
+	if ( !Q_Exec( nullptr, command.c_str(), nullptr, false, true ) ) {
+		globalErrorStream() << "Failed to execute " << mbspcExecutable.c_str() << '\n';
+		return false;
+	}
+
+	if ( !file_exists( decompiledMap.c_str() ) ) {
+		globalErrorStream() << "mbspc did not produce " << decompiledMap.c_str() << '\n';
+		return false;
+	}
+
+	return import_map_resource( decompiledMap.c_str() );
+}
+
+bool try_idtech2_bsputil_style_decompile_import( const char* bspFilename ){
+	// Prefer EricWTools bsputil semantics when available.
+	if ( try_bsputil_decompile_import( bspFilename, false ) ) {
+		return true;
+	}
+	if ( try_bsputil_decompile_import( bspFilename, true ) ) {
+		return true;
+	}
+
+	// Built-in fallback: Valve220 first (closer to bsputil output), then legacy.
+	if ( try_mbspc_decompile_import( bspFilename, true ) ) {
+		return true;
+	}
+	return try_mbspc_decompile_import( bspFilename, false );
+}
+}
+
 bool Map_ImportFile( const char* filename ){
 	ScopeDisableScreenUpdates disableScreenUpdates( "Processing...", "Loading Map" );
 
 	bool success = false;
+	const bool isBsp = path_extension_is( filename, "bsp" );
 
-	if ( path_extension_is( filename, "bsp" ) ) {
-		goto tryDecompile;
+	if ( !isBsp ) {
+		success = import_map_resource( filename );
+		if ( success ) {
+			SceneChangeNotify();
+			return true;
+		}
 	}
 
-	{
-		const EBrushType brush_type = GlobalBrushCreator().getFormat();
-
-		Resource* resource = GlobalReferenceCache().capture( filename );
-		resource->refresh(); // avoid loading old version if map has changed on disk since last import
-		if ( !resource->load() ) {
-			GlobalReferenceCache().release( filename );
-			if ( brush_type != GlobalBrushCreator().getFormat() ) {
-				GlobalBrushCreator().toggleFormat( brush_type );
-			}
-			goto tryDecompile;
-		}
-		if ( brush_type != GlobalBrushCreator().getFormat() ) {
-			Node_getTraversable( *resource->getNode() )->traverse( Convert_Brushes( BrushType_getTexdefType( GlobalBrushCreator().getFormat() ), BrushType_getTexdefType( brush_type ) ) );
-			GlobalBrushCreator().toggleFormat( brush_type );
-		}
-		NodeSmartReference clone( NewMapRoot( "" ) );
-		Node_getTraversable( *resource->getNode() )->traverse( CloneAll( clone ) );
-		Map_mergeLayers( clone, Node_getLayers( *resource->getNode() ) );
-		resource->flush(); /* wipe map from cache to not spoil namespace */
-		GlobalReferenceCache().release( filename );
-		Map_gatherNamespaced( clone );
-		Map_mergeClonedNames();
-		MergeMap( clone );
-		success = true;
-	}
-
-	SceneChangeNotify();
-
-	return success;
-
-tryDecompile:
-
-	const char *type = GlobalRadiant().getGameDescriptionKeyValue( "q3map2_type" );
 	if ( path_extension_is( filename, "bsp" ) || path_extension_is( filename, "map" ) ) {
-		StringOutputStream str( 256 );
-		str << AppPath_get() << "q3map2." << RADIANT_EXECUTABLE
-		    << " -v -game " << ( ( type && *type ) ? type : "quake3" )
-		    << " -fs_basepath " << Quoted( EnginePath_get() )
-		    << " -fs_homepath " << Quoted( g_qeglobals.m_userEnginePath )
-		    << " -fs_game " << gamename_get()
-		    << " -convert -format " << ( BrushType_getTexdefType( GlobalBrushCreator().getFormat() ) == TEXDEFTYPEID_QUAKE ? "map" : "map_bp" );
-		if ( path_extension_is( filename, "map" ) ) {
-			str << " -readmap ";
-		}
-		str << ' ' << Quoted( filename );
-
-		// run
-		Q_Exec( nullptr, str.c_str(), nullptr, false, true );
-
-		// rebuild filename as "filenamewithoutext_converted.map"
-		str( PathExtensionless( filename ), "_converted.map" );
-		filename = str.c_str();
-
-		const EBrushType brush_type = GlobalBrushCreator().getFormat();
-		// open
-		Resource* resource = GlobalReferenceCache().capture( filename );
-		resource->refresh(); // avoid loading old version if map has changed on disk since last import
-		if ( !resource->load() ) {
-			GlobalReferenceCache().release( filename );
-			if ( brush_type != GlobalBrushCreator().getFormat() ) {
-				GlobalBrushCreator().toggleFormat( brush_type );
+		if ( isBsp ) {
+			BspHeaderInfo header;
+			if ( read_bsp_header_info( filename, header ) ) {
+				globalOutputStream() << "BSP import detected format " << header.ident << " version " << header.version << '\n';
 			}
-			return success;
+			else{
+				globalErrorStream() << "BSP import could not read header for " << filename << ", trying both decompile strategies.\n";
+			}
+
+			const auto q3map2Games = build_q3map2_bsp_game_candidates( header );
+			if ( is_likely_idtech2_bsp( header ) ) {
+				success = try_idtech2_bsputil_style_decompile_import( filename );
+				if ( !success ) {
+					success = try_q3map2_decompile_import( filename, false, q3map2Games );
+				}
+			}
+			else{
+				const bool tryMbspcFirst = prefer_mbspc_for_bsp( header );
+				if ( tryMbspcFirst ) {
+					success = try_mbspc_decompile_import( filename, false );
+					if ( !success ) {
+						success = try_q3map2_decompile_import( filename, false, q3map2Games );
+					}
+				}
+				else{
+					success = try_q3map2_decompile_import( filename, false, q3map2Games );
+					if ( !success ) {
+						success = try_mbspc_decompile_import( filename, false );
+					}
+				}
+			}
+
+			if ( !success ) {
+				if ( header.valid ) {
+					globalErrorStream() << "Failed to import BSP \"" << filename << "\" (format " << header.ident << ", version " << header.version << ").\n";
+				}
+				else{
+					globalErrorStream() << "Failed to import BSP \"" << filename << "\".\n";
+				}
+			}
 		}
-		if ( brush_type != GlobalBrushCreator().getFormat() ) {
-			Node_getTraversable( *resource->getNode() )->traverse( Convert_Brushes( BrushType_getTexdefType( GlobalBrushCreator().getFormat() ), BrushType_getTexdefType( brush_type ) ) );
-			GlobalBrushCreator().toggleFormat( brush_type );
+		else{
+			std::vector<CopiedString> mapGames;
+			append_unique_game( mapGames, GlobalRadiant().getGameDescriptionKeyValue( "q3map2_type" ) );
+			append_unique_game( mapGames, game_type_to_q3map2_type( GlobalRadiant().getGameDescriptionKeyValue( "type" ) ) );
+			if ( mapGames.empty() ) {
+				append_unique_game( mapGames, "quake3" );
+			}
+			success = try_q3map2_decompile_import( filename, true, mapGames );
 		}
-		NodeSmartReference clone( NewMapRoot( "" ) );
-		Node_getTraversable( *resource->getNode() )->traverse( CloneAll( clone ) );
-		Map_mergeLayers( clone, Node_getLayers( *resource->getNode() ) );
-		resource->flush(); /* wipe map from cache to not spoil namespace */
-		GlobalReferenceCache().release( filename );
-		Map_gatherNamespaced( clone );
-		Map_mergeClonedNames();
-		MergeMap( clone );
-		success = true;
 	}
 
 	SceneChangeNotify();

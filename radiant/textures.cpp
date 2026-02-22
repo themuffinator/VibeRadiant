@@ -372,18 +372,35 @@ void qtexture_realise( qtexture_t& texture, const TextureKey& key ){
 		}
 		else {
 			Image *images[6]{};
-			/* load in order, so that Q3 cubemap is seamless in openGL, but rotated & flipped; fix misorientation in shader later */
-			const char *suffixes[] = { "_ft", "_bk", "_up", "_dn", "_rt", "_lf" };
-			for( int i = 0; i < 6; ++i ){
-				images[i] = key.first.loadImage( StringStream<64>( key.second, suffixes[i] ) );
+			auto releaseImages = [&](){
+				std::for_each_n( images, std::size( images ), []( Image *img ){ if( img != nullptr ) img->release(); } );
+				std::fill( std::begin( images ), std::end( images ), nullptr );
+			};
+			auto imagesValid = [&](){
+				return std::ranges::all_of( images, []( const Image* img ){
+					return img != nullptr
+						&& img->getWidth() > 0
+						&& img->getHeight() > 0
+						&& img->getRGBAPixels() != nullptr;
+				} );
+			};
+			auto loadSkyboxFaces = [&]( const char* const* suffixes ){
+				/* load in order, so that cubemap appears seamless in openGL; final orientation is fixed in shader */
+				for( int i = 0; i < 6; ++i ){
+					images[i] = key.first.loadImage( StringStream<64>( key.second, suffixes[i] ) );
+				}
+			};
+
+			const char *suffixesQ3[] = { "_ft", "_bk", "_up", "_dn", "_rt", "_lf" };
+			loadSkyboxFaces( suffixesQ3 );
+			if( !imagesValid() ){
+				/* idTech2 envmaps commonly use non-underscored suffixes (e.g. env/unit1_ft vs env/unit1__ft) */
+				releaseImages();
+				const char *suffixesQ2[] = { "ft", "bk", "up", "dn", "rt", "lf" };
+				loadSkyboxFaces( suffixesQ2 );
 			}
-			const bool imagesValid = std::ranges::all_of( images, []( const Image* img ){
-				return img != nullptr
-					&& img->getWidth() > 0
-					&& img->getHeight() > 0
-					&& img->getRGBAPixels() != nullptr;
-			} );
-			if( imagesValid ){
+
+			if( imagesValid() ){
 				gl().glGenTextures( 1, &texture.texture_number );
 				gl().glBindTexture( GL_TEXTURE_CUBE_MAP, texture.texture_number );
 				gl().glTexParameteri( GL_TEXTURE_CUBE_MAP, GL_GENERATE_MIPMAP, GL_FALSE );
@@ -420,7 +437,7 @@ void qtexture_realise( qtexture_t& texture, const TextureKey& key ){
 				globalErrorStream() << "Skybox load failed: " << Quoted( key.second ) << " (invalid image data)\n";
 			}
 
-			std::for_each_n( images, std::size( images ), []( Image *img ){ if( img != nullptr ) img->release(); } );
+			releaseImages();
 		}
 	}
 }
