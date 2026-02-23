@@ -37,8 +37,16 @@
 #include "irender.h"
 #include "igl.h"
 #include "moduleobserver.h"
+#include "environment.h"
 
 #include <ctime>
+#include <algorithm>
+#include <cstdlib>
+#include <fstream>
+#include <filesystem>
+#include <vector>
+#include <array>
+#include <string>
 
 #include <QWidget>
 #include <QSplashScreen>
@@ -326,6 +334,286 @@ static void installDevFiles(){
 	}
 }
 
+namespace
+{
+struct GameInstallRule
+{
+	const char* gameFile;
+	const char* checkFile1;
+	const char* checkFile2;
+	const char* const* steamSubdirs;
+	const char* const* gogSubdirs;
+};
+
+struct DetectedEngineInstall
+{
+	CopiedString path;
+	CopiedString source;
+};
+
+std::vector<DetectedEngineInstall> g_detectedEngineInstalls;
+int g_detectedEngineInstallInitialSelection = -1;
+
+const char* const g_q3_steam_subdirs[] = { "Quake 3 Arena/", "Quake III Arena/", nullptr };
+const char* const g_q3_gog_subdirs[] = { "Quake III Arena/", nullptr };
+const char* const g_q1_steam_subdirs[] = { "Quake/", "Quake 1/", nullptr };
+const char* const g_q1_gog_subdirs[] = { "Quake/", nullptr };
+const char* const g_q2_steam_subdirs[] = { "Quake 2/", "Quake II/", nullptr };
+const char* const g_q2_gog_subdirs[] = { "Quake 2/", "Quake II/", nullptr };
+const char* const g_heretic2_steam_subdirs[] = { "Heretic 2/", "Heretic II/", nullptr };
+const char* const g_heretic2_gog_subdirs[] = { "Heretic II/", nullptr };
+const char* const g_kingpin_steam_subdirs[] = { "Kingpin/", "Kingpin Life of Crime/", nullptr };
+const char* const g_kingpin_gog_subdirs[] = { "Kingpin/", "Kingpin Life of Crime/", nullptr };
+const char* const g_nexuiz_steam_subdirs[] = { "Nexuiz/", nullptr };
+const char* const g_warsow_steam_subdirs[] = { "Warsow/", nullptr };
+
+#if defined( WIN32 )
+const char* const nexuiz_check_file2 = "nexuiz.exe";
+#elif defined( __APPLE__ )
+const char* const nexuiz_check_file2 = "Nexuiz.app/Contents/Info.plist";
+#else
+const char* const nexuiz_check_file2 = "nexuiz-linux-glx.sh";
+#endif
+
+const std::array<GameInstallRule, 8> g_gameInstallRules = {{
+	{ "q3.game", "baseq3/pak0.pk3", nullptr, g_q3_steam_subdirs, g_q3_gog_subdirs },
+	{ "q1.game", "id1/pak0.pak", nullptr, g_q1_steam_subdirs, g_q1_gog_subdirs },
+	{ "q2re.game", "baseq2/pak0.pak", "rerelease", g_q2_steam_subdirs, g_q2_gog_subdirs },
+	{ "q2.game", "baseq2/pak0.pak", nullptr, g_q2_steam_subdirs, g_q2_gog_subdirs },
+	{ "heretic2.game", "base/pak0.pak", nullptr, g_heretic2_steam_subdirs, g_heretic2_gog_subdirs },
+	{ "kingpin.game", "main/pak0.pak", nullptr, g_kingpin_steam_subdirs, g_kingpin_gog_subdirs },
+	{ "nexuiz.game", "data/common-spog.pk3", nexuiz_check_file2, g_nexuiz_steam_subdirs, nullptr },
+	{ "warsow.game", "basewsw/dedicated_autoexec.cfg", nullptr, g_warsow_steam_subdirs, nullptr },
+}};
+
+const GameInstallRule* EnginePath_findInstallRule( const char* gameFile ){
+	const auto found = std::find_if( g_gameInstallRules.begin(), g_gameInstallRules.end(), [gameFile]( const auto& rule ){
+		return string_equal( rule.gameFile, gameFile );
+	} );
+	return found != g_gameInstallRules.end()? &*found : nullptr;
+}
+
+const char* EnginePath_defaultPathAttribute(){
+#if defined( WIN32 )
+	return "enginepath_win32";
+#elif defined( __APPLE__ )
+	return "enginepath_macos";
+#elif defined( __linux__ ) || defined ( __FreeBSD__ )
+	return "enginepath_linux";
+#else
+#error "unsupported platform"
+#endif
+}
+
+bool EnginePath_hasGameDataAt( const char* installRoot, const GameInstallRule& rule ){
+	if ( installRoot == nullptr || string_empty( installRoot ) ) {
+		return false;
+	}
+	const auto cleaned = StringStream( DirectoryCleaned( installRoot ) );
+	if ( !file_is_directory( cleaned.c_str() ) ) {
+		return false;
+	}
+	if ( !file_exists( StringStream( cleaned, rule.checkFile1 ) ) ) {
+		return false;
+	}
+	if ( rule.checkFile2 != nullptr && !file_exists( StringStream( cleaned, rule.checkFile2 ) ) ) {
+		return false;
+	}
+	return true;
+}
+
+bool EnginePath_hasDetectedPath( const std::vector<DetectedEngineInstall>& installs, const char* path ){
+	for ( const auto& install : installs )
+	{
+		if ( path_equal( install.path.c_str(), path ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void EnginePath_addDetectedDirectory( std::vector<DetectedEngineInstall>& installs, const char* candidatePath, const char* source ){
+	if ( candidatePath == nullptr || string_empty( candidatePath ) ) {
+		return;
+	}
+	const auto cleaned = StringStream( DirectoryCleaned( candidatePath ) );
+	if ( !file_is_directory( cleaned.c_str() ) ) {
+		return;
+	}
+	if ( EnginePath_hasDetectedPath( installs, cleaned.c_str() ) ) {
+		return;
+	}
+	installs.push_back( { cleaned.c_str(), source } );
+}
+
+void EnginePath_addDetectedInstall( std::vector<DetectedEngineInstall>& installs, const char* candidatePath, const char* source, const GameInstallRule& rule ){
+	if ( candidatePath == nullptr || string_empty( candidatePath ) ) {
+		return;
+	}
+	const auto cleaned = StringStream( DirectoryCleaned( candidatePath ) );
+	if ( !EnginePath_hasGameDataAt( cleaned.c_str(), rule ) ) {
+		return;
+	}
+	if ( EnginePath_hasDetectedPath( installs, cleaned.c_str() ) ) {
+		return;
+	}
+	installs.push_back( { cleaned.c_str(), source } );
+}
+
+void EnginePath_addUniqueDirectory( std::vector<CopiedString>& paths, const char* path ){
+	if ( path == nullptr || string_empty( path ) ) {
+		return;
+	}
+	const auto cleaned = StringStream( DirectoryCleaned( path ) );
+	if ( !file_is_directory( cleaned.c_str() ) ) {
+		return;
+	}
+	for ( const auto& existing : paths )
+	{
+		if ( path_equal( existing.c_str(), cleaned.c_str() ) ) {
+			return;
+		}
+	}
+	paths.push_back( cleaned.c_str() );
+}
+
+void EnginePath_detectNearbyInstalls( std::vector<DetectedEngineInstall>& installs, const GameInstallRule& rule ){
+	auto current = std::filesystem::path( environment_get_app_path() );
+	while ( !current.empty() )
+	{
+		EnginePath_addDetectedInstall( installs, current.string().c_str(), "Local install", rule );
+		const auto parent = current.parent_path();
+		if ( parent == current ) {
+			break;
+		}
+		current = parent;
+	}
+}
+
+#if defined( WIN32 )
+void EnginePath_parseSteamLibraryFolders( const char* path, std::vector<CopiedString>& libraryRoots ){
+	std::ifstream file( path, std::ios::in );
+	if ( !file.is_open() ) {
+		return;
+	}
+
+	std::string line;
+	while ( std::getline( file, line ) )
+	{
+		const auto pathToken = line.find( "\"path\"" );
+		if ( pathToken == std::string::npos ) {
+			continue;
+		}
+
+		auto valueStart = line.find( '"', pathToken + 6 );
+		if ( valueStart == std::string::npos ) {
+			continue;
+		}
+
+		++valueStart;
+		std::string decoded;
+		for ( auto i = valueStart; i < line.size(); ++i )
+		{
+			const auto c = line[i];
+			if ( c == '"' ) {
+				break;
+			}
+			if ( c == '\\' && i + 1 < line.size() && ( line[i + 1] == '\\' || line[i + 1] == '"' ) ) {
+				decoded.push_back( line[i + 1] );
+				++i;
+				continue;
+			}
+			decoded.push_back( c );
+		}
+
+		EnginePath_addUniqueDirectory( libraryRoots, decoded.c_str() );
+	}
+}
+
+void EnginePath_collectSteamCommonRoots( std::vector<CopiedString>& commonRoots ){
+	std::vector<CopiedString> steamRoots;
+	if ( const auto* steamDir = getenv( "STEAMDIR" ); steamDir != nullptr && !string_empty( steamDir ) ) {
+		EnginePath_addUniqueDirectory( steamRoots, steamDir );
+	}
+	if ( const auto* programFilesX86 = getenv( "PROGRAMFILES(X86)" ); programFilesX86 != nullptr && !string_empty( programFilesX86 ) ) {
+		EnginePath_addUniqueDirectory( steamRoots, StringStream( DirectoryCleaned( programFilesX86 ), "Steam/" ) );
+	}
+	if ( const auto* programFiles = getenv( "PROGRAMFILES" ); programFiles != nullptr && !string_empty( programFiles ) ) {
+		EnginePath_addUniqueDirectory( steamRoots, StringStream( DirectoryCleaned( programFiles ), "Steam/" ) );
+	}
+
+	for ( const auto& steamRoot : steamRoots )
+	{
+		std::vector<CopiedString> libraries;
+		EnginePath_addUniqueDirectory( libraries, steamRoot.c_str() );
+		EnginePath_parseSteamLibraryFolders( StringStream( steamRoot, "steamapps/libraryfolders.vdf" ), libraries );
+		for ( const auto& library : libraries )
+		{
+			EnginePath_addUniqueDirectory( commonRoots, StringStream( library, "steamapps/common/" ) );
+		}
+	}
+}
+
+void EnginePath_collectGogRoots( std::vector<CopiedString>& roots ){
+	EnginePath_addUniqueDirectory( roots, "C:/GOG Games/" );
+	if ( const auto* programFilesX86 = getenv( "PROGRAMFILES(X86)" ); programFilesX86 != nullptr && !string_empty( programFilesX86 ) ) {
+		EnginePath_addUniqueDirectory( roots, StringStream( DirectoryCleaned( programFilesX86 ), "GOG Galaxy/Games/" ) );
+	}
+	if ( const auto* programFiles = getenv( "PROGRAMFILES" ); programFiles != nullptr && !string_empty( programFiles ) ) {
+		EnginePath_addUniqueDirectory( roots, StringStream( DirectoryCleaned( programFiles ), "GOG Galaxy/Games/" ) );
+	}
+}
+#endif
+
+void EnginePath_detectFromSubdirs( std::vector<DetectedEngineInstall>& installs, const std::vector<CopiedString>& roots, const char* source, const char* const* subdirs, const GameInstallRule& rule ){
+	if ( subdirs == nullptr ) {
+		return;
+	}
+
+	for ( const auto& root : roots )
+	{
+		for ( const auto* const* subdir = subdirs; *subdir != nullptr; ++subdir )
+		{
+			EnginePath_addDetectedInstall( installs, StringStream( root, *subdir ), source, rule );
+		}
+	}
+}
+
+CopiedString EnginePath_detectedInstallLabel( const DetectedEngineInstall& install ){
+	return StringStream( install.source, " - ", install.path );
+}
+
+void EnginePath_refreshDetectedInstalls(){
+	g_detectedEngineInstalls.clear();
+	g_detectedEngineInstallInitialSelection = -1;
+
+	const auto* rule = EnginePath_findInstallRule( g_pGameDescription->mGameFile.c_str() );
+	if ( rule == nullptr ) {
+		return;
+	}
+
+	EnginePath_addDetectedDirectory( g_detectedEngineInstalls, g_strEnginePath.c_str(), "Current setting" );
+	EnginePath_addDetectedInstall(
+		g_detectedEngineInstalls,
+		g_pGameDescription->getKeyValue( EnginePath_defaultPathAttribute() ),
+		"Gamepack default",
+		*rule
+	);
+
+	EnginePath_detectNearbyInstalls( g_detectedEngineInstalls, *rule );
+
+#if defined( WIN32 )
+	std::vector<CopiedString> steamCommonRoots;
+	EnginePath_collectSteamCommonRoots( steamCommonRoots );
+	EnginePath_detectFromSubdirs( g_detectedEngineInstalls, steamCommonRoots, "Steam", rule->steamSubdirs, *rule );
+
+	std::vector<CopiedString> gogRoots;
+	EnginePath_collectGogRoots( gogRoots );
+	EnginePath_detectFromSubdirs( g_detectedEngineInstalls, gogRoots, "GOG", rule->gogSubdirs, *rule );
+#endif
+}
+} // namespace
+
 void setEnginePath( CopiedString& self, const char* value ){
 	const auto buffer = StringStream( DirectoryCleaned( value ) );
 	if ( !path_equal( buffer, self.c_str() ) ) {
@@ -355,6 +643,30 @@ void setEnginePath( CopiedString& self, const char* value ){
 	}
 }
 typedef ReferenceCaller<CopiedString, void(const char*), setEnginePath> EnginePathImportCaller;
+
+void EnginePathDetectedInstall_import( int value ){
+	if ( value == g_detectedEngineInstallInitialSelection ) {
+		return;
+	}
+	if ( value >= 0 && value < static_cast<int>( g_detectedEngineInstalls.size() ) ) {
+		setEnginePath( g_strEnginePath, g_detectedEngineInstalls[value].path.c_str() );
+	}
+}
+typedef FreeCaller<void(int), EnginePathDetectedInstall_import> EnginePathDetectedInstallImportCaller;
+
+void EnginePathDetectedInstall_export( const IntImportCallback& importCallback ){
+	int selected = -1;
+	for ( size_t i = 0; i < g_detectedEngineInstalls.size(); ++i )
+	{
+		if ( path_equal( g_detectedEngineInstalls[i].path.c_str(), g_strEnginePath.c_str() ) ) {
+			selected = static_cast<int>( i );
+			break;
+		}
+	}
+	g_detectedEngineInstallInitialSelection = selected;
+	importCallback( selected < 0? 0 : selected );
+}
+typedef FreeCaller<void(const IntImportCallback&), EnginePathDetectedInstall_export> EnginePathDetectedInstallExportCaller;
 
 
 // Extra Resource Path
@@ -412,6 +724,25 @@ void Paths_constructPreferences( PreferencesPage& page ){
 	                      StringImportCallback( EnginePathImportCaller( g_strEnginePath ) ),
 	                      StringExportCallback( StringExportCaller( g_strEnginePath ) )
 	                    );
+
+	EnginePath_refreshDetectedInstalls();
+	if ( !g_detectedEngineInstalls.empty() ) {
+		std::vector<CopiedString> labels;
+		std::vector<const char*> entries;
+		labels.reserve( g_detectedEngineInstalls.size() );
+		entries.reserve( g_detectedEngineInstalls.size() );
+		for ( const auto& install : g_detectedEngineInstalls )
+		{
+			labels.push_back( EnginePath_detectedInstallLabel( install ) );
+			entries.push_back( labels.back().c_str() );
+		}
+		page.appendCombo(
+			"Detected Installations",
+			StringArrayRange( entries ),
+			IntImportCallback( EnginePathDetectedInstallImportCaller() ),
+			IntExportCallback( EnginePathDetectedInstallExportCaller() )
+		);
+	}
 }
 void Paths_constructPage( PreferenceGroup& group ){
 	PreferencesPage page( group.createPage( "Paths", "Path Settings" ) );
@@ -474,7 +805,28 @@ PathsDialog g_PathsDialog;
 static bool g_strEnginePath_was_empty_1st_start = false;
 
 void EnginePath_verify(){
-	if ( !file_exists( g_strEnginePath.c_str() ) || g_strEnginePath_was_empty_1st_start ) {
+	bool needsPrompt = !file_exists( g_strEnginePath.c_str() ) || g_strEnginePath_was_empty_1st_start;
+	if ( needsPrompt ) {
+		EnginePath_refreshDetectedInstalls();
+		const auto* rule = EnginePath_findInstallRule( g_pGameDescription->mGameFile.c_str() );
+		const DetectedEngineInstall* autoSelection = nullptr;
+		int validInstallCount = 0;
+		for ( const auto& install : g_detectedEngineInstalls )
+		{
+			if ( rule != nullptr && EnginePath_hasGameDataAt( install.path.c_str(), *rule ) ) {
+				++validInstallCount;
+				autoSelection = &install;
+			}
+		}
+		if ( validInstallCount == 1 && autoSelection != nullptr ) {
+			g_strEnginePath = autoSelection->path;
+			g_strEnginePath_was_empty_1st_start = false;
+			needsPrompt = false;
+			globalOutputStream() << "Auto-selected detected installation (" << autoSelection->source
+			                     << ") " << Quoted( g_strEnginePath ) << '\n';
+		}
+	}
+	if ( needsPrompt ) {
 		g_installedDevFilesPath = ""; // trigger install for non existing engine path case
 		g_PathsDialog.Create( nullptr );
 		g_PathsDialog.DoModal();
@@ -636,8 +988,6 @@ void Exit(){
 		QCoreApplication::quit();
 	}
 }
-
-#include "environment.h"
 
 #ifdef WIN32
 #include <process.h>
