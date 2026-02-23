@@ -79,32 +79,36 @@ public:
 	}
 	StringBuffer evaluate() const override {
 		StringBuffer variable( 32 ), output( 256 );
-		bool in_variable = false;
+		enum class VariableSyntax{
+			none,
+			square,
+			brace
+		};
+		VariableSyntax syntax = VariableSyntax::none;
 		for ( const char* i = m_string.c_str(); *i != '\0'; ++i )
 		{
-			if ( !in_variable ) {
-				switch ( *i )
-				{
-				case '[':
-					in_variable = true;
-					break;
-				default:
+			if ( syntax == VariableSyntax::none ) {
+				if ( *i == '[' ) {
+					syntax = VariableSyntax::square;
+				}
+				else if ( *i == '$' && i[1] == '{' ) {
+					syntax = VariableSyntax::brace;
+					++i;
+				}
+				else{
 					output.push_back( *i );
-					break;
 				}
 			}
 			else
 			{
-				switch ( *i )
-				{
-				case ']':
-					in_variable = false;
+				if ( ( syntax == VariableSyntax::square && *i == ']' )
+				  || ( syntax == VariableSyntax::brace && *i == '}' ) ) {
+					syntax = VariableSyntax::none;
 					output.push_string( build_get_variable( variable.c_str() ) );
 					variable.clear();
-					break;
-				default:
+				}
+				else{
 					variable.push_back( *i );
-					break;
 				}
 			}
 		}

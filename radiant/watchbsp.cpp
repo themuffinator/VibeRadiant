@@ -279,6 +279,10 @@ void BuildMonitor_Run( std::vector<CopiedString>& commands, const char* mapName 
 	GetWatchBSP()->DoMonitoringLoop( commands, mapName );
 }
 
+CopiedString Build_getEngineExecutable(){
+	return g_engineExecutable.string();
+}
+
 
 static StringOutputStream runEngineCmd( const char *bspName ){
 	// this is game dependant

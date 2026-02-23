@@ -95,6 +95,8 @@ Sources used:
 - Documentation: added `docs/lighting-preview.md` describing lighting preview features, supported q3map2 directives, and implementation details.
 - Input: camera key-move handling now ignores Caps Lock state so arrow/WASD navigation works with Caps Lock enabled.
 - Gamepack model types: added `md5mesh` and `iqm` to explicit `modeltypes` lists so MD5/IQM models are available in the editor for non-wildcard game configs.
+- idTech4 support: added The Dark Mod standalone gamepack profiles (`darkmod.game`) for both VibePack and NRCPack, including Dark Mod `dmap` build presets and shader list scaffolding.
+- Build menu compatibility: extended variable expansion to support `${VAR}` syntax (alongside `[VAR]`) and added DarkRadiant-style build variables (`EXEC_ENGINE`, `MAP_NAME`, `REF_MAP`, `REF_ABSMAP`) for idTech4 build-menu parity.
 - Releases/updates: added a `VERSION` file, release packaging workflow with update manifest generation, and an in-app auto-updater that checks GitHub releases and installs updates (Windows zip, Linux AppImage).
 - Documentation: added `RELEASING.md` for versioning/packaging/release details and `docs/auto-updater.md` for user-facing update instructions.
 - Documentation: added `docs/language-packs.md` to describe language packs and supported languages.

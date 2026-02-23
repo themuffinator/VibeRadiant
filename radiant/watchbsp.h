@@ -37,6 +37,7 @@ void BuildMonitor_Construct();
 void BuildMonitor_Destroy();
 
 void BuildMonitor_Run( std::vector<CopiedString>& commands, const char* mapName );
+CopiedString Build_getEngineExecutable();
 
 extern bool g_WatchBSP_Enabled;
 extern bool g_WatchBSP_LeakStop;

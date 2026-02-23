@@ -179,6 +179,11 @@ void build_init_variables(){
 	build_set_variable( "ExtraResourcePaths", stream );
 	build_set_variable( "MonitorAddress", ( g_WatchBSP_Enabled ) ? RADIANT_MONITOR_ADDRESS : "" );
 	build_set_variable( "GameName", gamename_get() );
+	{
+		const CopiedString engineExecutable( Build_getEngineExecutable() );
+		build_set_variable( "EXEC_ENGINE", engineExecutable.c_str() );
+		build_set_variable( "ENGINE_EXECUTABLE", engineExecutable.c_str() );
+	}
 
 	const char* mapname = Map_Name( g_map );
 
@@ -191,7 +196,22 @@ void build_init_variables(){
 		build_set_variable( "MapFile", mapname );
 	}
 
-	build_set_variable( "MapName", stream( PathFilename( mapname ) ) );
+	const CopiedString mapName( stream( PathFilename( mapname ) ) );
+	build_set_variable( "MapName", mapName.c_str() );
+
+	// DarkRadiant idTech4 build menus use these names.
+	const CopiedString mapNoExtAbsolute( stream( PathExtensionless( mapname ) ) );
+	const char* mapNoExtRelative = path_make_relative( mapNoExtAbsolute.c_str(), g_qeglobals.m_userGamePath.c_str() );
+	if ( path_is_absolute( mapNoExtRelative ) ) {
+		mapNoExtRelative = path_make_relative( mapNoExtAbsolute.c_str(), EnginePath_get() );
+	}
+	mapNoExtRelative = path_make_relative( mapNoExtRelative, "maps/" );
+	if ( path_is_absolute( mapNoExtRelative ) ) {
+		mapNoExtRelative = mapName.c_str();
+	}
+	build_set_variable( "MAP_NAME", mapNoExtRelative );
+	build_set_variable( "REF_MAP", mapNoExtRelative );
+	build_set_variable( "REF_ABSMAP", mapNoExtAbsolute.c_str() );
 }
 
 class BatchCommandListener
