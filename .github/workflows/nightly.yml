@@ -1,0 +1,253 @@
+name: nightly-release
+
+on:
+  schedule:
+    - cron: "30 23 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Force a nightly release even without new commits since the previous nightly.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.version.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      base_version: ${{ steps.version.outputs.base_version }}
+      latest_stable_tag: ${{ steps.version.outputs.latest_stable_tag }}
+      latest_nightly_tag: ${{ steps.version.outputs.latest_nightly_tag }}
+      commit_range: ${{ steps.version.outputs.commit_range }}
+      head_sha: ${{ steps.version.outputs.head_sha }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.x"
+
+    - name: Compute nightly version
+      id: version
+      shell: bash
+      run: |
+        force_flag=""
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.force }}" == "true" ]]; then
+          force_flag="--force"
+        fi
+
+        python scripts/nightly_version.py $force_flag --format github > nightly.env
+        cat nightly.env >> "$GITHUB_OUTPUT"
+
+        latest_nightly_tag="$(awk -F= '/^latest_nightly_tag=/{print $2}' nightly.env)"
+        latest_stable_tag="$(awk -F= '/^latest_stable_tag=/{print $2}' nightly.env)"
+        if [[ -n "$latest_nightly_tag" ]]; then
+          echo "commit_range=${latest_nightly_tag}..HEAD" >> "$GITHUB_OUTPUT"
+        elif [[ -n "$latest_stable_tag" ]]; then
+          echo "commit_range=${latest_stable_tag}..HEAD" >> "$GITHUB_OUTPUT"
+        else
+          echo "commit_range=HEAD" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Show decision
+      shell: bash
+      run: |
+        echo "should_release=${{ steps.version.outputs.should_release }}"
+        echo "version=${{ steps.version.outputs.version }}"
+        echo "tag=${{ steps.version.outputs.tag }}"
+
+  windows-msys:
+    name: Windows x86_64
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - uses: msys2/setup-msys2@v2
+      with:
+        install: base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-qt5-base mingw-w64-x86_64-qt5-svg mingw-w64-x86_64-assimp mingw-w64-x86_64-libxml2 git unzip p7zip
+        msystem: MINGW64
+        path-type: minimal
+        release: false
+        update: false
+
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.prepare.outputs.head_sha }}
+        submodules: recursive
+
+    - name: Write nightly version
+      run: |
+        printf "%s\n" "${{ needs.prepare.outputs.version }}" > VERSION
+
+    - name: Build
+      run: |
+        make MAKEFILE_CONF=msys2-Makefile.conf -j4
+        mkdir -p install/settings
+        7z a VibeRadiant-windows-x86_64.zip ./install/*
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: windows-x86_64
+        path: VibeRadiant-windows-x86_64.zip
+        if-no-files-found: error
+
+  linux:
+    name: Linux x86_64
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install tools
+      run: |
+        sudo apt-get -qq update
+        sudo apt-get -y install mesa-common-dev qtbase5-dev libqt5svg5-dev libglib2.0-dev libjpeg-dev libpng-dev libassimp-dev
+
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.prepare.outputs.head_sha }}
+        submodules: recursive
+
+    - name: Write nightly version
+      run: |
+        printf "%s\n" "${{ needs.prepare.outputs.version }}" > VERSION
+
+    - name: Build
+      run: |
+        make CC=gcc-14 CXX=g++-14 CXXFLAGS="-Wno-deprecated-copy" -j4
+        ./appimage.sh
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: linux-x86_64
+        path: VibeRadiant-x86_64.AppImage
+        if-no-files-found: error
+
+  release:
+    name: Publish nightly prerelease
+    needs: [prepare, windows-msys, linux]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: ${{ needs.prepare.outputs.head_sha }}
+        submodules: recursive
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.x"
+
+    - uses: actions/download-artifact@v4
+
+    - name: Write nightly version
+      run: |
+        printf "%s\n" "${{ needs.prepare.outputs.version }}" > VERSION
+
+    - name: Prepare assets
+      run: |
+        VERSION="${{ needs.prepare.outputs.version }}"
+        TAG="v${VERSION}"
+        mkdir -p release
+        mv windows-x86_64/VibeRadiant-windows-x86_64.zip release/VibeRadiant-${VERSION}-windows-x86_64.zip
+        mv linux-x86_64/VibeRadiant-x86_64.AppImage release/VibeRadiant-${VERSION}-linux-x86_64.AppImage
+        python - <<'PY'
+        import datetime
+        import hashlib
+        import json
+        import os
+        import pathlib
+
+        version = os.environ["VERSION"]
+        tag = os.environ["TAG"]
+        repo = os.environ["GITHUB_REPOSITORY"]
+        base_url = f"https://github.com/{repo}/releases/download/{tag}"
+
+        def file_info(path, asset_type):
+            data = pathlib.Path(path).read_bytes()
+            return {
+                "url": f"{base_url}/{pathlib.Path(path).name}",
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "name": pathlib.Path(path).name,
+                "type": asset_type,
+                "size": len(data),
+            }
+
+        assets = {
+            "windows-x86_64": file_info(f"release/VibeRadiant-{version}-windows-x86_64.zip", "zip"),
+            "linux-x86_64": file_info(f"release/VibeRadiant-{version}-linux-x86_64.AppImage", "appimage"),
+        }
+        manifest = {
+            "version": version,
+            "notes": f"https://github.com/{repo}/releases/tag/{tag}",
+            "published_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "assets": assets,
+        }
+
+        with open("release/update.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, sort_keys=True)
+        PY
+      env:
+        VERSION: ${{ needs.prepare.outputs.version }}
+        TAG: v${{ needs.prepare.outputs.version }}
+
+    - name: Checksums
+      run: |
+        (cd release && sha256sum * > sha256sums.txt)
+
+    - name: Build release notes
+      run: |
+        python scripts/nightly_release_notes.py \
+          --version "v${{ needs.prepare.outputs.version }}" \
+          --commit-range "${{ needs.prepare.outputs.commit_range }}" \
+          --include-full-changelog \
+          --output release_notes.md
+
+    - name: Create and push tag
+      run: |
+        TAG="v${{ needs.prepare.outputs.version }}"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git fetch --tags --force
+        if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+          echo "Tag ${TAG} already exists."
+        else
+          git tag "${TAG}" "${{ needs.prepare.outputs.head_sha }}"
+          git push origin "${TAG}"
+        fi
+
+    - name: Publish nightly release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ needs.prepare.outputs.version }}
+        name: Nightly v${{ needs.prepare.outputs.version }}
+        files: |
+          release/*
+        body_path: release_notes.md
+        generate_release_notes: false
+        fail_on_unmatched_files: true
+        prerelease: true
+
+  no-changes:
+    needs: prepare
+    if: needs.prepare.outputs.should_release != 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Skip release
+      run: |
+        echo "No commits since previous nightly. Skipping release."

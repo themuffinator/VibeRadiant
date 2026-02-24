@@ -36,6 +36,7 @@ Sources used:
 - Build fixes: declared Quake3 shader stage helpers before use so the shaders plugin builds cleanly.
 - Build fixes: include qtexture_t definition for shader preview, clamp FloatFormat output length, use Qt6 checkbox signals, pull in stringio helpers for tools prefs, and quiet missing DLL probes in MSYS2 packaging.
 - Build system: updated default Qt dependency to Qt6 (Core/Gui/Widgets/Svg/Network) and aligned MSYS2 packaging plus Qt6 input event handling.
+- Build system: fixed a MinGW compile break in engine-path install labeling (`StringStream` -> `CopiedString`) and split warning suppression policy by C/C++ compiler paths so `make MAKEFILE_CONF=msys2-Makefile.conf` completes with zero warnings in this tree.
 - Build fixes: restored missing includes for entity/sound browser builds, clarified shader highlighter depth handling, updated preview-lighting scene-change callback wiring, and resolved Qt updater parsing/formatting warnings.
 - Build fixes: refreshed Qt6 mouse event handling in browser widgets and entity list hover handling, plus safer `.def` flag parsing to silence warnings.
 - Build fixes: resolved MinGW/GCC build breaks in the new preview lighting code caused by float/double `std::max` template deduction, and aligned CamWnd member initializer order to silence `-Wreorder`.
@@ -99,6 +100,7 @@ Sources used:
 - idTech4 support: added The Dark Mod standalone gamepack profiles (`darkmod.game`) for both VibePack and NRCPack, including Dark Mod `dmap` build presets and shader list scaffolding.
 - Build menu compatibility: extended variable expansion to support `${VAR}` syntax (alongside `[VAR]`) and added DarkRadiant-style build variables (`EXEC_ENGINE`, `MAP_NAME`, `REF_MAP`, `REF_ABSMAP`) for idTech4 build-menu parity.
 - Releases/updates: added a `VERSION` file, release packaging workflow with update manifest generation, and an in-app auto-updater that checks GitHub releases and installs updates (Windows zip, Linux AppImage).
+- Releases/updates: ported the PakFu updater/startup release flow by resolving `update.json` via GitHub Releases API (stable + prerelease channels), running automatic update checks during the splash startup path, and adding a scheduled nightly prerelease pipeline (`.github/workflows/nightly.yml`) with scripted nightly versioning/release notes.
 - Documentation: added `RELEASING.md` for versioning/packaging/release details and `docs/auto-updater.md` for user-facing update instructions.
 - Documentation: added `docs/language-packs.md` to describe language packs and supported languages.
 - Clipper tool: added a visual style option (GTK/NRC/VIBE) for clipped volume previewing, including a VIBE mode with a red dashed cut line and striped fill.

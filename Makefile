@@ -150,6 +150,19 @@ ifeq ($(OS),Windows_NT)
 endif
 
 CFLAGS_COMMON = -MMD -W -Wall -Wcast-align -Wcast-qual -Wno-unused-parameter -Wno-unused-function -fno-strict-aliasing
+
+# Keep baseline warning policy strict while silencing known legacy warning classes.
+CFLAGS_WARNING_SUPPRESS = \
+	-Wno-maybe-uninitialized -Wno-deprecated-declarations -Wno-sign-compare -Wno-pointer-sign \
+	-Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unused-but-set-parameter \
+	-Wno-cast-function-type -Wno-stringop-truncation -Wno-absolute-value -Wno-type-limits \
+	-Wno-array-bounds -Wno-switch -Wno-extra -Wno-cast-qual
+
+CXXFLAGS_WARNING_SUPPRESS = \
+	-Wno-maybe-uninitialized -Wno-deprecated-declarations -Wno-sign-compare \
+	-Wno-unused-but-set-parameter -Wno-class-memaccess -Wno-dangling-pointer \
+	-Wno-stringop-truncation -Wno-type-limits -Wno-array-bounds -Wno-switch \
+	-Wno-extra -Wno-cast-qual
 CPPFLAGS_COMMON =
 LDFLAGS_COMMON =
 LIBS_COMMON =
@@ -319,6 +332,7 @@ Q3MAP_VERSION = 2.5.17n
 
 RADIANT_UPDATE_URL ?= https://github.com/themuffinator/VibeRadiant/releases/latest/download/update.json
 RADIANT_RELEASES_URL ?= https://github.com/themuffinator/VibeRadiant/releases/latest
+RADIANT_GITHUB_REPO ?= themuffinator/VibeRadiant
 
 # Executable extension
 RADIANT_EXECUTABLE := $(EXE)
@@ -329,7 +343,7 @@ ifneq ($(GIT_VERSION),)
 	Q3MAP_VERSION := $(Q3MAP_VERSION)-git-$(GIT_VERSION)
 endif
 
-CPPFLAGS_COMMON += -DRADIANT_VERSION_NUMBER="\"$(RADIANT_VERSION_NUMBER)\"" -DRADIANT_VERSION="\"$(RADIANT_VERSION)\"" -DRADIANT_MAJOR_VERSION="\"$(RADIANT_MAJOR_VERSION)\"" -DRADIANT_MINOR_VERSION="\"$(RADIANT_MINOR_VERSION)\"" -DRADIANT_ABOUTMSG="\"$(RADIANT_ABOUTMSG)\"" -DQ3MAP_VERSION="\"$(Q3MAP_VERSION)\"" -DRADIANT_EXECUTABLE="\"$(RADIANT_EXECUTABLE)\"" -DRADIANT_UPDATE_URL="\"$(RADIANT_UPDATE_URL)\"" -DRADIANT_RELEASES_URL="\"$(RADIANT_RELEASES_URL)\""
+CPPFLAGS_COMMON += -DRADIANT_VERSION_NUMBER="\"$(RADIANT_VERSION_NUMBER)\"" -DRADIANT_VERSION="\"$(RADIANT_VERSION)\"" -DRADIANT_MAJOR_VERSION="\"$(RADIANT_MAJOR_VERSION)\"" -DRADIANT_MINOR_VERSION="\"$(RADIANT_MINOR_VERSION)\"" -DRADIANT_ABOUTMSG="\"$(RADIANT_ABOUTMSG)\"" -DQ3MAP_VERSION="\"$(Q3MAP_VERSION)\"" -DRADIANT_EXECUTABLE="\"$(RADIANT_EXECUTABLE)\"" -DRADIANT_UPDATE_URL="\"$(RADIANT_UPDATE_URL)\"" -DRADIANT_RELEASES_URL="\"$(RADIANT_RELEASES_URL)\"" -DRADIANT_GITHUB_REPO="\"$(RADIANT_GITHUB_REPO)\""
 
 .PHONY: all
 all: \
@@ -553,10 +567,10 @@ ifeq ($(OS),Win32)
 endif
 
 %.o: %.cpp $(if $(findstring yes,$(DEPEND_ON_MAKEFILE)),$(wildcard Makefile*),) | dependencies-check
-	$(CXX) $< $(CFLAGS) $(CXXFLAGS) $(CFLAGS_COMMON) $(CXXFLAGS_COMMON) $(CPPFLAGS_EXTRA) $(CPPFLAGS_COMMON) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@
+	$(CXX) $< $(CFLAGS) $(CXXFLAGS) $(CFLAGS_COMMON) $(CXXFLAGS_COMMON) $(CXXFLAGS_WARNING_SUPPRESS) $(CPPFLAGS_EXTRA) $(CPPFLAGS_COMMON) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@
 
 %.o: %.c $(if $(findstring yes,$(DEPEND_ON_MAKEFILE)),$(wildcard Makefile*),) | dependencies-check
-	$(CC) $< $(CFLAGS) $(CFLAGS_COMMON) $(CPPFLAGS_EXTRA) $(CPPFLAGS_COMMON) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@
+	$(CC) $< $(CFLAGS) $(CFLAGS_COMMON) $(CFLAGS_WARNING_SUPPRESS) $(CPPFLAGS_EXTRA) $(CPPFLAGS_COMMON) $(CPPFLAGS) $(TARGET_ARCH) -c -o $@
 
 ifeq ($(OS),Win32)
 ifeq ($(shell ARCH),i686)

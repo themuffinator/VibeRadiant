@@ -8,8 +8,13 @@ This document explains how the in-app updater works and what to expect when you 
 - Automatic checks run at startup (once per 24 hours) if enabled.
 - Preferences -> Settings -> Updates lets you toggle automatic checks and "Include prerelease builds".
 
-The updater reads `update.json` from the latest GitHub release. "Latest Build"
-artifacts do not include this manifest, so they are not compatible with auto-update.
+The updater queries GitHub Releases, selects the newest matching release, then reads
+that release's `update.json` manifest:
+- `Include prerelease builds` disabled: stable releases only.
+- `Include prerelease builds` enabled: stable + nightly prereleases.
+
+"Latest Build" artifacts do not include this manifest, so they are not compatible
+with auto-update.
 
 ## Supported packages
 
@@ -25,6 +30,9 @@ Other platforms and packaging formats are not supported.
 2. The file is verified using the SHA-256 hash from the release manifest.
 3. You are prompted to save any modified work.
 4. The app closes, applies the update, and relaunches.
+
+Automatic checks happen during startup while the splash screen is shown, then the
+main window opens after the check completes.
 
 ## Windows details
 

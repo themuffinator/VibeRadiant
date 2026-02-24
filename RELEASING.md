@@ -19,7 +19,10 @@ Makefile variables:
   parts of `RADIANT_VERSION_NUMBER` (for `1.6.0`, major is `6`, minor is `0`).
 
 Update URLs:
-- `RADIANT_UPDATE_URL` defaults to
+- `RADIANT_GITHUB_REPO` defaults to `themuffinator/VibeRadiant`.
+- The updater resolves releases through the GitHub Releases API for
+  `RADIANT_GITHUB_REPO`, then downloads each release's `update.json`.
+- `RADIANT_UPDATE_URL` remains the stable fallback URL:
   `https://github.com/themuffinator/VibeRadiant/releases/latest/download/update.json`.
 - `RADIANT_RELEASES_URL` defaults to
   `https://github.com/themuffinator/VibeRadiant/releases/latest`.
@@ -59,6 +62,20 @@ Steps:
    - `VibeRadiant-${VERSION}-linux-x86_64.AppImage`
 4. Generate `release/update.json` and `release/sha256sums.txt`.
 5. Publish a GitHub release with all files in `release/`.
+
+## Nightly workflow (GitHub Actions)
+
+Trigger:
+- Scheduled daily and manual dispatch via `.github/workflows/nightly.yml`.
+
+Steps:
+1. `scripts/nightly_version.py` computes `X.Y.Z.BUILD`, release tag, and whether
+   there are meaningful commits since the previous nightly.
+2. If changes exist (or `force=true`), CI builds Windows and Linux artifacts using
+   that computed nightly version.
+3. CI generates `release/update.json`, checksums, and nightly notes via
+   `scripts/nightly_release_notes.py`.
+4. CI tags `vX.Y.Z.BUILD` and publishes a prerelease named `Nightly vX.Y.Z.BUILD`.
 
 ## Update manifest format
 

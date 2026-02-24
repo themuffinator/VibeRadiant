@@ -21,8 +21,10 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
@@ -39,9 +41,17 @@
 #include <QUrlQuery>
 #include <QVersionNumber>
 
+#include <functional>
+#include <utility>
+
+#ifndef RADIANT_GITHUB_REPO
+#define RADIANT_GITHUB_REPO "themuffinator/VibeRadiant"
+#endif
+
 namespace
 {
 constexpr int k_update_check_interval_seconds = 60 * 60 * 24;
+constexpr int k_update_check_timeout_ms = 20000;
 
 bool g_update_auto_check = true;
 bool g_update_allow_prerelease = false;
@@ -65,7 +75,23 @@ struct UpdateManifest
 	QMap<QString, UpdateAsset> assets;
 };
 
-QString update_manifest_url(){
+struct ReleaseMetadata
+{
+	QString version;
+	QString notes_url;
+	QString manifest_url;
+	bool prerelease = false;
+};
+
+QString github_repo(){
+	return QString::fromLatin1( RADIANT_GITHUB_REPO );
+}
+
+QString releases_api_url(){
+	return QStringLiteral( "https://api.github.com/repos/%1/releases" ).arg( github_repo() );
+}
+
+QString fallback_manifest_url(){
 	return QString::fromLatin1( RADIANT_UPDATE_URL );
 }
 
@@ -75,6 +101,14 @@ QString releases_url(){
 
 QString current_version(){
 	return QString::fromLatin1( RADIANT_VERSION_NUMBER );
+}
+
+QString normalized_tag_version( const QString& tag ){
+	QString normalized = tag.trimmed();
+	if ( normalized.startsWith( 'v', Qt::CaseInsensitive ) ) {
+		normalized = normalized.mid( 1 );
+	}
+	return normalized;
 }
 
 QString platform_key(){
@@ -202,6 +236,77 @@ bool parse_manifest( const QByteArray& data, UpdateManifest& manifest, QString& 
 	return true;
 }
 
+bool parse_release_object( const QJsonObject& object, bool allow_prerelease, ReleaseMetadata& release ){
+	if ( object.value( "draft" ).toBool() ) {
+		return false;
+	}
+
+	release.prerelease = object.value( "prerelease" ).toBool();
+	if ( !allow_prerelease && release.prerelease ) {
+		return false;
+	}
+
+	release.version = normalized_tag_version( object.value( "tag_name" ).toString() );
+	release.notes_url = object.value( "html_url" ).toString();
+	release.manifest_url.clear();
+
+	const QJsonArray assets = object.value( "assets" ).toArray();
+	for ( const QJsonValue& value : assets ) {
+		const QJsonObject asset = value.toObject();
+		const QString name = asset.value( "name" ).toString();
+		if ( QString::compare( name, "update.json", Qt::CaseInsensitive ) != 0 ) {
+			continue;
+		}
+		release.manifest_url = asset.value( "browser_download_url" ).toString();
+		if ( !release.manifest_url.isEmpty() ) {
+			break;
+		}
+	}
+
+	return !release.manifest_url.isEmpty();
+}
+
+bool parse_release_payload( const QByteArray& payload, bool allow_prerelease, ReleaseMetadata& release, QString& error ){
+	QJsonParseError parse_error{};
+	const QJsonDocument doc = QJsonDocument::fromJson( payload, &parse_error );
+	if ( parse_error.error != QJsonParseError::NoError ) {
+		error = QStringLiteral( "Update release metadata parse error: %1" ).arg( parse_error.errorString() );
+		return false;
+	}
+
+	if ( doc.isObject() ) {
+		if ( parse_release_object( doc.object(), allow_prerelease, release ) ) {
+			return true;
+		}
+		error = QStringLiteral( "No release metadata with update.json was found." );
+		return false;
+	}
+
+	if ( doc.isArray() ) {
+		const QJsonArray array = doc.array();
+		for ( const QJsonValue& value : array ) {
+			if ( !value.isObject() ) {
+				continue;
+			}
+			if ( parse_release_object( value.toObject(), allow_prerelease, release ) ) {
+				return true;
+			}
+		}
+		error = QStringLiteral( "No matching release with update.json was found." );
+		return false;
+	}
+
+	error = QStringLiteral( "Update release metadata response was not valid JSON." );
+	return false;
+}
+
+void configure_update_request( QNetworkRequest& request ){
+	request.setHeader( QNetworkRequest::UserAgentHeader, QStringLiteral( "VibeRadiant-Updater/%1" ).arg( current_version() ) );
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
+	request.setTransferTimeout( k_update_check_timeout_ms );
+#endif
+}
+
 void Update_constructPreferences( PreferencesPage& page ){
 	page.appendCheckBox( "Updates", "Check for updates at startup", g_update_auto_check );
 	page.appendCheckBox( "", "Include prerelease builds", g_update_allow_prerelease );
@@ -242,42 +347,23 @@ public:
 	}
 
 	void checkForUpdates( UpdateCheckMode mode ){
-		if ( m_check_in_progress || m_download_in_progress ) {
-			return;
+		checkForUpdatesInternal( mode, nullptr, nullptr );
+	}
+
+	void checkForUpdatesBlocking( UpdateCheckMode mode, QWidget* parent_override ){
+		bool finished = false;
+		QEventLoop loop;
+		checkForUpdatesInternal( mode, parent_override, [&](){
+			finished = true;
+			loop.quit();
+		} );
+		if ( !finished ) {
+			loop.exec();
 		}
-		if ( mode == UpdateCheckMode::Automatic && !g_update_auto_check ) {
-			return;
-		}
-		ensure_network();
+	}
 
-		const qint64 now = QDateTime::currentSecsSinceEpoch();
-		g_update_last_check = static_cast<int>( now );
-
-		m_check_in_progress = true;
-		m_mode = mode;
-
-		QUrl url( update_manifest_url() );
-		QUrlQuery query( url );
-		query.addQueryItem( "ts", QString::number( now ) );
-		url.setQuery( query );
-
-		QNetworkRequest request( url );
-		request.setHeader( QNetworkRequest::UserAgentHeader, QString( "VibeRadiant/" ) + current_version() );
-		request.setAttribute( QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork );
-
-		if ( m_mode == UpdateCheckMode::Manual ) {
-			m_check_dialog = new QProgressDialog( "Checking for updates...", "Cancel", 0, 0, MainFrame_getWindow() );
-			m_check_dialog->setWindowModality( Qt::WindowModal );
-			m_check_dialog->setMinimumDuration( 0 );
-			connect( m_check_dialog, &QProgressDialog::canceled, this, [this](){
-				if ( m_reply ) {
-					m_reply->abort();
-				}
-			} );
-		}
-
-		m_reply = m_network->get( request );
-		connect( m_reply, &QNetworkReply::finished, this, [this](){ handle_manifest_finished(); } );
+	bool quitRequested() const {
+		return m_quit_requested;
 	}
 
 private:
@@ -292,6 +378,11 @@ private:
 	QString m_download_path;
 	QString m_download_dir;
 	bool m_constructed = false;
+	bool m_quit_requested = false;
+	bool m_tried_fallback_manifest = false;
+	QString m_release_notes_url;
+	QPointer<QWidget> m_parent_override;
+	std::function<void()> m_check_finished_callback;
 
 	void ensure_network(){
 		if ( !m_network ) {
@@ -299,15 +390,114 @@ private:
 		}
 	}
 
-	void handle_manifest_finished(){
+	QWidget* parentWindow() const {
+		return m_parent_override ? m_parent_override.data() : MainFrame_getWindow();
+	}
+
+	void finish_check(){
 		if ( m_check_dialog ) {
 			m_check_dialog->close();
 			m_check_dialog = nullptr;
 		}
-
 		m_check_in_progress = false;
+		auto callback = std::move( m_check_finished_callback );
+		if ( callback ) {
+			callback();
+		}
+	}
 
+	void checkForUpdatesInternal( UpdateCheckMode mode, QWidget* parent_override, std::function<void()> finished ){
+		if ( m_check_in_progress || m_download_in_progress ) {
+			if ( finished ) {
+				finished();
+			}
+			return;
+		}
+		if ( mode == UpdateCheckMode::Automatic && !g_update_auto_check ) {
+			if ( finished ) {
+				finished();
+			}
+			return;
+		}
+
+		const qint64 now = QDateTime::currentSecsSinceEpoch();
+		if ( mode == UpdateCheckMode::Automatic && g_update_last_check > 0 &&
+		     now - g_update_last_check < k_update_check_interval_seconds ) {
+			if ( finished ) {
+				finished();
+			}
+			return;
+		}
+
+		ensure_network();
+
+		g_update_last_check = static_cast<int>( now );
+		m_mode = mode;
+		m_parent_override = parent_override;
+		m_check_finished_callback = std::move( finished );
+		m_release_notes_url.clear();
+		m_tried_fallback_manifest = false;
+		m_quit_requested = false;
+		m_check_in_progress = true;
+
+		if ( m_mode == UpdateCheckMode::Manual ) {
+			m_check_dialog = new QProgressDialog( "Checking for updates...", "Cancel", 0, 0, parentWindow() );
+			m_check_dialog->setWindowModality( Qt::WindowModal );
+			m_check_dialog->setMinimumDuration( 0 );
+			connect( m_check_dialog, &QProgressDialog::canceled, this, [this](){
+				if ( m_reply ) {
+					m_reply->abort();
+				}
+			} );
+		}
+
+		start_release_lookup();
+	}
+
+	void start_release_lookup(){
+		const bool allow_prerelease = g_update_allow_prerelease;
+		QUrl url;
+		if ( allow_prerelease ) {
+			url = QUrl( releases_api_url() );
+		}
+		else{
+			url = QUrl( releases_api_url() + "/latest" );
+		}
+
+		QNetworkRequest request( url );
+		request.setRawHeader( "Accept", "application/vnd.github+json" );
+		request.setAttribute( QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork );
+		configure_update_request( request );
+
+		m_reply = m_network->get( request );
+		connect( m_reply, &QNetworkReply::finished, this, [this](){ handle_release_finished(); } );
+	}
+
+	void start_manifest_request( const QString& manifest_url ){
+		if ( manifest_url.isEmpty() ) {
+			if ( m_mode == UpdateCheckMode::Manual ) {
+				qt_MessageBox( parentWindow(), "Release metadata is missing update.json.", "Update", EMessageBoxType::Error );
+			}
+			finish_check();
+			return;
+		}
+
+		QUrl url( manifest_url );
+		QUrlQuery query( url );
+		query.addQueryItem( "ts", QString::number( QDateTime::currentSecsSinceEpoch() ) );
+		url.setQuery( query );
+
+		QNetworkRequest request( url );
+		request.setAttribute( QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork );
+		configure_update_request( request );
+
+		m_reply = m_network->get( request );
+		connect( m_reply, &QNetworkReply::finished, this, [this](){ handle_manifest_finished(); } );
+	}
+
+	void handle_release_finished(){
 		if ( !m_reply ) {
+			finish_check();
 			return;
 		}
 
@@ -318,13 +508,69 @@ private:
 		m_reply = nullptr;
 
 		if ( net_error == QNetworkReply::OperationCanceledError ) {
+			finish_check();
+			return;
+		}
+
+		if ( net_error != QNetworkReply::NoError ) {
+			if ( !m_tried_fallback_manifest ) {
+				m_tried_fallback_manifest = true;
+				start_manifest_request( fallback_manifest_url() );
+				return;
+			}
+			if ( m_mode == UpdateCheckMode::Manual ) {
+				const auto msg = QString( "Update check failed: " ) + error_string;
+				qt_MessageBox( parentWindow(), msg.toLatin1().constData(), "Update", EMessageBoxType::Error );
+			}
+			finish_check();
+			return;
+		}
+
+		ReleaseMetadata release;
+		QString error;
+		if ( !parse_release_payload( payload, g_update_allow_prerelease, release, error ) ) {
+			if ( !m_tried_fallback_manifest ) {
+				m_tried_fallback_manifest = true;
+				start_manifest_request( fallback_manifest_url() );
+				return;
+			}
+			if ( m_mode == UpdateCheckMode::Manual ) {
+				qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Info );
+			}
+			finish_check();
+			return;
+		}
+
+		m_release_notes_url = release.notes_url;
+		start_manifest_request( release.manifest_url );
+	}
+
+	void handle_manifest_finished(){
+		if ( !m_reply ) {
+			finish_check();
+			return;
+		}
+		if ( m_check_dialog ) {
+			m_check_dialog->close();
+			m_check_dialog = nullptr;
+		}
+
+		const QNetworkReply::NetworkError net_error = m_reply->error();
+		const QString error_string = m_reply->errorString();
+		const QByteArray payload = m_reply->readAll();
+		m_reply->deleteLater();
+		m_reply = nullptr;
+
+		if ( net_error == QNetworkReply::OperationCanceledError ) {
+			finish_check();
 			return;
 		}
 		if ( net_error != QNetworkReply::NoError ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
 				const auto msg = QString( "Update check failed: " ) + error_string;
-				qt_MessageBox( MainFrame_getWindow(), msg.toLatin1().constData(), "Update", EMessageBoxType::Error );
+				qt_MessageBox( parentWindow(), msg.toLatin1().constData(), "Update", EMessageBoxType::Error );
 			}
+			finish_check();
 			return;
 		}
 
@@ -332,16 +578,21 @@ private:
 		UpdateManifest manifest;
 		if ( !parse_manifest( payload, manifest, error ) ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				qt_MessageBox( MainFrame_getWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
+				qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
 			}
+			finish_check();
 			return;
+		}
+		if ( manifest.notes.isEmpty() && !m_release_notes_url.isEmpty() ) {
+			manifest.notes = m_release_notes_url;
 		}
 
 		if ( !g_update_allow_prerelease && is_prerelease_version( manifest.version ) ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
 				const auto msg = StringStream( "Prerelease ", manifest.version.toLatin1().constData(), " is available.\nEnable prerelease updates to download it." );
-				qt_MessageBox( MainFrame_getWindow(), msg, "Update", EMessageBoxType::Info );
+				qt_MessageBox( parentWindow(), msg, "Update", EMessageBoxType::Info );
 			}
+			finish_check();
 			return;
 		}
 
@@ -349,8 +600,9 @@ private:
 		if ( !manifest.assets.contains( platform ) ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
 				const auto msg = StringStream( "No update package found for platform ", platform.toLatin1().constData(), "." );
-				qt_MessageBox( MainFrame_getWindow(), msg, "Update", EMessageBoxType::Info );
+				qt_MessageBox( parentWindow(), msg, "Update", EMessageBoxType::Info );
 			}
+			finish_check();
 			return;
 		}
 
@@ -358,20 +610,27 @@ private:
 		if ( cmp >= 0 ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
 				const auto msg = StringStream( "You are up to date (", current_version().toLatin1().constData(), ")." );
-				qt_MessageBox( MainFrame_getWindow(), msg, "Update", EMessageBoxType::Info );
+				qt_MessageBox( parentWindow(), msg, "Update", EMessageBoxType::Info );
 			}
+			finish_check();
 			return;
 		}
 
 		const UpdateAsset asset = manifest.assets.value( platform );
 		prompt_update( manifest, asset );
+		finish_check();
 	}
 
 	void prompt_update( const UpdateManifest& manifest, const UpdateAsset& asset ){
-		QMessageBox dialog( MainFrame_getWindow() );
+		QWidget* parent = parentWindow();
+		const bool splash_parent = parent && parent->windowFlags().testFlag( Qt::SplashScreen );
+		QMessageBox dialog( splash_parent ? nullptr : parent );
 		dialog.setWindowTitle( "VibeRadiant Update" );
 		dialog.setText( QStringLiteral( "VibeRadiant %1 is available." ).arg( manifest.version ) );
 		dialog.setInformativeText( QStringLiteral( "Current version: %1\nLatest version: %2" ).arg( current_version(), manifest.version ) );
+		if ( splash_parent ) {
+			dialog.setWindowFlag( Qt::WindowStaysOnTopHint, true );
+		}
 
 		QAbstractButton* download_button = dialog.addButton( "Download and Install", QMessageBox::AcceptRole );
 		QAbstractButton* release_button = dialog.addButton( "View Release", QMessageBox::ActionRole );
@@ -396,7 +655,7 @@ private:
 
 		const QString temp_root = QStandardPaths::writableLocation( QStandardPaths::TempLocation );
 		if ( temp_root.isEmpty() ) {
-			qt_MessageBox( MainFrame_getWindow(), "No writable temp directory available.", "Update", EMessageBoxType::Error );
+			qt_MessageBox( parentWindow(), "No writable temp directory available.", "Update", EMessageBoxType::Error );
 			return;
 		}
 
@@ -407,16 +666,16 @@ private:
 		m_download_path = QDir( m_download_dir ).filePath( asset.name.isEmpty() ? "update.bin" : asset.name );
 		m_download_file.setFileName( m_download_path );
 		if ( !m_download_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
-			qt_MessageBox( MainFrame_getWindow(), "Failed to open download file.", "Update", EMessageBoxType::Error );
+			qt_MessageBox( parentWindow(), "Failed to open download file.", "Update", EMessageBoxType::Error );
 			return;
 		}
 
 		QNetworkRequest request( QUrl( asset.url ) );
-		request.setHeader( QNetworkRequest::UserAgentHeader, QString( "VibeRadiant/" ) + current_version() );
+		configure_update_request( request );
 
 		m_download_in_progress = true;
 
-		m_download_dialog = new QProgressDialog( "Downloading update...", "Cancel", 0, 100, MainFrame_getWindow() );
+		m_download_dialog = new QProgressDialog( "Downloading update...", "Cancel", 0, 100, parentWindow() );
 		m_download_dialog->setWindowModality( Qt::WindowModal );
 		m_download_dialog->setMinimumDuration( 0 );
 		m_download_dialog->setValue( 0 );
@@ -470,7 +729,7 @@ private:
 		}
 		if ( net_error != QNetworkReply::NoError ) {
 			QFile::remove( m_download_path );
-			qt_MessageBox( MainFrame_getWindow(), "Update download failed.", "Update", EMessageBoxType::Error );
+			qt_MessageBox( parentWindow(), "Update download failed.", "Update", EMessageBoxType::Error );
 			return;
 		}
 
@@ -479,7 +738,7 @@ private:
 			const QString hash = sha256_file( m_download_path, error );
 			if ( hash.isEmpty() || QString::compare( hash, asset.sha256, Qt::CaseInsensitive ) != 0 ) {
 				QFile::remove( m_download_path );
-				qt_MessageBox( MainFrame_getWindow(), "Update verification failed.", "Update", EMessageBoxType::Error );
+				qt_MessageBox( parentWindow(), "Update verification failed.", "Update", EMessageBoxType::Error );
 				return;
 			}
 		}
@@ -503,7 +762,7 @@ private:
 #else
 		Q_UNUSED( asset );
 		Q_UNUSED( path );
-		qt_MessageBox( MainFrame_getWindow(), "Auto-update is not supported on this platform.", "Update", EMessageBoxType::Info );
+		qt_MessageBox( parentWindow(), "Auto-update is not supported on this platform.", "Update", EMessageBoxType::Info );
 		return false;
 #endif
 	}
@@ -514,7 +773,7 @@ private:
 
 		QString error;
 		if ( !ensure_writable_directory( install_dir, error ) ) {
-			qt_MessageBox( MainFrame_getWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
+			qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
 			return false;
 		}
 
@@ -533,17 +792,18 @@ private:
 
 		QFile script_file( script_path );
 		if ( !script_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
-			qt_MessageBox( MainFrame_getWindow(), "Failed to write update script.", "Update", EMessageBoxType::Error );
+			qt_MessageBox( parentWindow(), "Failed to write update script.", "Update", EMessageBoxType::Error );
 			return false;
 		}
 		script_file.write( script.toLatin1() );
 		script_file.close();
 
 		if ( !QProcess::startDetached( "powershell", { "-ExecutionPolicy", "Bypass", "-File", script_path } ) ) {
-			qt_MessageBox( MainFrame_getWindow(), "Failed to launch updater.", "Update", EMessageBoxType::Error );
+			qt_MessageBox( parentWindow(), "Failed to launch updater.", "Update", EMessageBoxType::Error );
 			return false;
 		}
 
+		m_quit_requested = true;
 		QCoreApplication::quit();
 		return true;
 	}
@@ -551,14 +811,14 @@ private:
 	bool install_update_linux( const QString& path ){
 		const QByteArray appimage_env = qgetenv( "APPIMAGE" );
 		if ( appimage_env.isEmpty() ) {
-			qt_MessageBox( MainFrame_getWindow(), "Auto-update requires the AppImage build.", "Update", EMessageBoxType::Info );
+			qt_MessageBox( parentWindow(), "Auto-update requires the AppImage build.", "Update", EMessageBoxType::Info );
 			return false;
 		}
 
 		const QString appimage_path = QString::fromUtf8( appimage_env );
 		QString error;
 		if ( !ensure_writable_directory( QFileInfo( appimage_path ).absolutePath(), error ) ) {
-			qt_MessageBox( MainFrame_getWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
+			qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
 			return false;
 		}
 
@@ -578,7 +838,7 @@ private:
 
 		QFile script_file( script_path );
 		if ( !script_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
-			qt_MessageBox( MainFrame_getWindow(), "Failed to write update script.", "Update", EMessageBoxType::Error );
+			qt_MessageBox( parentWindow(), "Failed to write update script.", "Update", EMessageBoxType::Error );
 			return false;
 		}
 		script_file.write( script.toLatin1() );
@@ -587,10 +847,11 @@ private:
 		QFile::setPermissions( script_path, QFile::permissions( script_path ) | QFileDevice::ExeUser );
 
 		if ( !QProcess::startDetached( "/bin/sh", { script_path } ) ) {
-			qt_MessageBox( MainFrame_getWindow(), "Failed to launch updater.", "Update", EMessageBoxType::Error );
+			qt_MessageBox( parentWindow(), "Failed to launch updater.", "Update", EMessageBoxType::Error );
 			return false;
 		}
 
+		m_quit_requested = true;
 		QCoreApplication::quit();
 		return true;
 	}
@@ -622,6 +883,10 @@ private:
 		if ( m_download_file.isOpen() ) {
 			m_download_file.close();
 		}
+		m_check_in_progress = false;
+		m_download_in_progress = false;
+		m_parent_override = nullptr;
+		m_check_finished_callback = nullptr;
 	}
 };
 
@@ -650,4 +915,14 @@ void UpdateManager_CheckForUpdates( UpdateCheckMode mode ){
 	if ( g_update_manager ) {
 		g_update_manager->checkForUpdates( mode );
 	}
+}
+
+void UpdateManager_CheckForUpdatesBlocking( UpdateCheckMode mode, QWidget* parent_override ){
+	if ( g_update_manager ) {
+		g_update_manager->checkForUpdatesBlocking( mode, parent_override );
+	}
+}
+
+bool UpdateManager_QuitRequested(){
+	return g_update_manager && g_update_manager->quitRequested();
 }

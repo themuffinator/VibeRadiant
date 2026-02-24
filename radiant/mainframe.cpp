@@ -580,7 +580,8 @@ void EnginePath_detectFromSubdirs( std::vector<DetectedEngineInstall>& installs,
 }
 
 CopiedString EnginePath_detectedInstallLabel( const DetectedEngineInstall& install ){
-	return StringStream( install.source, " - ", install.path );
+	const auto label = StringStream( install.source, " - ", install.path );
+	return label.c_str();
 }
 
 void EnginePath_refreshDetectedInstalls(){
@@ -1988,6 +1989,10 @@ public:
 
 QSplashScreen *create_splash(){
 	auto *splash = new QSplashScreen( new_local_image( "splash.png" ) );
+	splash->showMessage(
+		QStringLiteral( "Starting VibeRadiant...\nv%1" ).arg( QString::fromLatin1( RADIANT_VERSION_NUMBER ) ),
+		Qt::AlignHCenter | Qt::AlignBottom,
+		Qt::white );
 	splash->show();
 	return splash;
 }
@@ -2000,9 +2005,30 @@ void show_splash(){
 	process_gui();
 }
 
+void set_splash_status( const char* status ){
+	if ( splash_screen == nullptr ) {
+		return;
+	}
+
+	const QString text = QString::fromLatin1( status ? status : "" ).trimmed();
+	const QString version = QString::fromLatin1( RADIANT_VERSION_NUMBER );
+	if ( text.isEmpty() ) {
+		splash_screen->showMessage( QStringLiteral( "v%1" ).arg( version ), Qt::AlignHCenter | Qt::AlignBottom, Qt::white );
+	}
+	else{
+		splash_screen->showMessage( QStringLiteral( "%1\nv%2" ).arg( text, version ), Qt::AlignHCenter | Qt::AlignBottom, Qt::white );
+	}
+	process_gui();
+}
+
+QWidget* splash_window(){
+	return splash_screen;
+}
+
 void hide_splash(){
 //.	splash_screen->finish();
 	delete splash_screen;
+	splash_screen = nullptr;
 }
 
 
@@ -2257,8 +2283,6 @@ void MainFrame::Create(){
 
 	toolbar_importState( g_toolbarHiddenButtons.c_str() );
 	RestoreGuiState();
-
-	UpdateManager_MaybeAutoCheck();
 
 	GlobalShortcuts_reportDuplicates();
 	//GlobalShortcuts_reportUnregistered();

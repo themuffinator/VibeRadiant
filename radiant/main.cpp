@@ -87,11 +87,14 @@
 #include "referencecache.h"
 #include "stacktrace.h"
 #include "error.h"
+#include "update.h"
 
 #include <QApplication>
 #include "gtkutil/glwidget.h"
 
 void show_splash();
+void set_splash_status( const char* status );
+QWidget* splash_window();
 void hide_splash();
 
 #if defined ( _DEBUG ) && defined ( WIN32 ) && defined ( _MSC_VER )
@@ -437,29 +440,36 @@ int main( int argc, char* argv[] ){
 	QApplication::setWindowIcon( new_local_icon( "radiant.ico" ) ); // before any windows, after paths_init()
 
 	show_splash();
+	set_splash_status( "Loading settings..." );
 
 	create_global_pid();
 
 	GlobalPreferences_Init();
 
+	set_splash_status( "Selecting game profile..." );
 	g_GamesDialog.Init();
 
 	g_strGameToolsPath = g_pGameDescription->mGameToolsPath;
 
 	remove_global_pid();
 
+	set_splash_status( "Loading user preferences..." );
 	g_Preferences.Init(); // must occur before create_local_pid() to allow preferences to be reset
 
 	create_local_pid();
 
+	set_splash_status( "Initializing editor modules..." );
 	Radiant_Initialise();
 
 //	user_shortcuts_init();
 
+	set_splash_status( "Preparing main window..." );
 	g_pParentWnd = new MainFrame();
+	if ( MainFrame_getWindow() ) {
+		MainFrame_getWindow()->hide();
+	}
 
-	hide_splash();
-
+	set_splash_status( "Loading map..." );
 	if( !g_openMapByCmd.empty() ){
 		Map_LoadFile( g_openMapByCmd.c_str() );
 	}
@@ -471,7 +481,28 @@ int main( int argc, char* argv[] ){
 		Map_New();
 	}
 
+	set_splash_status( "Checking for updates..." );
+	UpdateManager_CheckForUpdatesBlocking( UpdateCheckMode::Automatic, splash_window() );
+
+	if ( UpdateManager_QuitRequested() ) {
+		remove_local_pid();
+		hide_splash();
+		Map_Free();
+		delete g_pParentWnd;
+		g_pParentWnd = nullptr;
+		Radiant_Shutdown();
+		qInstallMessageHandler( nullptr );
+		Sys_LogFile( false );
+		return EXIT_SUCCESS;
+	}
+
 	remove_local_pid();
+	if ( MainFrame_getWindow() ) {
+		MainFrame_getWindow()->show();
+		MainFrame_getWindow()->raise();
+		MainFrame_getWindow()->activateWindow();
+	}
+	hide_splash();
 
 	QApplication::exec();
 
