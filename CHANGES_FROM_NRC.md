@@ -74,6 +74,7 @@ Sources used:
 - Debugging: added `VIBERADIANT_DISABLE_OPENGL`/`RADIANT_DISABLE_OPENGL` to disable OpenGL widgets and substitute placeholder views for crash isolation.
 - Texture browser: initialize scroll/size state and guard scroll updates until widgets exist to avoid early null dereferences.
 - Texture browser: refreshed layout with a unified filter bar, name search, and surface/content flag filtering.
+- Texture browser: added Smart Tags support via `smarttags.txt` rule files (game + user), including combined manual/smart tag search, smart-tag checkbox indicators per selected shader, and a reload action in the Tags menu.
 - Shader rendering: implemented Quake 3 multi-stage shader previews in the texture browser with hover animation, added a live shader editor preview, and added a 3D view animate/static shader toggle.
 - Shader rendering: re-enabled Quake 3 multi-stage shader rendering by default while keeping the legacy single-texture fallback when stages are disabled.
 - Shader rendering: guarded stage evaluation to fall back to the base shader texture when stage textures fail to realize, preventing material browser crashes on missing stage assets.
@@ -85,6 +86,11 @@ Sources used:
 - Preferences: added game-default brush texture scale (idTech2=1.0, idTech3/4=0.5) and texture thumbnail scale (idTech2=200%, idTech3/4=100%).
 - Selection/tools: added a default startup tool mode preference, a primitive-mode toggle/button (Ctrl+Space), and adjustable manipulator size with +/- shortcuts.
 - UI: preferences dialog is now resizable with a larger default size, and the status bar shows selection size.
+- UI: added an Issue Browser panel with map diagnostics (missing classname, duplicate `targetname`, broken `target` references), selection helpers, and one-click fixes.
+- UV workflow: added a UV View panel with direct controls for UV tool mode switching, fit/projection actions, UV shift/scale nudges, and live selection-mode/status readout.
+- Entity Inspector: key/value editing now includes typed smart controls for boolean/list/color/model/sound keys, plus spawnflags guidance in-line with the key/value editor.
+- Selection undo/redo: selection-state changes are now tracked in the undo system (including command-driven selection actions and mouse selection workflows), with redo parity.
+- Command workflow: added macro recording/playback commands (`MacroRecordStart`, `MacroRecordStop`, `MacroPlay`, `MacroClear`) with an Edit > Macros menu and shortcut support.
 - View defaults: added a coarse grid background color for extreme zoom levels and switched default theme colors to a Maya-style palette.
 - Filters: added a Doom3 filter for `func_splinemover`.
 - Targeting: added a toggle/preference for thicker target connection lines.

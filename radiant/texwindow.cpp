@@ -35,7 +35,9 @@
 #include "moduleobserver.h"
 
 #include <algorithm>
+#include <cctype>
 #include <set>
+#include <string>
 #include <vector>
 #include <cmath>
 
@@ -43,6 +45,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDrag>
+#include <QFile>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QItemDelegate>
@@ -64,6 +67,7 @@
 #include <QStandardItemModel>
 #include <QStyle>
 #include <QTabWidget>
+#include <QTextStream>
 #include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
@@ -107,6 +111,12 @@
 bool string_equal_start(const char *string, StringRange start) {
   return string_equal_n(string, start.data(), start.size());
 }
+
+namespace {
+constexpr int c_tagRoleIsSmart = Qt::ItemDataRole::UserRole + 1;
+constexpr int c_tagRoleSmartIndex = Qt::ItemDataRole::UserRole + 2;
+constexpr int c_tagRoleTagName = Qt::ItemDataRole::UserRole + 3;
+} // namespace
 
 // sort case insensitively, as it is user friendly
 // still preserve unequal names, as it is needed for linux case sensitive FS
@@ -395,6 +405,11 @@ class TextureBrowser {
   int m_nTotalHeight;
 
 public:
+  struct SmartTagRule {
+    CopiedString name;
+    std::vector<CopiedString> patterns;
+  };
+
   int m_width, m_height;
 
   CopiedString m_shader; // current shader
@@ -425,6 +440,7 @@ public:
   std::set<CopiedString> m_all_tags;
   std::vector<CopiedString> m_copied_tags;
   std::set<CopiedString> m_found_shaders;
+  std::vector<SmartTagRule> m_smartTagRules;
 
   ToggleItem m_hideunused_item;
   ToggleItem m_showshaders_item;
@@ -1821,6 +1837,321 @@ static QMenu *TextureBrowser_constructViewMenu() {
 #include "xml/xmltextags.h"
 XmlTagBuilder TagBuilder;
 
+std::string TextureBrowser_trimString(const std::string &value) {
+  std::size_t begin = 0;
+  while (begin < value.size() &&
+         std::isspace(static_cast<unsigned char>(value[begin]))) {
+    ++begin;
+  }
+  std::size_t end = value.size();
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+    --end;
+  }
+  return value.substr(begin, end - begin);
+}
+
+std::vector<std::string> TextureBrowser_splitSmartPatterns(
+    const std::string &list) {
+  std::vector<std::string> patterns;
+  std::size_t start = 0;
+  for (std::size_t i = 0; i <= list.size(); ++i) {
+    if (i == list.size() || list[i] == ';' || list[i] == ',') {
+      const std::string token = TextureBrowser_trimString(
+          list.substr(start, i - start));
+      if (!token.empty()) {
+        patterns.push_back(token);
+      }
+      start = i + 1;
+    }
+  }
+  return patterns;
+}
+
+bool TextureBrowser_wildcardMatchNoCase(const char *pattern,
+                                        const char *text) {
+  const char *p = pattern;
+  const char *t = text;
+  const char *star = nullptr;
+  const char *starText = nullptr;
+
+  while (*t != '\0') {
+    if (*p == '*') {
+      star = p++;
+      starText = t;
+      continue;
+    }
+
+    const unsigned char pch = static_cast<unsigned char>(*p);
+    const unsigned char tch = static_cast<unsigned char>(*t);
+    if (*p == '?' || std::tolower(pch) == std::tolower(tch)) {
+      ++p;
+      ++t;
+      continue;
+    }
+
+    if (star != nullptr) {
+      p = star + 1;
+      t = ++starText;
+      continue;
+    }
+
+    return false;
+  }
+
+  while (*p == '*') {
+    ++p;
+  }
+
+  return *p == '\0';
+}
+
+bool TextureBrowser_tagItemIsSmart(const QListWidgetItem *item) {
+  return item->data(c_tagRoleIsSmart).toBool();
+}
+
+QByteArray TextureBrowser_tagItemName(const QListWidgetItem *item) {
+  const QVariant name = item->data(c_tagRoleTagName);
+  if (name.isValid()) {
+    return name.toByteArray();
+  }
+  return item->data(Qt::ItemDataRole::DisplayRole).toByteArray();
+}
+
+void TextureBrowser_addTagItem(const CopiedString &tag) {
+  auto *item = new QListWidgetItem(tag.c_str());
+  item->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEditable |
+                 Qt::ItemIsUserCheckable | Qt::ItemIsEnabled |
+                 Qt::ItemNeverHasChildren);
+  item->setCheckState(Qt::CheckState::Unchecked);
+  item->setData(c_tagRoleTagName, tag.c_str());
+  g_TexBro.m_tagsListWidget->addItem(item);
+}
+
+void TextureBrowser_addSmartTagItem(std::size_t index) {
+  ASSERT_MESSAGE(index < g_TexBro.m_smartTagRules.size(),
+                 "smart tag index out of range");
+  const TextureBrowser::SmartTagRule &rule = g_TexBro.m_smartTagRules[index];
+  auto *item = new QListWidgetItem(
+      StringStream<128>("[smart] ", rule.name.c_str()).c_str());
+  item->setFlags(Qt::ItemIsSelectable | Qt::ItemIsUserCheckable |
+                 Qt::ItemIsEnabled | Qt::ItemNeverHasChildren);
+  item->setCheckState(Qt::CheckState::Unchecked);
+  item->setData(c_tagRoleIsSmart, true);
+  item->setData(c_tagRoleSmartIndex, static_cast<int>(index));
+  item->setData(c_tagRoleTagName, rule.name.c_str());
+  g_TexBro.m_tagsListWidget->addItem(item);
+}
+
+void TextureBrowser_rebuildTagItems() {
+  g_TexBro.m_tagsListWidget->clear();
+  for (const CopiedString &tag : g_TexBro.m_all_tags) {
+    TextureBrowser_addTagItem(tag);
+  }
+  for (std::size_t i = 0; i < g_TexBro.m_smartTagRules.size(); ++i) {
+    TextureBrowser_addSmartTagItem(i);
+  }
+}
+
+void TextureBrowser_addSmartTagRule(
+    const std::string &name, const std::vector<std::string> &patterns) {
+  if (name.empty() || patterns.empty()) {
+    return;
+  }
+
+  auto existing = std::find_if(
+      g_TexBro.m_smartTagRules.begin(), g_TexBro.m_smartTagRules.end(),
+      [&name](const TextureBrowser::SmartTagRule &rule) {
+        return string_equal_nocase(rule.name.c_str(), name.c_str());
+      });
+
+  TextureBrowser::SmartTagRule *rule = nullptr;
+  if (existing == g_TexBro.m_smartTagRules.end()) {
+    g_TexBro.m_smartTagRules.push_back(
+        TextureBrowser::SmartTagRule{CopiedString(name.c_str()), {}});
+    rule = &g_TexBro.m_smartTagRules.back();
+  } else {
+    rule = &*existing;
+  }
+
+  for (const std::string &pattern : patterns) {
+    const bool alreadyPresent = std::any_of(
+        rule->patterns.begin(), rule->patterns.end(),
+        [&pattern](const CopiedString &existingPattern) {
+          return string_equal_nocase(existingPattern.c_str(), pattern.c_str());
+        });
+    if (!alreadyPresent) {
+      rule->patterns.emplace_back(pattern.c_str());
+    }
+  }
+}
+
+void TextureBrowser_loadSmartTagRulesFromFile(const char *filename) {
+  if (!file_exists(filename)) {
+    return;
+  }
+
+  QFile file(QString::fromLatin1(filename));
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    globalWarningStream() << "Failed to open smart tag rules "
+                          << Quoted(filename) << '\n';
+    return;
+  }
+
+  QTextStream stream(&file);
+  while (!stream.atEnd()) {
+    std::string line = stream.readLine().toStdString();
+    if (const std::size_t commentPos = line.find('#');
+        commentPos != std::string::npos) {
+      line.erase(commentPos);
+    }
+    line = TextureBrowser_trimString(line);
+    if (line.empty()) {
+      continue;
+    }
+
+    std::size_t separator = line.find('=');
+    if (separator == std::string::npos) {
+      separator = line.find(':');
+    }
+    if (separator == std::string::npos) {
+      continue;
+    }
+
+    const std::string name =
+        TextureBrowser_trimString(line.substr(0, separator));
+    const std::string patternList =
+        TextureBrowser_trimString(line.substr(separator + 1));
+    TextureBrowser_addSmartTagRule(
+        name, TextureBrowser_splitSmartPatterns(patternList));
+  }
+
+  globalOutputStream() << "Loaded smart tag rules " << Quoted(filename)
+                       << '\n';
+}
+
+void TextureBrowser_loadSmartTagRules() {
+  g_TexBro.m_smartTagRules.clear();
+
+  const auto gameRulesFile =
+      StringStream(g_pGameDescription->mGameToolsPath, "smarttags.txt");
+  const auto userRulesFile = StringStream(LocalRcPath_get(), "smarttags.txt");
+
+  TextureBrowser_loadSmartTagRulesFromFile(gameRulesFile);
+  TextureBrowser_loadSmartTagRulesFromFile(userRulesFile);
+}
+
+bool TextureBrowser_shaderMatchesSmartRule(
+    const char *shader, const TextureBrowser::SmartTagRule &rule) {
+  const char *leaf = path_get_filename_start(shader);
+  for (const CopiedString &pattern : rule.patterns) {
+    if (TextureBrowser_wildcardMatchNoCase(pattern.c_str(), shader) ||
+        TextureBrowser_wildcardMatchNoCase(pattern.c_str(), leaf)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+struct TextureBrowserTagSearchSelection {
+  std::vector<CopiedString> manualTags;
+  std::vector<int> smartTagIndices;
+  CopiedString searchedLabel;
+};
+
+TextureBrowserTagSearchSelection TextureBrowser_getTagSearchSelection() {
+  TextureBrowserTagSearchSelection selection;
+  StringOutputStream<256> searchedLabel;
+  searchedLabel << "[TAGS] ";
+
+  const auto selected = g_TexBro.m_tagsListWidget->selectedItems();
+  for (auto it = selected.begin(); it != selected.end(); ++it) {
+    QListWidgetItem *item = *it;
+    const QByteArray tagName = TextureBrowser_tagItemName(item);
+    if (tagName.isEmpty()) {
+      continue;
+    }
+
+    if (TextureBrowser_tagItemIsSmart(item)) {
+      const int index = item->data(c_tagRoleSmartIndex).toInt();
+      if (index >= 0 &&
+          static_cast<std::size_t>(index) < g_TexBro.m_smartTagRules.size()) {
+        selection.smartTagIndices.push_back(index);
+        searchedLabel << "[smart] " << tagName.constData();
+      }
+    } else {
+      selection.manualTags.emplace_back(tagName.constData());
+      searchedLabel << tagName.constData();
+    }
+
+    if (it + 1 != selected.end()) {
+      searchedLabel << ", ";
+    }
+  }
+
+  selection.searchedLabel = searchedLabel.c_str();
+  return selection;
+}
+
+bool TextureBrowser_shaderHasManualTags(
+    const char *shader, const std::vector<CopiedString> &manualTags) {
+  if (manualTags.empty()) {
+    return true;
+  }
+
+  std::vector<CopiedString> assigned;
+  TagBuilder.GetShaderTags(shader, assigned);
+  for (const CopiedString &required : manualTags) {
+    const bool hasTag = std::any_of(
+        assigned.begin(), assigned.end(), [&required](const CopiedString &tag) {
+          return string_equal(required.c_str(), tag.c_str());
+        });
+    if (!hasTag) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool TextureBrowser_shaderMatchesSmartTags(
+    const char *shader, const std::vector<int> &smartTagIndices) {
+  for (int index : smartTagIndices) {
+    if (index < 0 ||
+        static_cast<std::size_t>(index) >= g_TexBro.m_smartTagRules.size()) {
+      return false;
+    }
+    if (!TextureBrowser_shaderMatchesSmartRule(shader,
+                                               g_TexBro.m_smartTagRules[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+struct TextureBrowserTagSearchContext {
+  std::set<CopiedString> *foundShaders;
+  const std::vector<CopiedString> *manualTags;
+  const std::vector<int> *smartTagIndices;
+};
+
+void TextureBrowser_collectMatchingShader(TextureBrowserTagSearchContext &ctx,
+                                          const char *shader) {
+  if (!string_equal_prefix(shader, "textures/")) {
+    return;
+  }
+  if (!TextureBrowser_shaderHasManualTags(shader, *ctx.manualTags)) {
+    return;
+  }
+  if (!TextureBrowser_shaderMatchesSmartTags(shader, *ctx.smartTagIndices)) {
+    return;
+  }
+  ctx.foundShaders->insert(shader);
+}
+typedef ReferenceCaller<TextureBrowserTagSearchContext, void(const char *),
+                        TextureBrowser_collectMatchingShader>
+    TextureBrowserCollectMatchingShaderCaller;
+
 static QMenu *TextureBrowser_constructTagsMenu() {
   auto *menu = new QMenu(i18n::tr("Tags"));
 
@@ -1832,6 +2163,8 @@ static QMenu *TextureBrowser_constructTagsMenu() {
   menu->addSeparator();
   create_menu_item_with_mnemonic(menu, "Copy tags from selected", "TagCopy");
   create_menu_item_with_mnemonic(menu, "Paste tags to selected", "TagPaste");
+  menu->addSeparator();
+  create_menu_item_with_mnemonic(menu, "Reload Smart Tags", "TagReloadSmart");
   menu->addSeparator();
   create_menu_item_with_mnemonic(menu, "Search tag", "TagSearch");
   create_menu_item_with_mnemonic(menu, "Search Untagged", "TagSearchUntagged");
@@ -1863,6 +2196,10 @@ protected:
 };
 
 void TextureBrowser_tagsSetCheckboxesForShader(const char *shader) {
+  if (g_TexBro.m_tagsListWidget == nullptr || string_empty(shader)) {
+    return;
+  }
+
   std::vector<CopiedString> assigned_tags;
   TagBuilder.GetShaderTags(shader, assigned_tags);
 
@@ -1878,19 +2215,39 @@ void TextureBrowser_tagsSetCheckboxesForShader(const char *shader) {
 
   for (int i = 0; i < g_TexBro.m_tagsListWidget->count(); ++i) {
     auto *item = g_TexBro.m_tagsListWidget->item(i);
+    bool checked = false;
+
+    if (TextureBrowser_tagItemIsSmart(item)) {
+      const int smartIndex = item->data(c_tagRoleSmartIndex).toInt();
+      if (smartIndex >= 0 &&
+          static_cast<std::size_t>(smartIndex) < g_TexBro.m_smartTagRules.size()) {
+        checked = TextureBrowser_shaderMatchesSmartRule(
+            shader, g_TexBro.m_smartTagRules[static_cast<std::size_t>(smartIndex)]);
+      }
+    } else {
+      const QByteArray tag = TextureBrowser_tagItemName(item);
+      checked = !tag.isEmpty() && contains(tag.constData());
+    }
+
     item->setCheckState(
-        contains(item->data(Qt::ItemDataRole::DisplayRole).toByteArray())
-            ? Qt::CheckState::Checked
-            : Qt::CheckState::Unchecked);
+        checked ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
   }
 }
 
 void TextureBrowser_tagAssignmentChanged(const QModelIndex &index) {
+  if (index.data(c_tagRoleIsSmart).toBool()) {
+    TextureBrowser_tagsSetCheckboxesForShader(g_TexBro.m_shader.c_str());
+    return;
+  }
+
   const bool assigned =
       Qt::CheckState::Checked ==
       static_cast<Qt::CheckState>(
           index.data(Qt::ItemDataRole::CheckStateRole).toInt());
-  const auto tag = index.data(Qt::ItemDataRole::DisplayRole).toByteArray();
+  const auto tag = index.data(c_tagRoleTagName).toByteArray();
+  if (tag.isEmpty()) {
+    return;
+  }
 
   if (assigned) {
     if (!TagBuilder.CheckShaderTag(g_TexBro.m_shader.c_str())) {
@@ -1908,9 +2265,10 @@ void TextureBrowser_tagAssignmentChanged(const QModelIndex &index) {
       }
       ishader->DecRef();
     }
-    TagBuilder.AddShaderTag(g_TexBro.m_shader.c_str(), tag, NodeTagType::TAG);
+    TagBuilder.AddShaderTag(g_TexBro.m_shader.c_str(), tag.constData(),
+                            NodeTagType::TAG);
   } else {
-    TagBuilder.DeleteShaderTag(g_TexBro.m_shader.c_str(), tag);
+    TagBuilder.DeleteShaderTag(g_TexBro.m_shader.c_str(), tag.constData());
   }
 }
 
@@ -1921,29 +2279,41 @@ protected:
   /* track user edit of tag name */
   void setModelData(QWidget *editor, QAbstractItemModel *model,
                     const QModelIndex &index) const override {
+    if (index.data(c_tagRoleIsSmart).toBool()) {
+      return;
+    }
+
     const QByteArray propname = editor->metaObject()->userProperty().name();
-    const auto newName = propname.isEmpty()
-                             ? QByteArray()
-                             : editor->property(propname).toByteArray();
+    const QByteArray newName = propname.isEmpty()
+                                   ? QByteArray()
+                                   : editor->property(propname).toByteArray();
     if (newName.isEmpty()) {
       qt_MessageBox(g_TexBro.m_parent, "New tag name is empty :0", ":o",
                     EMessageBoxType::Error);
-    } else if (const auto oldName =
-                   index.data(Qt::ItemDataRole::DisplayRole).toByteArray();
-               oldName != newName) { // is changed
-      if (g_TexBro.m_all_tags.contains(
-              newName.constData())) { // found in existing names
-        qt_MessageBox(g_TexBro.m_parent, "New tag name is already taken :0",
-                      newName.constData(), EMessageBoxType::Error);
-      } else {
-        TagBuilder.RenameShaderTag(oldName, newName.constData());
-
-        g_TexBro.m_all_tags.erase(oldName.constData());
-        g_TexBro.m_all_tags.insert(newName.constData());
-
-        QItemDelegate::setModelData(editor, model, index); // normal processing
-      }
+      return;
     }
+
+    QByteArray oldName = index.data(c_tagRoleTagName).toByteArray();
+    if (oldName.isEmpty()) {
+      oldName = index.data(Qt::ItemDataRole::DisplayRole).toByteArray();
+    }
+    if (oldName == newName) {
+      return;
+    }
+
+    if (g_TexBro.m_all_tags.contains(newName.constData())) {
+      qt_MessageBox(g_TexBro.m_parent, "New tag name is already taken :0",
+                    newName.constData(), EMessageBoxType::Error);
+      return;
+    }
+
+    TagBuilder.RenameShaderTag(oldName.constData(), newName.constData());
+
+    g_TexBro.m_all_tags.erase(oldName.constData());
+    g_TexBro.m_all_tags.insert(newName.constData());
+
+    QItemDelegate::setModelData(editor, model, index);
+    model->setData(index, newName, c_tagRoleTagName);
   }
   bool editorEvent(QEvent *event, QAbstractItemModel *model,
                    const QStyleOptionViewItem &option,
@@ -1954,6 +2324,10 @@ protected:
         event->type() == QEvent::KeyPress) {
       if (const QVariant value = index.data(Qt::ItemDataRole::CheckStateRole);
           value.isValid()) {
+        if (index.data(c_tagRoleIsSmart).toBool()) {
+          return true;
+        }
+
         const bool ret =
             QItemDelegate::editorEvent(event, model, option, index);
         if (ret && value != index.data(Qt::ItemDataRole::CheckStateRole)) {
@@ -1967,49 +2341,54 @@ protected:
 };
 
 void TextureBrowser_searchTags() {
-  const auto selected = g_TexBro.m_tagsListWidget->selectedItems();
-
-  if (!selected.empty()) {
-    auto buffer = StringStream("/root/*/*[tag='");
-    auto tags_searched = StringStream("[TAGS] ");
-
-    for (auto it = selected.begin(); it != selected.end(); ++it) {
-      const auto tag = (*it)->text().toLatin1();
-      buffer << tag.constData();
-      tags_searched << tag.constData();
-      if (it + 1 != selected.end()) {
-        buffer << "' and tag='";
-        tags_searched << ", ";
-      }
-    }
-
-    buffer << "']";
-
-    g_TexBro.m_found_shaders.clear(); // delete old list
-    TagBuilder.TagSearch(buffer, g_TexBro.m_found_shaders);
-
-    if (!g_TexBro.m_found_shaders.empty()) { // found something
-      globalOutputStream() << "Found " << g_TexBro.m_found_shaders.size()
-                           << " textures and shaders with " << tags_searched
-                           << '\n';
-      ScopeDisableScreenUpdates disableScreenUpdates("Searching...",
-                                                     "Loading Textures");
-
-      for (const CopiedString &shader : g_TexBro.m_found_shaders) {
-        TexturePath_loadTexture(shader.c_str());
-      }
-    }
-    TextureBrowser_SetHideUnused(g_TexBro, false);
-    g_TexBro.m_searchedTags = true;
-    g_TextureBrowser_currentDirectory = tags_searched;
-
-    g_TexBro.heightChanged();
-    g_TexBro.m_originInvalid = true;
-    TextureBrowser_updateTitle();
-
-    // deactivate, so SPACE and RETURN wont be broken for 2d
-    g_TexBro.m_tagsListWidget->clearFocus();
+  const TextureBrowserTagSearchSelection selection =
+      TextureBrowser_getTagSearchSelection();
+  if (selection.manualTags.empty() && selection.smartTagIndices.empty()) {
+    return;
   }
+
+  g_TexBro.m_found_shaders.clear();
+
+  if (!selection.manualTags.empty() && selection.smartTagIndices.empty()) {
+    auto buffer = StringStream("/root/*/*[tag='");
+    for (std::size_t i = 0; i < selection.manualTags.size(); ++i) {
+      buffer << selection.manualTags[i].c_str();
+      if (i + 1 < selection.manualTags.size()) {
+        buffer << "' and tag='";
+      }
+    }
+    buffer << "']";
+    TagBuilder.TagSearch(buffer, g_TexBro.m_found_shaders);
+  } else {
+    TextureBrowserTagSearchContext context{
+        &g_TexBro.m_found_shaders, &selection.manualTags,
+        &selection.smartTagIndices};
+    GlobalShaderSystem().foreachShaderName(
+        TextureBrowserCollectMatchingShaderCaller(context));
+  }
+
+  if (!g_TexBro.m_found_shaders.empty()) {
+    globalOutputStream() << "Found " << g_TexBro.m_found_shaders.size()
+                         << " textures and shaders with "
+                         << selection.searchedLabel.c_str() << '\n';
+    ScopeDisableScreenUpdates disableScreenUpdates("Searching...",
+                                                   "Loading Textures");
+
+    for (const CopiedString &shader : g_TexBro.m_found_shaders) {
+      TexturePath_loadTexture(shader.c_str());
+    }
+  }
+
+  TextureBrowser_SetHideUnused(g_TexBro, false);
+  g_TexBro.m_searchedTags = true;
+  g_TextureBrowser_currentDirectory = selection.searchedLabel;
+
+  g_TexBro.heightChanged();
+  g_TexBro.m_originInvalid = true;
+  TextureBrowser_updateTitle();
+
+  // deactivate, so SPACE and RETURN wont be broken for 2d
+  g_TexBro.m_tagsListWidget->clearFocus();
 }
 
 void TextureBrowser_showUntagged() {
@@ -2066,6 +2445,20 @@ void TextureBrowser_checkTagFile() {
   }
 }
 
+void TextureBrowser_reloadSmartTags() {
+  g_TexBro.m_all_tags.clear();
+  TagBuilder.GetAllTags(g_TexBro.m_all_tags);
+  TextureBrowser_loadSmartTagRules();
+
+  if (g_TexBro.m_tagsListWidget != nullptr) {
+    TextureBrowser_rebuildTagItems();
+    TextureBrowser_tagsSetCheckboxesForShader(g_TexBro.m_shader.c_str());
+  }
+
+  globalOutputStream() << "Loaded " << g_TexBro.m_smartTagRules.size()
+                       << " smart tag rules.\n";
+}
+
 void TextureBrowser_addTag() {
   auto tag = StringStream<64>("NewTag");
   int index = 0;
@@ -2077,6 +2470,7 @@ void TextureBrowser_addTag() {
                  Qt::ItemIsUserCheckable | Qt::ItemIsEnabled |
                  Qt::ItemNeverHasChildren);
   item->setCheckState(Qt::CheckState::Unchecked); // is needed to see checkbox
+  item->setData(c_tagRoleTagName, tag.c_str());
   g_TexBro.m_tagsListWidget->addItem(item);
 
   g_TexBro.m_all_tags.insert(tag.c_str());
@@ -2089,6 +2483,12 @@ void TextureBrowser_renameTag() {
   const auto selected = g_TexBro.m_tagsListWidget->selectedItems();
 
   if (!selected.empty()) {
+    if (TextureBrowser_tagItemIsSmart(selected.front())) {
+      qt_MessageBox(g_TexBro.m_parent,
+                    "Smart tags are rule-based and cannot be renamed.",
+                    "Rename Tag", EMessageBoxType::Warning);
+      return;
+    }
     g_TexBro.m_tagsListWidget->editItem(selected.front());
   }
 }
@@ -2096,16 +2496,32 @@ void TextureBrowser_renameTag() {
 void TextureBrowser_deleteTag() {
   const auto selected = g_TexBro.m_tagsListWidget->selectedItems();
   if (!selected.empty()) {
+    std::vector<QListWidgetItem *> deletable;
+    deletable.reserve(selected.size());
+    for (QListWidgetItem *item : selected) {
+      if (!TextureBrowser_tagItemIsSmart(item)) {
+        deletable.push_back(item);
+      }
+    }
+
+    if (deletable.empty()) {
+      qt_MessageBox(g_TexBro.m_parent,
+                    "Smart tags are rule-based and cannot be deleted.",
+                    "Delete Tag", EMessageBoxType::Warning);
+      return;
+    }
+
     if (eIDYES ==
         qt_MessageBox(g_TexBro.m_parent,
                       "Are you sure you want to delete the selected tags?",
                       "Delete Tag", EMessageBoxType::Question)) {
-      for (auto *item : selected) {
-        auto tag = item->text().toLatin1();
+      for (QListWidgetItem *item : deletable) {
+        const QByteArray tag = TextureBrowser_tagItemName(item);
         delete item;
         TagBuilder.DeleteTag(tag.constData());
         g_TexBro.m_all_tags.erase(tag.constData());
       }
+      TextureBrowser_tagsSetCheckboxesForShader(g_TexBro.m_shader.c_str());
     }
   }
 }
@@ -2725,16 +3141,7 @@ QWidget *TextureBrowser_constructWindow(QWidget *toplevel) {
     QObject::connect(g_TexBro.m_tagsListWidget, &QListWidget::activated,
                      TextureBrowser_searchTags);
 
-    TagBuilder.GetAllTags(g_TexBro.m_all_tags);
-    for (const CopiedString &tag : g_TexBro.m_all_tags) {
-      auto *item = new QListWidgetItem(tag.c_str());
-      item->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEditable |
-                     Qt::ItemIsUserCheckable | Qt::ItemIsEnabled |
-                     Qt::ItemNeverHasChildren);
-      item->setCheckState(
-          Qt::CheckState::Unchecked); // is needed to see checkbox
-      g_TexBro.m_tagsListWidget->addItem(item);
-    }
+    TextureBrowser_reloadSmartTags();
   }
   { // tag context menu
     g_TexBro.m_tagsMenu = TextureBrowser_constructTagsMenu();
@@ -3068,6 +3475,8 @@ void TextureBrowser_Construct() {
   GlobalCommands_insert("TagDelete", makeCallbackF(TextureBrowser_deleteTag));
   GlobalCommands_insert("TagCopy", makeCallbackF(TextureBrowser_copyTag));
   GlobalCommands_insert("TagPaste", makeCallbackF(TextureBrowser_pasteTag));
+  GlobalCommands_insert("TagReloadSmart",
+                        makeCallbackF(TextureBrowser_reloadSmartTags));
   GlobalCommands_insert("RefreshShaders", makeCallbackF(RefreshShaders));
   GlobalCommands_insert("TextureBrowserShaderEditor",
                         makeCallbackF(TextureBrowser_OpenShaderEditor));

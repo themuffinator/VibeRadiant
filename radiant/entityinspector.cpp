@@ -728,6 +728,14 @@ QCheckBox* g_entitySpawnflagsCheck[MAX_FLAGS];
 QLineEdit* g_entityKeyEntry;
 QLineEdit* g_entityValueEntry;
 
+QWidget* g_entityTypedValueWidget;
+QLabel* g_entityTypedValueLabel;
+QCheckBox* g_entityTypedValueBoolean;
+QComboBox* g_entityTypedValueList;
+QToolButton* g_entityTypedValueBrowse;
+QLabel* g_entityTypedValueHint;
+bool g_entityTypedValueUpdating = false;
+
 QToolButton* g_focusToggleButton;
 
 QTreeWidget* g_entprops_store;
@@ -746,6 +754,26 @@ QGridLayout* g_spawnflagsTable;
 QGridLayout* g_attributeBox = nullptr;
 typedef std::vector<EntityAttribute*> EntityAttributes;
 EntityAttributes g_entityAttributes;
+
+enum class TypedValueKind
+{
+	None,
+	Boolean,
+	List,
+	Color,
+	Model,
+	Sound,
+	Spawnflags,
+};
+
+struct TypedValueState
+{
+	TypedValueKind kind = TypedValueKind::None;
+	const ListAttributeType* listType = nullptr;
+	CopiedString type;
+};
+
+TypedValueState g_typedValueState;
 }
 
 void GlobalEntityAttributes_clear(){
@@ -1030,6 +1058,139 @@ void EntityInspector_applySpawnflags(){
 	}
 }
 
+void EntityInspector_applyKeyValue();
+
+const EntityClassAttribute* EntityInspector_findAttributeForKey( const char* key ){
+	if ( g_current_attributes == nullptr || string_empty( key ) ) {
+		return nullptr;
+	}
+	for ( const EntityClassAttributePair& pair : g_current_attributes->m_attributes )
+	{
+		if ( string_equal( pair.first.c_str(), key ) ) {
+			return &pair.second;
+		}
+	}
+	return nullptr;
+}
+
+void EntityInspector_updateTypedValueControls(){
+	if ( g_entityTypedValueWidget == nullptr ) {
+		return;
+	}
+
+	const auto key = g_entityKeyEntry->text().toLatin1();
+	const auto value = g_entityValueEntry->text().toLatin1();
+	g_typedValueState = {};
+
+	g_entityTypedValueWidget->hide();
+	g_entityTypedValueBoolean->hide();
+	g_entityTypedValueList->hide();
+	g_entityTypedValueBrowse->hide();
+	g_entityTypedValueHint->hide();
+
+	if ( key.isEmpty() ) {
+		return;
+	}
+
+	const EntityClassAttribute* attribute = EntityInspector_findAttributeForKey( key.constData() );
+	if ( attribute == nullptr && !string_equal( key.constData(), "spawnflags" ) ) {
+		return;
+	}
+
+	g_typedValueState.type = attribute != nullptr ? attribute->m_type : "spawnflags";
+	g_entityTypedValueLabel->setText( StringStream( "Typed (", g_typedValueState.type.c_str(), ")" ) );
+
+	g_entityTypedValueUpdating = true;
+
+	if ( string_equal( key.constData(), "spawnflags" ) ) {
+		g_typedValueState.kind = TypedValueKind::Spawnflags;
+		g_entityTypedValueHint->setText( "Use the spawnflags checkboxes above." );
+		g_entityTypedValueHint->show();
+	}
+	else if ( string_equal( attribute->m_type.c_str(), "boolean" ) ) {
+		g_typedValueState.kind = TypedValueKind::Boolean;
+		g_entityTypedValueBoolean->setChecked( atoi( value.constData() ) != 0 );
+		g_entityTypedValueBoolean->show();
+	}
+	else if ( const ListAttributeType* listType = GlobalEntityClassManager().findListType( attribute->m_type.c_str() ) ) {
+		g_typedValueState.kind = TypedValueKind::List;
+		g_typedValueState.listType = listType;
+		g_entityTypedValueList->clear();
+		for ( const auto& [name, listValue] : *listType )
+		{
+			g_entityTypedValueList->addItem( name.c_str(), listValue.c_str() );
+		}
+		ListAttributeType::const_iterator i = listType->findValue( value.constData() );
+		g_entityTypedValueList->setCurrentIndex( i != listType->end() ? static_cast<int>( std::distance( listType->begin(), i ) ) : 0 );
+		g_entityTypedValueList->show();
+	}
+	else if ( string_equal( attribute->m_type.c_str(), "color" ) ) {
+		g_typedValueState.kind = TypedValueKind::Color;
+		g_entityTypedValueBrowse->setToolTip( "Pick color" );
+		g_entityTypedValueBrowse->show();
+	}
+	else if ( string_equal( attribute->m_type.c_str(), "model" ) ) {
+		g_typedValueState.kind = TypedValueKind::Model;
+		g_entityTypedValueBrowse->setToolTip( "Browse model" );
+		g_entityTypedValueBrowse->show();
+	}
+	else if ( string_equal( attribute->m_type.c_str(), "sound" ) ) {
+		g_typedValueState.kind = TypedValueKind::Sound;
+		g_entityTypedValueBrowse->setToolTip( "Browse sound" );
+		g_entityTypedValueBrowse->show();
+	}
+	else{
+		g_entityTypedValueUpdating = false;
+		return;
+	}
+
+	g_entityTypedValueWidget->show();
+	g_entityTypedValueUpdating = false;
+}
+
+void EntityInspector_applyTypedBoolean(){
+	if ( g_entityTypedValueUpdating || g_typedValueState.kind != TypedValueKind::Boolean ) {
+		return;
+	}
+	g_entityValueEntry->setText( g_entityTypedValueBoolean->isChecked() ? "1" : "" );
+	EntityInspector_applyKeyValue();
+}
+
+void EntityInspector_applyTypedList(){
+	if ( g_entityTypedValueUpdating || g_typedValueState.kind != TypedValueKind::List ) {
+		return;
+	}
+	g_entityValueEntry->setText( g_entityTypedValueList->currentData().toString() );
+	EntityInspector_applyKeyValue();
+}
+
+void EntityInspector_applyTypedBrowse(){
+	if ( g_entityTypedValueUpdating ) {
+		return;
+	}
+
+	if ( g_typedValueState.kind == TypedValueKind::Color ) {
+		Vector3 color( 1, 1, 1 );
+		string_parse_vector3( g_entityValueEntry->text().toLatin1().constData(), color );
+		if( color_dialog( g_entityValueEntry->window(), color ) ){
+			g_entityValueEntry->setText( StringStream<64>( color[0], ' ', color[1], ' ', color[2] ) );
+			EntityInspector_applyKeyValue();
+		}
+	}
+	else if ( g_typedValueState.kind == TypedValueKind::Model ) {
+		if ( const char* filename = misc_model_dialog( g_entityValueEntry->window(), g_entityValueEntry->text().toLatin1().constData() ); filename != nullptr ) {
+			g_entityValueEntry->setText( filename );
+			EntityInspector_applyKeyValue();
+		}
+	}
+	else if ( g_typedValueState.kind == TypedValueKind::Sound ) {
+		if ( const char* filename = browse_sound( g_entityValueEntry->window(), g_entityValueEntry->text().toLatin1().constData() ); filename != nullptr ) {
+			g_entityValueEntry->setText( filename );
+			EntityInspector_applyKeyValue();
+		}
+	}
+}
+
 
 void EntityInspector_updateKeyValues(){
 	g_selectedKeyValues.clear();
@@ -1051,6 +1212,7 @@ void EntityInspector_updateKeyValues(){
 	{
 		attr->update();
 	}
+	EntityInspector_updateTypedValueControls();
 }
 
 class EntityInspectorDraw
@@ -1152,6 +1314,7 @@ static void EntityProperties_selection_changed( QTreeWidgetItem *item, int colum
 	if( item != nullptr ){
 		g_entityKeyEntry->setText( item->text( 0 ) );
 		g_entityValueEntry->setText( item->text( 1 ) );
+		EntityInspector_updateTypedValueControls();
 	}
 }
 
@@ -1274,6 +1437,7 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 				auto *line = g_entityKeyEntry = new LineEdit;
 				grid->addWidget( line, 0, 1 );
 				QObject::connect( line, &QLineEdit::returnPressed, [](){ g_entityValueEntry->setFocus(); g_entityValueEntry->selectAll(); } );
+				QObject::connect( line, &QLineEdit::textChanged, []( const QString& ){ EntityInspector_updateTypedValueControls(); } );
 				line->setValidator( new KeyNameValidator( line ) );
 			}
 
@@ -1281,7 +1445,40 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 				auto *line = g_entityValueEntry = new LineEdit;
 				grid->addWidget( line, 1, 1 );
 				QObject::connect( line, &QLineEdit::returnPressed, [](){ EntityInspector_applyKeyValue(); } );
+				QObject::connect( line, &QLineEdit::textChanged, []( const QString& ){ EntityInspector_updateTypedValueControls(); } );
 				line->setValidator( new KeyValueValidator( line ) );
+			}
+			{
+				grid->addWidget( new QLabel( "Typed" ), 2, 0 );
+
+				auto *typedWidget = g_entityTypedValueWidget = new QWidget;
+				auto *typedLayout = new QHBoxLayout( typedWidget );
+				typedLayout->setContentsMargins( 0, 0, 0, 0 );
+				typedLayout->setSpacing( 4 );
+
+				auto *typeLabel = g_entityTypedValueLabel = new QLabel;
+				typedLayout->addWidget( typeLabel );
+
+				auto *check = g_entityTypedValueBoolean = new QCheckBox( "Enabled" );
+				typedLayout->addWidget( check );
+				QObject::connect( check, &QAbstractButton::clicked, EntityInspector_applyTypedBoolean );
+
+				auto *combo = g_entityTypedValueList = new ComboBox;
+				combo->setSizeAdjustPolicy( QComboBox::SizeAdjustPolicy::AdjustToContents );
+				typedLayout->addWidget( combo );
+				QObject::connect( combo, QOverload<int>::of( &QComboBox::activated ), []( int ){ EntityInspector_applyTypedList(); } );
+
+				auto *browse = g_entityTypedValueBrowse = new QToolButton;
+				browse->setIcon( new_local_icon( "ellipsis.png" ) );
+				typedLayout->addWidget( browse );
+				QObject::connect( browse, &QAbstractButton::clicked, EntityInspector_applyTypedBrowse );
+
+				auto *hint = g_entityTypedValueHint = new QLabel;
+				typedLayout->addWidget( hint );
+
+				typedLayout->addStretch();
+				typedWidget->hide();
+				grid->addWidget( typedWidget, 2, 1, 1, 3 );
 			}
 			/* select by key/value buttons */
 			{

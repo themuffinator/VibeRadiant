@@ -301,6 +301,7 @@ public:
 		if ( finishUndo( command ) ) {
 			globalOutputStream() << command << '\n';
 		}
+		trackersFinish();
 	}
 	void undo() override {
 		if ( m_undo_stack.empty() ) {
@@ -364,6 +365,12 @@ public:
 		for ( auto *tr : m_trackers )
 		{
 			tr->undo();
+		}
+	}
+	void trackersFinish() const {
+		for ( auto *tr : m_trackers )
+		{
+			tr->finish();
 		}
 	}
 	void trackersRedo() const {

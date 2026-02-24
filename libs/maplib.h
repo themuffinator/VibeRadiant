@@ -92,6 +92,9 @@ public:
 	void begin() override {
 		m_pending = Pending( &UndoFileChangeTracker::pushOperation );
 	}
+	void finish() override {
+		m_pending = 0;
+	}
 	void undo() override {
 		m_pending = Pending( &UndoFileChangeTracker::pop );
 	}

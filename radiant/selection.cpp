@@ -26,7 +26,10 @@
 #include <algorithm>
 #include <map>
 #include <list>
+#include <optional>
 #include <set>
+#include <QObject>
+#include <QTimer>
 
 #include "windowobserver.h"
 #include "iundo.h"
@@ -6990,6 +6993,92 @@ private:
 
 	Signal1<const Selectable&> m_selectionChanged_callbacks;
 
+	struct SelectionSnapshot
+	{
+		EMode mode;
+		EComponentMode componentMode;
+		std::set<scene::Node*> selectedNodes;
+		std::set<scene::Node*> componentNodes;
+	};
+
+	class SelectionUndoTracker final : public UndoTracker
+	{
+		RadiantSelectionSystem& m_system;
+		std::vector<SelectionSnapshot> m_undo;
+		std::vector<SelectionSnapshot> m_redo;
+		std::optional<SelectionSnapshot> m_pendingBefore;
+		bool m_restoring = false;
+		std::optional<SelectionSnapshot> m_pendingRestore;
+		std::size_t m_restoreGeneration = 0;
+		QObject m_timerContext;
+	public:
+		explicit SelectionUndoTracker( RadiantSelectionSystem& system )
+			: m_system( system ){
+		}
+
+		void clear() override {
+			m_undo.clear();
+			m_redo.clear();
+			m_pendingBefore.reset();
+			m_pendingRestore.reset();
+			++m_restoreGeneration;
+		}
+		void begin() override {
+			m_pendingBefore = m_system.captureSelectionSnapshot();
+		}
+		void finish() override {
+			m_pendingBefore.reset();
+		}
+		void undo() override {
+			if ( m_undo.empty() ) {
+				return;
+			}
+
+			SelectionSnapshot snapshot = m_undo.back();
+			m_undo.pop_back();
+			m_redo.push_back( m_system.captureSelectionSnapshot() );
+			scheduleRestore( std::move( snapshot ) );
+		}
+		void redo() override {
+			if ( m_redo.empty() ) {
+				return;
+			}
+
+			SelectionSnapshot snapshot = m_redo.back();
+			m_redo.pop_back();
+			m_undo.push_back( m_system.captureSelectionSnapshot() );
+			scheduleRestore( std::move( snapshot ) );
+		}
+		void onSelectionChanged(){
+			if ( m_restoring || !m_pendingBefore.has_value() ) {
+				return;
+			}
+
+			m_undo.push_back( *m_pendingBefore );
+			m_redo.clear();
+			m_pendingBefore.reset();
+		}
+	private:
+		void scheduleRestore( SelectionSnapshot&& snapshot ){
+			m_pendingRestore = std::move( snapshot );
+			const std::size_t generation = ++m_restoreGeneration;
+			QTimer::singleShot( 0, &m_timerContext, [this, generation](){
+				if ( generation != m_restoreGeneration || !m_pendingRestore.has_value() ) {
+					return;
+				}
+
+				m_restoring = true;
+				m_system.restoreSelectionSnapshot( *m_pendingRestore );
+				m_restoring = false;
+				m_pendingRestore.reset();
+			} );
+		}
+	};
+
+	SelectionUndoTracker m_selectionUndoTracker;
+	SelectionSnapshot captureSelectionSnapshot() const;
+	void restoreSelectionSnapshot( const SelectionSnapshot& snapshot );
+
 	void ConstructPivot() const;
 	void ConstructPivotRotation() const;
 	void setCustomTransformOrigin( const Vector3& origin, const bool set[3] ) const override;
@@ -7030,6 +7119,7 @@ public:
 		m_drag_manipulator( *this, *this ),
 		m_clip_manipulator( m_pivot2world, m_bounds ),
 		m_transformOrigin_manipulator( *this, m_pivotIsCustom ),
+		m_selectionUndoTracker( *this ),
 		m_pivotChanged( false ),
 		m_pivot_moving( false ),
 		m_pivotIsCustom( false ){
@@ -7037,6 +7127,10 @@ public:
 		pivotChanged();
 		addSelectionChangeCallback( PivotChangedSelectionCaller( *this ) );
 		AddGridChangeCallback( PivotChangedCaller( *this ) );
+		GlobalUndoSystem().trackerAttach( m_selectionUndoTracker );
+	}
+	~RadiantSelectionSystem(){
+		GlobalUndoSystem().trackerDetach( m_selectionUndoTracker );
 	}
 	void pivotChanged() const override {
 		m_pivotChanged = true;
@@ -7174,6 +7268,53 @@ public:
 
 		m_manipulator->setSelected( selected );
 	}
+	SelectionSnapshot captureSelectionSnapshot() const {
+		SelectionSnapshot snapshot;
+		snapshot.mode = Mode();
+		snapshot.componentMode = ComponentMode();
+
+		for ( scene::Instance* instance : m_selection )
+		{
+			snapshot.selectedNodes.insert( instance->path().top().get_pointer() );
+		}
+		for ( scene::Instance* instance : m_component_selection )
+		{
+			snapshot.componentNodes.insert( instance->path().top().get_pointer() );
+		}
+
+		return snapshot;
+	}
+	void restoreSelectionSnapshot( const SelectionSnapshot& snapshot ){
+		SetMode( snapshot.mode );
+		SetComponentMode( snapshot.componentMode );
+
+		setSelectedAllComponents( false );
+		setSelectedAll( false );
+
+		class RestoreSelectionWalker final : public scene::Graph::Walker
+		{
+			const SelectionSnapshot& m_snapshot;
+		public:
+			explicit RestoreSelectionWalker( const SelectionSnapshot& snapshot )
+				: m_snapshot( snapshot ){
+			}
+			bool pre( const scene::Path& path, scene::Instance& instance ) const override {
+				if ( Selectable* selectable = Instance_getSelectable( instance ) ) {
+					if ( m_snapshot.selectedNodes.find( path.top().get_pointer() ) != m_snapshot.selectedNodes.end() ) {
+						selectable->setSelected( true );
+					}
+				}
+				if ( ComponentSelectionTestable* component = Instance_getComponentSelectionTestable( instance ) ) {
+					if ( m_snapshot.componentNodes.find( path.top().get_pointer() ) != m_snapshot.componentNodes.end() ) {
+						component->setSelectedComponents( true, m_snapshot.componentMode );
+					}
+				}
+				return true;
+			}
+		};
+
+		GlobalSceneGraph().traverse( RestoreSelectionWalker( snapshot ) );
+	}
 
 	void foreachSelected( const Visitor& visitor ) const override {
 		selection_t::const_iterator i = m_selection.begin();
@@ -7194,6 +7335,7 @@ public:
 		m_selectionChanged_callbacks.connectLast( handler );
 	}
 	void selectionChanged( const Selectable& selectable ){
+		m_selectionUndoTracker.onSelectionChanged();
 		m_selectionChanged_callbacks( selectable );
 	}
 	typedef MemberCaller<RadiantSelectionSystem, void(const Selectable&), &RadiantSelectionSystem::selectionChanged> SelectionChangedCaller;
@@ -8511,6 +8653,12 @@ public:
 
 class Selector_
 {
+	void beginSelectionUndo(){
+		if ( !m_undo_begun ) {
+			m_undo_begun = true;
+			GlobalUndoSystem().start();
+		}
+	}
 	bool m1selecting() const {
 		return !m_mouse2 && ( g_modifiers == c_modifier_toggle || g_modifiers == c_modifier_face
 		|| ( g_modifiers == c_modifierAlt && getSelectionSystem().Mode() == SelectionSystem::eComponent ) ); // select primitives in component mode
@@ -8566,6 +8714,7 @@ public:
 	bool m_mouse2;
 	bool m_mouseMoved;
 	bool m_mouseMovedWhilePressed;
+	bool m_undo_begun;
 	RadiantSelectionSystem::EModifier m_paintMode;
 	const View* m_view;
 	RectangleCallback m_window_update;
@@ -8576,7 +8725,8 @@ public:
 		m_current( 0, 0 ),
 		m_mouse2( false ),
 		m_mouseMoved( false ),
-		m_mouseMovedWhilePressed( false ){
+		m_mouseMovedWhilePressed( false ),
+		m_undo_begun( false ){
 	}
 
 	void testSelect_simpleM1( DeviceVector position ){
@@ -8584,6 +8734,7 @@ public:
 	}
 
 	void mouseDown( DeviceVector position ){
+		beginSelectionUndo();
 		m_start = m_current = device_constrained( position );
 		m_paintMode = RadiantSelectionSystem::eSelect;
 		if( m1selecting() ){
@@ -8611,6 +8762,13 @@ public:
 		}
 	}
 	typedef MemberCaller<Selector_, void(DeviceVector), &Selector_::mouseUp> MouseUpCaller;
+
+	void finishSelectionUndo( const char* command ){
+		if ( m_undo_begun ) {
+			GlobalUndoSystem().finish( command );
+			m_undo_begun = false;
+		}
+	}
 };
 
 
@@ -8785,6 +8943,8 @@ public:
 		if( getSelectionSystem().ManipulatorMode() == SelectionSystem::eClip
 		&& button == c_button_select && ( modifiers == c_modifierNone || ClipManipulator::quickCondition( modifiers, *m_manipulator.m_view ) ) )
 			Clipper_tryDoubleclickedCut();
+
+		m_selector.finishSelectionUndo( "selectTool" );
 
 		m_mouse_down = false; /* unconditionally drop the flag to surely not lock the onMouseDown() */
 		m_manipulator.m_moving_transformOrigin = false;

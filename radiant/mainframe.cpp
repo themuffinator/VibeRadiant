@@ -127,6 +127,8 @@
 #include "renderstate.h"
 #include "feedback.h"
 #include "referencecache.h"
+#include "issuebrowser.h"
+#include "uvview.h"
 
 #include "colors.h"
 #include "tools.h"
@@ -1067,6 +1069,18 @@ void LayersBrowser_ToggleShow(){
 	GroupDialog_showPage( g_page_layers);
 }
 
+QWidget* g_page_issues;
+
+void IssueBrowser_ToggleShow(){
+	GroupDialog_showPage( g_page_issues );
+}
+
+QWidget* g_page_uvview;
+
+void UVView_ToggleShow(){
+	GroupDialog_showPage( g_page_uvview );
+}
+
 
 static class EverySecondTimer
 {
@@ -1272,6 +1286,17 @@ void create_edit_menu( QMenuBar *menubar ){
 	create_menu_item_with_mnemonic( menu, "Select Connected Entities", "SelectConnectedEntities" );
 
 	menu->addSeparator();
+	{
+		QMenu* submenu = menu->addMenu( i18n::tr( "Macros" ) );
+		submenu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
+		create_menu_item_with_mnemonic( submenu, "Start Recording", "MacroRecordStart" );
+		create_menu_item_with_mnemonic( submenu, "Stop Recording", "MacroRecordStop" );
+		submenu->addSeparator();
+		create_menu_item_with_mnemonic( submenu, "Play Recorded Macro", "MacroPlay" );
+		create_menu_item_with_mnemonic( submenu, "Clear Recorded Macro", "MacroClear" );
+	}
+
+	menu->addSeparator();
 	create_menu_item_with_mnemonic( menu, "&Shortcuts...", "Shortcuts" );
 	create_menu_item_with_mnemonic( menu, "Pre&ferences...", "Preferences" );
 }
@@ -1296,6 +1321,8 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 	}
 	create_menu_item_with_mnemonic( menu, "Entity Inspector", "ToggleEntityInspector" );
 	create_menu_item_with_mnemonic( menu, "Layers Browser", "ToggleLayersBrowser" );
+	create_menu_item_with_mnemonic( menu, "Issue Browser", "ToggleIssueBrowser" );
+	create_menu_item_with_mnemonic( menu, "UV View", "ToggleUVView" );
 	create_menu_item_with_mnemonic( menu, "&Surface Inspector", "SurfaceInspector" );
 	create_menu_item_with_mnemonic( menu, "Entity List", "ToggleEntityList" );
 
@@ -2097,6 +2124,8 @@ void MainFrame::Create(){
 	}
 
 	g_page_layers = GroupDialog_addPage( "Layers", LayersBrowser_constructWindow( GroupDialog_getWindow() ), RawStringExportCaller( "Layers" ) );
+	g_page_issues = GroupDialog_addPage( "Issues", IssueBrowser_constructWindow( GroupDialog_getWindow() ), RawStringExportCaller( "Issues" ) );
+	g_page_uvview = GroupDialog_addPage( "UV View", UVView_constructWindow( GroupDialog_getWindow() ), RawStringExportCaller( "UV View" ) );
 
 	window->show();
 
@@ -2324,6 +2353,8 @@ void MainFrame::Shutdown(){
 
 	ModelBrowser_destroyWindow();
 	LayersBrowser_destroyWindow();
+	IssueBrowser_destroyWindow();
+	UVView_destroyWindow();
 	if ( AssetBrowser_isEnabled() ) {
 		SoundBrowser_destroyWindow();
 		EntityBrowser_destroyWindow();
@@ -2493,9 +2524,16 @@ void MainFrame_Construct(){
 	GlobalCommands_insert( "Shortcuts", makeCallbackF( DoCommandListDlg ), QKeySequence( "Ctrl+Shift+P" ) );
 	GlobalCommands_insert( "Preferences", makeCallbackF( PreferencesDialog_showDialog ), QKeySequence( "P" ) );
 
+	GlobalCommands_insert( "MacroRecordStart", makeCallbackF( GlobalCommandMacro_startRecording ), QKeySequence( "Ctrl+Shift+F9" ) );
+	GlobalCommands_insert( "MacroRecordStop", makeCallbackF( GlobalCommandMacro_stopRecording ), QKeySequence( "Ctrl+Shift+F10" ) );
+	GlobalCommands_insert( "MacroPlay", makeCallbackF( GlobalCommandMacro_playback ), QKeySequence( "Ctrl+Shift+F11" ) );
+	GlobalCommands_insert( "MacroClear", makeCallbackF( GlobalCommandMacro_clear ) );
+
 	GlobalCommands_insert( "ToggleConsole", makeCallbackF( Console_ToggleShow ), QKeySequence( "O" ) );
 	GlobalCommands_insert( "ToggleEntityInspector", makeCallbackF( EntityInspector_ToggleShow ), QKeySequence( "N" ) );
 	GlobalCommands_insert( "ToggleLayersBrowser", makeCallbackF( LayersBrowser_ToggleShow ), QKeySequence( "L" ) );
+	GlobalCommands_insert( "ToggleIssueBrowser", makeCallbackF( IssueBrowser_ToggleShow ) );
+	GlobalCommands_insert( "ToggleUVView", makeCallbackF( UVView_ToggleShow ) );
 	GlobalCommands_insert( "ToggleEntityList", makeCallbackF( EntityList_toggleShown ), QKeySequence( "Shift+L" ) );
 
 	Select_registerCommands();

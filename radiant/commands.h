@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include "gtkutil/accelerator.h"
 
 
@@ -31,6 +33,14 @@ void GlobalShortcuts_reportDuplicates();
 
 void GlobalCommands_insert( const char* name, const Callback<void()>& callback, const QKeySequence& accelerator = {} );
 const Command& GlobalCommands_find( const char* name );
+void GlobalCommands_execute( const char* name );
+
+void GlobalCommandMacro_startRecording();
+void GlobalCommandMacro_stopRecording();
+void GlobalCommandMacro_playback();
+void GlobalCommandMacro_clear();
+bool GlobalCommandMacro_isRecording();
+std::size_t GlobalCommandMacro_size();
 
 void GlobalToggles_insert( const char* name, const Callback<void()>& callback, const BoolExportCallback& exportCallback, const QKeySequence& accelerator = {} );
 const Toggle& GlobalToggles_find( const char* name );

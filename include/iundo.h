@@ -52,6 +52,7 @@ class UndoTracker
 public:
 	virtual void clear() = 0;
 	virtual void begin() = 0;
+	virtual void finish() = 0;
 	virtual void undo() = 0;
 	virtual void redo() = 0;
 };

@@ -23,6 +23,7 @@
 
 #include "debugging/debugging.h"
 
+#include <algorithm>
 #include <map>
 #include <vector>
 #include "string/string.h"
@@ -101,8 +102,105 @@ typedef std::map<CopiedString, Command> Commands;
 
 Commands g_commands;
 
+namespace
+{
+constexpr const char* c_macroStartCommand = "MacroRecordStart";
+constexpr const char* c_macroStopCommand = "MacroRecordStop";
+constexpr const char* c_macroPlayCommand = "MacroPlay";
+constexpr const char* c_macroClearCommand = "MacroClear";
+
+inline bool Command_isMacroControl( const char* name ){
+	return string_equal( name, c_macroStartCommand )
+	       || string_equal( name, c_macroStopCommand )
+	       || string_equal( name, c_macroPlayCommand )
+	       || string_equal( name, c_macroClearCommand );
+}
+
+class CommandMacroController
+{
+	std::vector<CopiedString> m_recordedCommands;
+	bool m_recording = false;
+	bool m_playing = false;
+public:
+	void startRecording(){
+		m_recordedCommands.clear();
+		m_recording = true;
+		globalOutputStream() << "Macro: recording started\n";
+	}
+	void stopRecording(){
+		m_recording = false;
+		globalOutputStream() << "Macro: recording stopped (" << m_recordedCommands.size() << " command(s))\n";
+	}
+	void clear(){
+		m_recordedCommands.clear();
+		globalOutputStream() << "Macro: cleared\n";
+	}
+	void playback(){
+		if ( m_recordedCommands.empty() ) {
+			globalWarningStream() << "Macro: nothing recorded\n";
+			return;
+		}
+
+		const bool wasRecording = m_recording;
+		m_recording = false;
+		m_playing = true;
+
+		globalOutputStream() << "Macro: playback (" << m_recordedCommands.size() << " command(s))\n";
+		for ( const CopiedString& commandName : m_recordedCommands )
+		{
+			if ( const Commands::iterator command = g_commands.find( commandName.c_str() ); command != g_commands.end() ) {
+				command->second.m_callback();
+			}
+			else{
+				globalWarningStream() << "Macro: missing command " << Quoted( commandName.c_str() ) << '\n';
+			}
+		}
+
+		m_playing = false;
+		m_recording = wasRecording;
+	}
+	bool isRecording() const {
+		return m_recording;
+	}
+	std::size_t size() const {
+		return m_recordedCommands.size();
+	}
+	void onCommandInvoked( const char* commandName, const Callback<void()>& commandCallback ){
+		if ( m_recording && !m_playing && !Command_isMacroControl( commandName ) ) {
+			m_recordedCommands.emplace_back( commandName );
+		}
+		commandCallback();
+	}
+};
+
+CommandMacroController g_commandMacroController;
+
+class CommandExecutionWrapper
+{
+	CopiedString m_name;
+	Callback<void()> m_callback;
+public:
+	using func = void();
+
+	CommandExecutionWrapper() = default;
+	CommandExecutionWrapper( const char* name, const Callback<void()>& callback )
+		: m_name( name ), m_callback( callback ){
+	}
+
+	void operator()(){
+		g_commandMacroController.onCommandInvoked( m_name.c_str(), m_callback );
+	}
+};
+
+typedef std::map<CopiedString, CommandExecutionWrapper> CommandExecutionWrappers;
+CommandExecutionWrappers g_commandExecutionWrappers;
+}
+
 void GlobalCommands_insert( const char* name, const Callback<void()>& callback, const QKeySequence& accelerator ){
-	bool added = g_commands.insert( Commands::value_type( name, Command( callback, GlobalShortcuts_insert( name, accelerator ) ) ) ).second;
+	auto [wrapperIt, wrapperAdded] = g_commandExecutionWrappers.insert( CommandExecutionWrappers::value_type( name, CommandExecutionWrapper( name, callback ) ) );
+	ASSERT_MESSAGE( wrapperAdded, "command wrapper already registered: " << Quoted( name ) );
+
+	bool added = g_commands.insert( Commands::value_type( name, Command( makeCallback( wrapperIt->second ), GlobalShortcuts_insert( name, accelerator ) ) ) ).second;
 	ASSERT_MESSAGE( added, "command already registered: " << Quoted( name ) );
 }
 
@@ -110,6 +208,34 @@ const Command& GlobalCommands_find( const char* command ){
 	Commands::iterator i = g_commands.find( command );
 	ASSERT_MESSAGE( i != g_commands.end(), "failed to lookup command " << Quoted( command ) );
 	return ( *i ).second;
+}
+
+void GlobalCommands_execute( const char* name ){
+	GlobalCommands_find( name ).m_callback();
+}
+
+void GlobalCommandMacro_startRecording(){
+	g_commandMacroController.startRecording();
+}
+
+void GlobalCommandMacro_stopRecording(){
+	g_commandMacroController.stopRecording();
+}
+
+void GlobalCommandMacro_playback(){
+	g_commandMacroController.playback();
+}
+
+void GlobalCommandMacro_clear(){
+	g_commandMacroController.clear();
+}
+
+bool GlobalCommandMacro_isRecording(){
+	return g_commandMacroController.isRecording();
+}
+
+std::size_t GlobalCommandMacro_size(){
+	return g_commandMacroController.size();
 }
 
 typedef std::map<CopiedString, Toggle> Toggles;

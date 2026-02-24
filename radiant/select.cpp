@@ -355,6 +355,7 @@ void Scene_Invert_Selection( scene::Graph& graph ){
 }
 
 void Select_Invert(){
+	UndoableCommand undo( "invertSelection" );
 	Scene_Invert_Selection( GlobalSceneGraph() );
 }
 
@@ -445,6 +446,7 @@ public:
 };
 
 void Scene_ExpandSelectionToPrimitives(){
+	UndoableCommand undo( "expandSelectionToPrimitives" );
 	GlobalSceneGraph().traverse( ExpandSelectionToPrimitivesWalker() );
 }
 
@@ -485,6 +487,7 @@ public:
 };
 
 void Scene_ExpandSelectionToEntities(){
+	UndoableCommand undo( "expandSelectionToEntities" );
 	GlobalSceneGraph().traverse( ExpandSelectionToEntitiesWalker() );
 }
 
@@ -2090,6 +2093,7 @@ void Scene_BrushPatchSelectByShader( const char *shader ){
 }
 
 void Select_AllOfType(){
+	UndoableCommand undo( "selectAllOfType" );
 	if ( GlobalSelectionSystem().Mode() == SelectionSystem::eComponent ) {
 		if ( GlobalSelectionSystem().ComponentMode() == SelectionSystem::eFace ) {
 			GlobalSelectionSystem().setSelectedAllComponents( false );
@@ -2109,6 +2113,7 @@ void Select_AllOfType(){
 }
 
 void Select_EntitiesByKeyValue( const char* key, const char* value ){
+	UndoableCommand undo( "selectEntitiesByKeyValue" );
 	GlobalSelectionSystem().setSelectedAll( false );
 	if( key != nullptr && value != nullptr ){
 		if( !string_empty( key ) && !string_empty( value ) ){
@@ -2160,10 +2165,12 @@ void Select_Inside(){
 }
 
 void Select_Touching(){
+	UndoableCommand undo( "selectTouching" );
 	SelectByBounds<SelectionPolicy_Touching>::DoSelection( false );
 }
 
 void Select_TouchingTall(){
+	UndoableCommand undo( "selectTouchingTall" );
 	SelectByBounds<SelectionPolicy_TouchingTall>::DoSelection( false );
 }
 
@@ -2665,6 +2672,7 @@ void Selection_Clone_MakeUnique(){
 
 // called when the escape key is used (either on the main window or on an inspector)
 void Selection_Deselect(){
+	UndoableCommand undo( "clearSelection" );
 	if ( GlobalSelectionSystem().Mode() == SelectionSystem::eComponent ) {
 		if ( GlobalSelectionSystem().countSelectedComponents() != 0 ) {
 			GlobalSelectionSystem().setSelectedAllComponents( false );
@@ -3081,6 +3089,8 @@ void Select_ConnectedEntities( bool targeting, bool targets, bool focus ){
 		globalErrorStream() << "SelectConnectedEntities: nothing found\n";
 		return;
 	}
+
+	UndoableCommand undo( "selectConnectedEntities" );
 
 	if( !targeting || !targets ){
 		GlobalSelectionSystem().setSelectedAll( false );

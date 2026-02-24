@@ -961,6 +961,7 @@ $(INSTALLDIR)/radiant.$(EXE): \
 	radiant/gtkmisc.o \
 	radiant/help.o \
 	radiant/image.o \
+	radiant/issuebrowser.o \
 	radiant/layerswindow.o \
 	radiant/linkedgroups.o \
 	radiant/localization.o \
@@ -1005,6 +1006,7 @@ $(INSTALLDIR)/radiant.$(EXE): \
 	radiant/treemodel.o \
 	radiant/update.o \
 	radiant/undo.o \
+	radiant/uvview.o \
 	radiant/url.o \
 	radiant/view.o \
 	radiant/watchbsp.o \
