@@ -101,6 +101,7 @@ Sources used:
 - Build menu compatibility: extended variable expansion to support `${VAR}` syntax (alongside `[VAR]`) and added DarkRadiant-style build variables (`EXEC_ENGINE`, `MAP_NAME`, `REF_MAP`, `REF_ABSMAP`) for idTech4 build-menu parity.
 - Releases/updates: added a `VERSION` file, release packaging workflow with update manifest generation, and an in-app auto-updater that checks GitHub releases and installs updates (Windows zip, Linux AppImage).
 - Releases/updates: ported the PakFu updater/startup release flow by resolving `update.json` via GitHub Releases API (stable + prerelease channels), running automatic update checks during the splash startup path, and adding a scheduled nightly prerelease pipeline (`.github/workflows/nightly.yml`) with scripted nightly versioning/release notes.
+- Releases/updates: switched CI/release workflows to Qt6 dependencies, added macOS arm64 build artifacts to build/release/nightly pipelines, and extended the updater/manifest flow to support macOS tar.gz packages (including installation/relaunch on macOS).
 - Documentation: added `RELEASING.md` for versioning/packaging/release details and `docs/auto-updater.md` for user-facing update instructions.
 - Documentation: added `docs/language-packs.md` to describe language packs and supported languages.
 - Clipper tool: added a visual style option (GTK/NRC/VIBE) for clipped volume previewing, including a VIBE mode with a red dashed cut line and striped fill.

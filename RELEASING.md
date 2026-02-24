@@ -44,6 +44,10 @@ Linux packages:
 - `appimage.sh` copies `install/` into an AppDir, generates a desktop file and icon,
   and uses `linuxdeploy` plus the Qt plugin to build `VibeRadiant-x86_64.AppImage`.
 
+macOS packages:
+- CI builds on `macos-14` (arm64) and archives `install/` as
+  `VibeRadiant-macos-arm64.tar.gz`.
+
 Legacy Makefile release targets:
 - `release-src` produces a source tarball from `git archive`.
 - `release-win32` builds and produces a self-extracting 7z exe.
@@ -56,10 +60,11 @@ Trigger:
 
 Steps:
 1. Verify `VERSION` matches the tag.
-2. Build Windows and Linux artifacts.
+2. Build Windows, Linux, and macOS artifacts.
 3. Rename assets to include the version:
    - `VibeRadiant-${VERSION}-windows-x86_64.zip`
    - `VibeRadiant-${VERSION}-linux-x86_64.AppImage`
+   - `VibeRadiant-${VERSION}-macos-arm64.tar.gz`
 4. Generate `release/update.json` and `release/sha256sums.txt`.
 5. Publish a GitHub release with all files in `release/`.
 
@@ -71,7 +76,7 @@ Trigger:
 Steps:
 1. `scripts/nightly_version.py` computes `X.Y.Z.BUILD`, release tag, and whether
    there are meaningful commits since the previous nightly.
-2. If changes exist (or `force=true`), CI builds Windows and Linux artifacts using
+2. If changes exist (or `force=true`), CI builds Windows, Linux, and macOS artifacts using
    that computed nightly version.
 3. CI generates `release/update.json`, checksums, and nightly notes via
    `scripts/nightly_release_notes.py`.
@@ -105,6 +110,13 @@ Example (trimmed):
       "name": "VibeRadiant-1.6.0-linux-x86_64.AppImage",
       "type": "appimage",
       "size": 12345678
+    },
+    "macos-arm64": {
+      "url": "https://github.com/themuffinator/VibeRadiant/releases/download/v1.6.0/VibeRadiant-1.6.0-macos-arm64.tar.gz",
+      "sha256": "....",
+      "name": "VibeRadiant-1.6.0-macos-arm64.tar.gz",
+      "type": "tar.gz",
+      "size": 12345678
     }
   }
 }
@@ -113,7 +125,7 @@ Example (trimmed):
 Platform keys are defined in `radiant/update.cpp`:
 - `windows-x86_64`, `windows-x86`
 - `linux-x86_64`, `linux-arm64`, `linux-unknown`
-- `macos-unknown`, `unknown`
+- `macos-arm64`, `macos-x86_64`, `macos-unknown`, `unknown`
 
 If the manifest does not include the current platform key, the updater does not offer
 an update.

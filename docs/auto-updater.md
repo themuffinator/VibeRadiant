@@ -21,8 +21,7 @@ with auto-update.
 The auto-updater only works with the official release packages:
 - Windows: the zip package from GitHub Releases.
 - Linux: the AppImage package from GitHub Releases.
-
-Other platforms and packaging formats are not supported.
+- macOS: the tar.gz package from GitHub Releases (nightly + stable).
 
 ## What happens during an update
 
@@ -45,6 +44,14 @@ main window opens after the check completes.
 
 - Auto-update requires the AppImage build and only works when running the AppImage.
 - The downloaded AppImage replaces the existing one, so the file location must be writable.
+
+## macOS details
+
+- Auto-update expects the official tar.gz package from Releases.
+- The archive is extracted into the current install directory and the editor relaunches.
+- The install path must be writable. App bundles installed under protected locations
+  (for example `/Applications` without write permission) may require running from
+  a user-writable location.
 
 ## If an update fails
 

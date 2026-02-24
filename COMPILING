@@ -103,6 +103,8 @@ packaging notes and a Makefile for building a .app bundle.
 2) Install XQuartz.
 3) Install dependencies with your package manager so pkg-config can find:
    Qt6Core/Gui/Widgets/Svg/Network/Multimedia, glib-2.0, libxml2, libpng, zlib, libjpeg, assimp.
+   Homebrew example:
+     brew install qt@6 pkg-config glib libxml2 libpng jpeg-turbo assimp mesa libx11
 4) Build:
      make
 5) Run:

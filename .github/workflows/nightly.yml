@@ -79,7 +79,7 @@ jobs:
     steps:
     - uses: msys2/setup-msys2@v2
       with:
-        install: base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-qt5-base mingw-w64-x86_64-qt5-svg mingw-w64-x86_64-assimp mingw-w64-x86_64-libxml2 git unzip p7zip
+        install: base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-svg mingw-w64-x86_64-qt6-multimedia mingw-w64-x86_64-assimp mingw-w64-x86_64-libxml2 git unzip p7zip
         msystem: MINGW64
         path-type: minimal
         release: false
@@ -115,7 +115,7 @@ jobs:
     - name: Install tools
       run: |
         sudo apt-get -qq update
-        sudo apt-get -y install mesa-common-dev qtbase5-dev libqt5svg5-dev libglib2.0-dev libjpeg-dev libpng-dev libassimp-dev
+        sudo apt-get -y install mesa-common-dev qt6-base-dev qt6-svg-dev qt6-multimedia-dev libglib2.0-dev libjpeg-dev libpng-dev libassimp-dev
 
     - uses: actions/checkout@v4
       with:
@@ -137,9 +137,47 @@ jobs:
         path: VibeRadiant-x86_64.AppImage
         if-no-files-found: error
 
+  macos:
+    name: macOS arm64
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: macos-14
+    steps:
+    - name: Install tools
+      shell: bash
+      run: |
+        brew update
+        brew install qt@6 pkg-config glib libxml2 libpng jpeg-turbo assimp mesa libx11
+
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.prepare.outputs.head_sha }}
+        submodules: recursive
+
+    - name: Write nightly version
+      shell: bash
+      run: |
+        printf "%s\n" "${{ needs.prepare.outputs.version }}" > VERSION
+
+    - name: Build
+      shell: bash
+      run: |
+        BREW_PREFIX="$(brew --prefix)"
+        QT_PREFIX="$(brew --prefix qt@6)"
+        export PATH="$QT_PREFIX/bin:$BREW_PREFIX/bin:$PATH"
+        export PKG_CONFIG_PATH="$QT_PREFIX/lib/pkgconfig:$BREW_PREFIX/lib/pkgconfig"
+        make OS=Darwin MACLIBDIR="$BREW_PREFIX/lib" LIBS_GL="-lGL -lX11" LIBS_DL= -j4
+        tar -C install -czf VibeRadiant-macos-arm64.tar.gz .
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: macos-arm64
+        path: VibeRadiant-macos-arm64.tar.gz
+        if-no-files-found: error
+
   release:
     name: Publish nightly prerelease
-    needs: [prepare, windows-msys, linux]
+    needs: [prepare, windows-msys, linux, macos]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -166,6 +204,7 @@ jobs:
         mkdir -p release
         mv windows-x86_64/VibeRadiant-windows-x86_64.zip release/VibeRadiant-${VERSION}-windows-x86_64.zip
         mv linux-x86_64/VibeRadiant-x86_64.AppImage release/VibeRadiant-${VERSION}-linux-x86_64.AppImage
+        mv macos-arm64/VibeRadiant-macos-arm64.tar.gz release/VibeRadiant-${VERSION}-macos-arm64.tar.gz
         python - <<'PY'
         import datetime
         import hashlib
@@ -191,6 +230,7 @@ jobs:
         assets = {
             "windows-x86_64": file_info(f"release/VibeRadiant-{version}-windows-x86_64.zip", "zip"),
             "linux-x86_64": file_info(f"release/VibeRadiant-{version}-linux-x86_64.AppImage", "appimage"),
+            "macos-arm64": file_info(f"release/VibeRadiant-{version}-macos-arm64.tar.gz", "tar.gz"),
         }
         manifest = {
             "version": version,

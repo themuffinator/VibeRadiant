@@ -27,7 +27,7 @@ jobs:
     steps:
     - uses: msys2/setup-msys2@v2
       with:
-        install: base-devel ${{ matrix.prefix }}-toolchain ${{ matrix.prefix }}-qt5-base ${{ matrix.prefix }}-qt5-svg ${{ matrix.prefix }}-assimp ${{ matrix.prefix }}-libxml2 git unzip p7zip
+        install: base-devel ${{ matrix.prefix }}-toolchain ${{ matrix.prefix }}-qt6-base ${{ matrix.prefix }}-qt6-svg ${{ matrix.prefix }}-qt6-multimedia ${{ matrix.prefix }}-assimp ${{ matrix.prefix }}-libxml2 git unzip p7zip
         msystem: ${{ matrix.msystem }}
         path-type: minimal
         release: false
@@ -62,7 +62,7 @@ jobs:
     - name: Install tools
       run: |
           sudo apt-get -qq update
-          sudo apt-get -y install mesa-common-dev qtbase5-dev libqt5svg5-dev libglib2.0-dev libjpeg-dev libpng-dev libassimp-dev
+          sudo apt-get -y install mesa-common-dev qt6-base-dev qt6-svg-dev qt6-multimedia-dev libglib2.0-dev libjpeg-dev libpng-dev libassimp-dev
     - uses: actions/checkout@v4
       with:
         submodules: recursive
@@ -81,9 +81,39 @@ jobs:
         path: Linux-${{ matrix.arch }}.7z
         if-no-files-found: error
 
+  macos:
+    name: macOS arm64
+    runs-on: macos-14
+    steps:
+    - name: Install tools
+      shell: bash
+      run: |
+        brew update
+        brew install qt@6 pkg-config glib libxml2 libpng jpeg-turbo assimp mesa libx11
+
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Build
+      shell: bash
+      run: |
+        BREW_PREFIX="$(brew --prefix)"
+        QT_PREFIX="$(brew --prefix qt@6)"
+        export PATH="$QT_PREFIX/bin:$BREW_PREFIX/bin:$PATH"
+        export PKG_CONFIG_PATH="$QT_PREFIX/lib/pkgconfig:$BREW_PREFIX/lib/pkgconfig"
+        make OS=Darwin MACLIBDIR="$BREW_PREFIX/lib" LIBS_GL="-lGL -lX11" LIBS_DL= -j4
+        tar -C install -czf macOS-arm64.tar.gz .
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: macOS-arm64
+        path: macOS-arm64.tar.gz
+        if-no-files-found: error
+
   create-testing:
-    if: github.ref == 'refs/heads/master' && ( github.event_name == 'push' || github.event_name == 'workflow_dispatch' )
-    needs: [windows-msys, linux]
+    if: github.ref == 'refs/heads/main' && ( github.event_name == 'push' || github.event_name == 'workflow_dispatch' )
+    needs: [windows-msys, linux, macos]
     runs-on: ubuntu-latest
     steps:
       - name: Download Artifacts
@@ -94,6 +124,7 @@ jobs:
         run: |
           mv Windows-x86_64/Windows-x86_64.zip netradiant-custom-$(date +%Y%m%d)-windows-x86_64.zip
           mv Linux-x86_64/Linux-x86_64.7z netradiant-custom-$(date +%Y%m%d)-linux-x86_64.7z
+          mv macOS-arm64/macOS-arm64.tar.gz netradiant-custom-$(date +%Y%m%d)-macos-arm64.tar.gz
 #         note: 7z dir/* doesn't match .bla (hidden) file in linux under dir/ but matches in subfolders  # or doesn't match there now too?
 
       - name: Get current date
@@ -110,3 +141,4 @@ jobs:
           files: |
             *.zip
             *.7z
+            *.tar.gz

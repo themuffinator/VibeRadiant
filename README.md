@@ -25,7 +25,7 @@ Build the most overclocked, vibe-drenched Radiant experience on the planet: ligh
 - 🧬🧩 Extra model types in gamepacks (MD5/IQM) for wider editor visibility.
 
 ### Tooling & Release Chaos 📦⚙️
-- 🚀🔄 In-app auto-updater plus update manifest workflow for Windows zip and Linux AppImage releases.
+- 🚀🔄 In-app auto-updater plus update manifest workflow for Windows zip, Linux AppImage, and macOS tar.gz releases.
 - 📌📄 VERSION file and release packaging flow for consistent builds.
 
 For the full documented diff, see [CHANGES_FROM_NRC.md](CHANGES_FROM_NRC.md). 📜✨

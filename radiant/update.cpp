@@ -36,6 +36,7 @@
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
@@ -111,25 +112,31 @@ QString normalized_tag_version( const QString& tag ){
 	return normalized;
 }
 
-QString platform_key(){
+QStringList platform_keys(){
 #if defined( WIN32 )
 #if defined( _WIN64 )
-	return "windows-x86_64";
+	return { "windows-x86_64", "windows-x86", "unknown" };
 #else
-	return "windows-x86";
+	return { "windows-x86", "unknown" };
 #endif
 #elif defined( __linux__ ) || defined( __FreeBSD__ )
 #if defined( __x86_64__ ) || defined( _M_X64 )
-	return "linux-x86_64";
+	return { "linux-x86_64", "linux-unknown", "unknown" };
 #elif defined( __aarch64__ )
-	return "linux-arm64";
+	return { "linux-arm64", "linux-unknown", "unknown" };
 #else
-	return "linux-unknown";
+	return { "linux-unknown", "unknown" };
 #endif
 #elif defined( __APPLE__ )
-	return "macos-unknown";
+#if defined( __aarch64__ ) || defined( __arm64__ ) || defined( _M_ARM64 )
+	return { "macos-arm64", "macos-unknown", "unknown" };
+#elif defined( __x86_64__ ) || defined( _M_X64 )
+	return { "macos-x86_64", "macos-unknown", "unknown" };
 #else
-	return "unknown";
+	return { "macos-unknown", "unknown" };
+#endif
+#else
+	return { "unknown" };
 #endif
 }
 
@@ -178,6 +185,12 @@ int compare_versions( const QString& current, const QString& latest ){
 QString escape_powershell_string( const QString& value ){
 	QString escaped = value;
 	escaped.replace( "'", "''" );
+	return QString( "'" ) + escaped + "'";
+}
+
+QString escape_shell_single_quoted( const QString& value ){
+	QString escaped = value;
+	escaped.replace( "'", "'\"'\"'" );
 	return QString( "'" ) + escaped + "'";
 }
 
@@ -596,11 +609,21 @@ private:
 			return;
 		}
 
-		const QString platform = platform_key();
-		if ( !manifest.assets.contains( platform ) ) {
+		const QStringList platforms = platform_keys();
+		QString matched_platform;
+		UpdateAsset asset;
+		for ( const QString& platform : platforms ) {
+			if ( manifest.assets.contains( platform ) ) {
+				matched_platform = platform;
+				asset = manifest.assets.value( platform );
+				break;
+			}
+		}
+
+		if ( matched_platform.isEmpty() ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				const auto msg = StringStream( "No update package found for platform ", platform.toLatin1().constData(), "." );
-				qt_MessageBox( parentWindow(), msg, "Update", EMessageBoxType::Info );
+				const auto msg = QString( "No update package found for platform %1." ).arg( platforms.join( ", " ) );
+				qt_MessageBox( parentWindow(), msg.toLatin1().constData(), "Update", EMessageBoxType::Info );
 			}
 			finish_check();
 			return;
@@ -616,7 +639,6 @@ private:
 			return;
 		}
 
-		const UpdateAsset asset = manifest.assets.value( platform );
 		prompt_update( manifest, asset );
 		finish_check();
 	}
@@ -759,6 +781,8 @@ private:
 #elif defined( __linux__ ) || defined( __FreeBSD__ )
 		Q_UNUSED( asset );
 		return install_update_linux( path );
+#elif defined( __APPLE__ )
+		return install_update_macos( asset, path );
 #else
 		Q_UNUSED( asset );
 		Q_UNUSED( path );
@@ -835,6 +859,76 @@ private:
 		).arg( pid,
 		      QDir::toNativeSeparators( path ),
 		      QDir::toNativeSeparators( appimage_path ) );
+
+		QFile script_file( script_path );
+		if ( !script_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
+			qt_MessageBox( parentWindow(), "Failed to write update script.", "Update", EMessageBoxType::Error );
+			return false;
+		}
+		script_file.write( script.toLatin1() );
+		script_file.close();
+
+		QFile::setPermissions( script_path, QFile::permissions( script_path ) | QFileDevice::ExeUser );
+
+		if ( !QProcess::startDetached( "/bin/sh", { script_path } ) ) {
+			qt_MessageBox( parentWindow(), "Failed to launch updater.", "Update", EMessageBoxType::Error );
+			return false;
+		}
+
+		m_quit_requested = true;
+		QCoreApplication::quit();
+		return true;
+	}
+
+	bool install_update_macos( const UpdateAsset& asset, const QString& path ){
+		const QString install_dir = QDir::toNativeSeparators( QString::fromLatin1( AppPath_get() ) );
+		const QString exe_path = QDir::toNativeSeparators( QString::fromLatin1( environment_get_app_filepath() ) );
+
+		QString error;
+		if ( !ensure_writable_directory( install_dir, error ) ) {
+			qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
+			return false;
+		}
+
+		const QString lower_type = asset.type.trimmed().toLower();
+		const bool is_targz = lower_type == "tar.gz" || lower_type == "tgz"
+			|| path.endsWith( ".tar.gz", Qt::CaseInsensitive )
+			|| path.endsWith( ".tgz", Qt::CaseInsensitive );
+		const bool is_zip = lower_type == "zip" || path.endsWith( ".zip", Qt::CaseInsensitive );
+		if ( !is_targz && !is_zip ) {
+			const auto msg = QString( "Unsupported macOS update package format: %1" ).arg( asset.type.isEmpty() ? "unknown" : asset.type );
+			qt_MessageBox( parentWindow(), msg.toLatin1().constData(), "Update", EMessageBoxType::Error );
+			return false;
+		}
+
+		const QString unpack_command = is_zip
+			? QString( "ditto -x -k %1 %2" ).arg(
+				escape_shell_single_quoted( QDir::toNativeSeparators( path ) ),
+				escape_shell_single_quoted( install_dir ) )
+			: QString( "tar -xzf %1 -C %2" ).arg(
+				escape_shell_single_quoted( QDir::toNativeSeparators( path ) ),
+				escape_shell_single_quoted( install_dir ) );
+
+		QString relaunch_command;
+		const int app_marker = exe_path.indexOf( ".app/Contents/MacOS/" );
+		if ( app_marker > 0 ) {
+			const QString app_bundle = exe_path.left( app_marker + 4 );
+			relaunch_command = QString( "open %1" ).arg( escape_shell_single_quoted( app_bundle ) );
+		}
+		else{
+			relaunch_command = QString( "%1 &" ).arg( escape_shell_single_quoted( exe_path ) );
+		}
+
+		const QString script_path = QDir( m_download_dir ).filePath( "apply-update-macos.sh" );
+		const auto pid = QString::number( QCoreApplication::applicationPid() );
+		const auto script = QString(
+			"#!/bin/sh\n"
+			"set -e\n"
+			"pid=%1\n"
+			"while kill -0 $pid 2>/dev/null; do sleep 0.2; done\n"
+			"%2\n"
+			"%3\n"
+		).arg( pid, unpack_command, relaunch_command );
 
 		QFile script_file( script_path );
 		if ( !script_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {

@@ -279,9 +279,15 @@ ifeq ($(OS),Darwin)
 	CFLAGS_COMMON += -fPIC
 	CXXFLAGS_COMMON += -fno-exceptions -fno-rtti
 	MACLIBDIR ?= /opt/local/lib
-	CPPFLAGS_COMMON += -I$(MACLIBDIR)/../include -I/usr/X11R6/include
-	LDFLAGS_COMMON += -L$(MACLIBDIR) -L/usr/X11R6/lib
-	LDFLAGS_DLL += -dynamiclib -ldl
+	MACX11DIR ?= /opt/X11
+	MACBREW_PREFIX ?= $(shell brew --prefix 2>/dev/null)
+	CPPFLAGS_COMMON += -I$(MACLIBDIR)/../include -I$(MACX11DIR)/include
+	LDFLAGS_COMMON += -L$(MACLIBDIR) -L$(MACX11DIR)/lib
+ifneq ($(MACBREW_PREFIX),)
+	CPPFLAGS_COMMON += -I$(MACBREW_PREFIX)/include
+	LDFLAGS_COMMON += -L$(MACBREW_PREFIX)/lib
+endif
+	LDFLAGS_DLL += -dynamiclib
 	EXE ?= $(shell uname -m)
 	MAKE_EXE_SYMLINK = true
 	A = a
@@ -290,8 +296,8 @@ ifeq ($(OS),Darwin)
 	# workaround for weird prints
 	ECHO_NOLF = /bin/echo -n
 
-	# workaround: http://developer.apple.com/qa/qa2007/qa1567.html
-	LIBS_GL += -lX11 -dylib_file /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib:/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib
+	LIBS_GL += -lX11
+	LIBS_DL =
 	# workaround: we have no "ldd" for OS X, so...
 	LDD =
 	OTOOL = otool
