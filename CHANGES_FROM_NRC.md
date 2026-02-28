@@ -40,6 +40,7 @@ Sources used:
 - Build system: fixed a MinGW compile break in engine-path install labeling (`StringStream` -> `CopiedString`) and split warning suppression policy by C/C++ compiler paths so `make MAKEFILE_CONF=msys2-Makefile.conf` completes with zero warnings in this tree.
 - Build fixes: restored missing includes for entity/sound browser builds, clarified shader highlighter depth handling, updated preview-lighting scene-change callback wiring, and resolved Qt updater parsing/formatting warnings.
 - Build fixes: refreshed Qt6 mouse event handling in browser widgets and entity list hover handling, plus safer `.def` flag parsing to silence warnings.
+- CI/nightly: ensured the nightly workflow fetches git tags during checkout so version/tag discovery works reliably in scheduled runs.
 - Build fixes: resolved MinGW/GCC build breaks in the new preview lighting code caused by float/double `std::max` template deduction, and aligned CamWnd member initializer order to silence `-Wreorder`.
 - Runtime stability: relaxed mapfile lookup in preview graphs so empty paths no longer trigger mapfile lookup crashes in browser views.
 - Runtime stability: preview lighting now registers scene-change callbacks only when enabled and disables the preview shader pass if its GLSL shaders fail to load.
