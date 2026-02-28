@@ -1924,7 +1924,7 @@ void TextureBrowser_addTagItem(const CopiedString &tag) {
                  Qt::ItemIsUserCheckable | Qt::ItemIsEnabled |
                  Qt::ItemNeverHasChildren);
   item->setCheckState(Qt::CheckState::Unchecked);
-  item->setData(c_tagRoleTagName, tag.c_str());
+  item->setData(c_tagRoleTagName, QByteArray(tag.c_str()));
   g_TexBro.m_tagsListWidget->addItem(item);
 }
 
@@ -1939,7 +1939,7 @@ void TextureBrowser_addSmartTagItem(std::size_t index) {
   item->setCheckState(Qt::CheckState::Unchecked);
   item->setData(c_tagRoleIsSmart, true);
   item->setData(c_tagRoleSmartIndex, static_cast<int>(index));
-  item->setData(c_tagRoleTagName, rule.name.c_str());
+  item->setData(c_tagRoleTagName, QByteArray(rule.name.c_str()));
   g_TexBro.m_tagsListWidget->addItem(item);
 }
 
@@ -2061,7 +2061,7 @@ struct TextureBrowserTagSearchSelection {
 
 TextureBrowserTagSearchSelection TextureBrowser_getTagSearchSelection() {
   TextureBrowserTagSearchSelection selection;
-  StringOutputStream<256> searchedLabel;
+  StringOutputStream searchedLabel(256);
   searchedLabel << "[TAGS] ";
 
   const auto selected = g_TexBro.m_tagsListWidget->selectedItems();
@@ -2470,7 +2470,7 @@ void TextureBrowser_addTag() {
                  Qt::ItemIsUserCheckable | Qt::ItemIsEnabled |
                  Qt::ItemNeverHasChildren);
   item->setCheckState(Qt::CheckState::Unchecked); // is needed to see checkbox
-  item->setData(c_tagRoleTagName, tag.c_str());
+  item->setData(c_tagRoleTagName, QByteArray(tag.c_str()));
   g_TexBro.m_tagsListWidget->addItem(item);
 
   g_TexBro.m_all_tags.insert(tag.c_str());

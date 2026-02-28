@@ -7076,8 +7076,6 @@ private:
 	};
 
 	SelectionUndoTracker m_selectionUndoTracker;
-	SelectionSnapshot captureSelectionSnapshot() const;
-	void restoreSelectionSnapshot( const SelectionSnapshot& snapshot );
 
 	void ConstructPivot() const;
 	void ConstructPivotRotation() const;

@@ -1098,7 +1098,7 @@ void EntityInspector_updateTypedValueControls(){
 	}
 
 	g_typedValueState.type = attribute != nullptr ? attribute->m_type : "spawnflags";
-	g_entityTypedValueLabel->setText( StringStream( "Typed (", g_typedValueState.type.c_str(), ")" ) );
+	g_entityTypedValueLabel->setText( StringStream( "Typed (", g_typedValueState.type.c_str(), ")" ).c_str() );
 
 	g_entityTypedValueUpdating = true;
 
@@ -1173,7 +1173,7 @@ void EntityInspector_applyTypedBrowse(){
 		Vector3 color( 1, 1, 1 );
 		string_parse_vector3( g_entityValueEntry->text().toLatin1().constData(), color );
 		if( color_dialog( g_entityValueEntry->window(), color ) ){
-			g_entityValueEntry->setText( StringStream<64>( color[0], ' ', color[1], ' ', color[2] ) );
+			g_entityValueEntry->setText( StringStream<64>( color[0], ' ', color[1], ' ', color[2] ).c_str() );
 			EntityInspector_applyKeyValue();
 		}
 	}

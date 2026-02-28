@@ -31,6 +31,7 @@ Sources used:
 - Build fixes: updated asset-drop worldspawn handling to match the reference-return signature and resolve a build break.
 - Build fixes: replaced texture hover shader clear with empty assignment to match CopiedString API and restore builds.
 - Build fixes: restored the missing cuboid brush creation helper used by asset drop to resolve linker errors.
+- Build fixes: restored Qt6/MSYS2 build compatibility by fixing typed-value `StringStream` conversions in entity inspector, removing duplicate in-class selection snapshot declarations, and storing texture-tag role data as `QByteArray` (plus correcting `StringOutputStream` construction) in the texture browser.
 - Asset drop: model drag-and-drop now places created `misc_model` entities flush on top of the hit surface (accounts for entity origin and model bounds).
 - Build fixes: aligned patch insert/remove declarations with their implementations to resolve compilation errors.
 - Build fixes: declared Quake3 shader stage helpers before use so the shaders plugin builds cleanly.
