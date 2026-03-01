@@ -107,6 +107,7 @@
 #include "preferences.h"
 #include "qgl.h"
 #include "select.h"
+#include "surfacedialog.h"
 
 bool string_equal_start(const char *string, StringRange start) {
   return string_equal_n(string, start.data(), start.size());
@@ -179,38 +180,12 @@ enum StartupShaders {
 };
 
 namespace {
-typedef const char *FlagName;
-
-const FlagName surfaceflagNamesDefault[32] = {
-    "surf1",  "surf2",  "surf3",  "surf4",  "surf5",  "surf6",  "surf7",
-    "surf8",  "surf9",  "surf10", "surf11", "surf12", "surf13", "surf14",
-    "surf15", "surf16", "surf17", "surf18", "surf19", "surf20", "surf21",
-    "surf22", "surf23", "surf24", "surf25", "surf26", "surf27", "surf28",
-    "surf29", "surf30", "surf31", "surf32"};
-
-const FlagName contentflagNamesDefault[32] = {
-    "cont1",  "cont2",  "cont3",  "cont4",  "cont5",  "cont6",  "cont7",
-    "cont8",  "cont9",  "cont10", "cont11", "cont12", "cont13", "cont14",
-    "cont15", "cont16", "cont17", "cont18", "cont19", "cont20", "cont21",
-    "cont22", "cont23", "cont24", "cont25", "cont26", "cont27", "cont28",
-    "cont29", "cont30", "cont31", "cont32"};
-
 const char *TextureBrowser_getSurfaceFlagName(std::size_t bit) {
-  const char *value =
-      g_pGameDescription->getKeyValue(surfaceflagNamesDefault[bit]);
-  if (string_empty(value)) {
-    return surfaceflagNamesDefault[bit];
-  }
-  return value;
+  return SurfaceFlags_getSurfaceFlagName(bit);
 }
 
 const char *TextureBrowser_getContentFlagName(std::size_t bit) {
-  const char *value =
-      g_pGameDescription->getKeyValue(contentflagNamesDefault[bit]);
-  if (string_empty(value)) {
-    return contentflagNamesDefault[bit];
-  }
-  return value;
+  return SurfaceFlags_getContentFlagName(bit);
 }
 } // namespace
 

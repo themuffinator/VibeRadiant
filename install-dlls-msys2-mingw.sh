@@ -83,7 +83,7 @@ for EXTRAPATH in \
     PLUGIN_DLLS="$PLUGIN_DLLS $(find $EXTRAPATH -type f 2>/dev/null)"
 done
 
-for DEPENDENCY in `dependencies $INSTALLDIR/*.exe $PLUGIN_DLLS`; do
+for DEPENDENCY in `dependencies $INSTALLDIR/*.exe $INSTALLDIR/modules/*.dll $INSTALLDIR/plugins/*.dll $PLUGIN_DLLS`; do
     cp -v "$DEPENDENCY" "$INSTALLDIR"
 done
 

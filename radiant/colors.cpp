@@ -37,10 +37,14 @@
 #include "gtkutil/menu.h"
 #include "gtkutil/i18n.h"
 #include "os/dir.h"
+#include "os/file.h"
 #include "os/path.h"
+#include "string/string.h"
 #include "stream/stringstream.h"
 #include "stream/textfilestream.h"
 #include "theme.h"
+#include <QColor>
+#include <utility>
 
 #define RAPIDJSON_PARSE_DEFAULT_FLAGS ( kParseCommentsFlag | kParseTrailingCommasFlag | kParseNanAndInfFlag )
 #include "rapidjson/document.h"
@@ -84,12 +88,20 @@ public:
 	}
 
 	void setColour( const Vector3& colour ) const {
+		setColour( colour, true );
+	}
+	void setColour( const Vector3& colour, bool notifyScene ) const {
 		m_set( colour );
-		SceneChangeNotify();
+		if( notifyScene ){
+			SceneChangeNotify();
+		}
 		updateIcon( colour );
 	}
 private:
 	void updateIcon( const Vector3& colour ) const {
+		if( m_action == nullptr ){
+			return;
+		}
 		QPixmap pixmap( QSize( 64, 64 ) ); // using larger pixmap, it gets downscaled
 		pixmap.fill( QColor::fromRgbF( colour[0], colour[1], colour[2] ) );
 		m_action->setIcon( QIcon( pixmap ) );
@@ -172,21 +184,21 @@ std::array g_ColoursMenu{
 	ChooseColour( Colour4bGetCaller( g_colour_z )                          , Colour4bSetCaller( g_colour_z )                        , "Axis Z..."                        , "ColorAxisZ" ),
 };
 
-static void load_colors_theme( const char *filepath ){
+static bool load_colors_theme( const char *filepath ){
 	TextFileInputStream file( filepath );
 	if( file.failed() ){
 		globalErrorStream() << "File " << Quoted( filepath ) << " reading failed.\n";
-		return;
+		return false;
 	}
 
-	StringOutputStream str( 4096 );
-	str.c_str()[ file.read( str.c_str(), 4096 - 1 ) ] = '\0';
+	StringOutputStream str( 16384 );
+	str.c_str()[ file.read( str.c_str(), 16384 - 1 ) ] = '\0';
 
 	rapidjson::Document doc;
-	doc.Parse( str.c_str() );
+	doc.Parse<rapidjson::kParseCommentsFlag | rapidjson::kParseTrailingCommasFlag>( str.c_str() );
 	if( doc.HasParseError() ){
 		globalErrorStream() << "File " << Quoted( filepath ) << " parsing failed.\n";
-		return;
+		return false;
 	}
 
 	for( const auto& colour : g_ColoursMenu ){
@@ -204,9 +216,59 @@ static void load_colors_theme( const char *filepath ){
 			Vector3 clr( 0 );
 			for( size_t i = 0; i != 3; ++i )
 				clr[i] = it->value.GetArray().operator[]( i ).Get<float>();
-			colour.setColour( clr );
+			colour.setColour( clr, false );
 		}
 	}
+	SceneChangeNotify();
+	return true;
+}
+
+bool Colors_applyThemePreset( const char* presetName ){
+	if( string_empty( presetName ) ){
+		return false;
+	}
+
+	const CopiedString fileName = path_extension_is( presetName, "json" )
+	                            ? CopiedString( presetName )
+	                            : CopiedString( StringStream( presetName, ".json" ) );
+	const CopiedString fullPath( StringStream( AppPath_get(), "themes/_colors/", fileName.c_str() ) );
+
+	if( !file_exists( fullPath.c_str() ) ){
+		globalWarningStream() << "Viewport theme preset not found: " << Quoted( fullPath.c_str() ) << '\n';
+		return false;
+	}
+	return load_colors_theme( fullPath.c_str() );
+}
+
+bool Colors_applyAccentOverride( const QColor& accent ){
+	const Vector3 selection( accent.redF(), accent.greenF(), accent.blueF() );
+	const QColor active = accent.lighter( 112 );
+	const Vector3 activeV( active.redF(), active.greenF(), active.blueF() );
+	const QColor clipper = accent.darker( 112 );
+	const Vector3 clipperV( clipper.redF(), clipper.greenF(), clipper.blueF() );
+
+	bool applied = false;
+	for( const auto& [name, color] : {
+		     std::pair{ "ColorGridSelection", selection },
+		     std::pair{ "ColorCameraSelection", selection },
+		     std::pair{ "ColorGridActive", activeV },
+		     std::pair{ "ColorClipperSplit", clipperV },
+	     } )
+	{
+		for( const auto& entry : g_ColoursMenu )
+		{
+			if( string_equal( entry.m_saveName, name ) ){
+				entry.setColour( color, false );
+				applied = true;
+				break;
+			}
+		}
+	}
+
+	if( applied ){
+		SceneChangeNotify();
+	}
+	return applied;
 }
 
 void create_colours_menu( QMenu *menu ){
@@ -214,25 +276,15 @@ void create_colours_menu( QMenu *menu ){
 
 	menu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
 
-	{
-		QMenu* submenu = menu->addMenu( i18n::tr( "Viewports Theme" ) );
-
-		submenu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
-
-		const auto path = StringStream( AppPath_get(), "themes/_colors/" );
-
-		Directory_forEach( path, matchFileExtension( "json", [&]( const char *name ){
-			submenu->addAction( StringStream<64>( PathExtensionless( name ) ).c_str(), [path = CopiedString( StringStream( path, name ) )](){
-				load_colors_theme( path.c_str() );
-			} );
-		}));
-	}
-
 	theme_construct_menu( menu );
+	menu->addAction( i18n::tr( "Reapply Active Theme" ), [](){
+		theme_reapply_active();
+	} );
 
 	create_menu_item_with_mnemonic( menu, "OpenGL Font...", "OpenGLFont" );
 
 	menu->addSeparator();
+	menu->addSection( i18n::tr( "Advanced Viewport Color Overrides" ) );
 
 	for( auto& color : g_ColoursMenu )
 		color.create_menu_item( menu );

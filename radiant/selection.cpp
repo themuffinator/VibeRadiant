@@ -7076,6 +7076,8 @@ private:
 	};
 
 	SelectionUndoTracker m_selectionUndoTracker;
+	QObject m_timerContext;
+	bool m_undoTrackerAttached;
 
 	void ConstructPivot() const;
 	void ConstructPivotRotation() const;
@@ -7118,6 +7120,7 @@ public:
 		m_clip_manipulator( m_pivot2world, m_bounds ),
 		m_transformOrigin_manipulator( *this, m_pivotIsCustom ),
 		m_selectionUndoTracker( *this ),
+		m_undoTrackerAttached( false ),
 		m_pivotChanged( false ),
 		m_pivot_moving( false ),
 		m_pivotIsCustom( false ){
@@ -7125,10 +7128,16 @@ public:
 		pivotChanged();
 		addSelectionChangeCallback( PivotChangedSelectionCaller( *this ) );
 		AddGridChangeCallback( PivotChangedCaller( *this ) );
-		GlobalUndoSystem().trackerAttach( m_selectionUndoTracker );
+		QTimer::singleShot( 0, &m_timerContext, [this](){
+			GlobalUndoSystem().trackerAttach( m_selectionUndoTracker );
+			m_undoTrackerAttached = true;
+		} );
 	}
 	~RadiantSelectionSystem(){
-		GlobalUndoSystem().trackerDetach( m_selectionUndoTracker );
+		if ( m_undoTrackerAttached ) {
+			GlobalUndoSystem().trackerDetach( m_selectionUndoTracker );
+			m_undoTrackerAttached = false;
+		}
 	}
 	void pivotChanged() const override {
 		m_pivotChanged = true;
@@ -8508,15 +8517,28 @@ void SelectionSystem_OnBoundsChanged(){
 }
 
 SignalHandlerId SelectionSystem_boundsChanged;
+static bool g_selectionLateHooksAttached = false;
+
+void SelectionSystem_AttachLateHooks(){
+	if ( g_selectionLateHooksAttached || g_RadiantSelectionSystem == 0 ) {
+		return;
+	}
+
+	SelectionSystem_boundsChanged = GlobalSceneGraph().addBoundsChangedCallback( FreeCaller<void(), SelectionSystem_OnBoundsChanged>() );
+
+	GlobalShaderCache().attachRenderable( getSelectionSystem() );
+
+	g_selectionLateHooksAttached = true;
+}
 
 void SelectionSystem_Construct(){
 	RadiantSelectionSystem::constructStatic();
 
 	g_RadiantSelectionSystem = new RadiantSelectionSystem;
 
-	SelectionSystem_boundsChanged = GlobalSceneGraph().addBoundsChangedCallback( FreeCaller<void(), SelectionSystem_OnBoundsChanged>() );
-
-	GlobalShaderCache().attachRenderable( getSelectionSystem() );
+	QTimer::singleShot( 0, [](){
+		SelectionSystem_AttachLateHooks();
+	} );
 
 	GlobalPreferenceSystem().registerPreference( "SELECT_EPSILON", IntImportStringCaller( g_SELECT_EPSILON ), IntExportStringCaller( g_SELECT_EPSILON ) );
 	GlobalPreferenceSystem().registerPreference(
@@ -8531,9 +8553,11 @@ void SelectionSystem_Construct(){
 }
 
 void SelectionSystem_Destroy(){
-	GlobalShaderCache().detachRenderable( getSelectionSystem() );
-
-	GlobalSceneGraph().removeBoundsChangedCallback( SelectionSystem_boundsChanged );
+	if ( g_selectionLateHooksAttached ) {
+		GlobalShaderCache().detachRenderable( getSelectionSystem() );
+		GlobalSceneGraph().removeBoundsChangedCallback( SelectionSystem_boundsChanged );
+		g_selectionLateHooksAttached = false;
+	}
 
 	delete g_RadiantSelectionSystem;
 

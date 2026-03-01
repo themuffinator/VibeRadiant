@@ -2470,6 +2470,14 @@ void CamWnd_TogglePreview(){
 	CamWnd_SetMode( ( CamWnd_GetMode() == cd_lighting ) ? cd_texture : cd_lighting );
 }
 
+bool CamWnd_isLightingPreviewEnabled(){
+	return CamWnd_GetMode() == cd_lighting;
+}
+
+void CamWnd_setLightingPreviewEnabled( bool enabled ){
+	CamWnd_SetMode( enabled ? cd_lighting : cd_texture );
+}
+
 
 CameraModel* g_camera_model = 0;
 

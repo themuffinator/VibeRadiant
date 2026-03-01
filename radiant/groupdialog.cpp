@@ -35,6 +35,9 @@
 #include <QWidget>
 #include <QTabWidget>
 #include <QVBoxLayout>
+#include <QPropertyAnimation>
+#include <QParallelAnimationGroup>
+#include <QEasingCurve>
 
 #include "gtkutil/guisettings.h"
 
@@ -62,6 +65,59 @@ namespace
 GroupDlg g_GroupDlg;
 
 std::vector<StringExportCallback> g_pages;
+
+void animate_group_dialog_visibility( bool shown ){
+	QWidget* window = g_GroupDlg.m_window;
+	if( window == nullptr ){
+		return;
+	}
+
+	if( shown ){
+		const QPoint target = window->pos();
+		if( !window->isVisible() ){
+			window->setWindowOpacity( 0.0 );
+			window->move( target + QPoint( 0, 10 ) );
+			g_GroupDlg.Show();
+		}
+		else{
+			window->raise();
+			window->activateWindow();
+		}
+
+		auto *group = new QParallelAnimationGroup( window );
+		auto *fade = new QPropertyAnimation( window, "windowOpacity", group );
+		fade->setDuration( 150 );
+		fade->setStartValue( window->windowOpacity() );
+		fade->setEndValue( 1.0 );
+		fade->setEasingCurve( QEasingCurve::OutCubic );
+		group->addAnimation( fade );
+
+		auto *slide = new QPropertyAnimation( window, "pos", group );
+		slide->setDuration( 150 );
+		slide->setStartValue( window->pos() );
+		slide->setEndValue( target );
+		slide->setEasingCurve( QEasingCurve::OutCubic );
+		group->addAnimation( slide );
+
+		group->start( QAbstractAnimation::DeleteWhenStopped );
+	}
+	else
+	{
+		if( !window->isVisible() ){
+			return;
+		}
+		auto *fade = new QPropertyAnimation( window, "windowOpacity", window );
+		fade->setDuration( 110 );
+		fade->setStartValue( window->windowOpacity() );
+		fade->setEndValue( 0.0 );
+		fade->setEasingCurve( QEasingCurve::OutCubic );
+		QObject::connect( fade, &QPropertyAnimation::finished, [window](){
+			window->hide();
+			window->setWindowOpacity( 1.0 );
+		} );
+		fade->start( QAbstractAnimation::DeleteWhenStopped );
+	}
+}
 }
 
 void GroupDialog_updatePageTitle( QWidget* window, int pageIndex ){
@@ -110,7 +166,7 @@ bool GroupDialog_isShown(){
 	return g_GroupDlg.m_window->isVisible();
 }
 void GroupDialog_setShown( bool shown ){
-	shown ? g_GroupDlg.Show() : g_GroupDlg.Hide();
+	animate_group_dialog_visibility( shown );
 }
 void GroupDialog_ToggleShow(){
 	GroupDialog_setShown( !GroupDialog_isShown() );
@@ -137,14 +193,22 @@ QWidget* GroupDialog_getPage(){
 	return g_GroupDlg.m_pNotebook->currentWidget();
 }
 
+void GroupDialog_presentPage( QWidget* page ){
+	if( page == nullptr ){
+		return;
+	}
+
+	g_GroupDlg.m_pNotebook->setCurrentWidget( page );
+	GroupDialog_setShown( true );
+}
+
 void GroupDialog_showPage( QWidget* page ){
-	if ( GroupDialog_getPage() == page ) {
-		GroupDialog_ToggleShow();
+	if ( GroupDialog_getPage() == page && GroupDialog_isShown() ) {
+		GroupDialog_setShown( false );
 	}
 	else
 	{
-		g_GroupDlg.m_pNotebook->setCurrentWidget( page );
-		GroupDialog_show();
+		GroupDialog_presentPage( page );
 	}
 }
 

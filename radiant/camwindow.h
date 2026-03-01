@@ -75,6 +75,8 @@ struct camwindow_globals_t
 extern camwindow_globals_t g_camwindow_globals;
 
 void CamWnd_reconstructStatic();
+bool CamWnd_isLightingPreviewEnabled();
+void CamWnd_setLightingPreviewEnabled( bool enabled );
 
 void CamWnd_Construct();
 void CamWnd_Destroy();

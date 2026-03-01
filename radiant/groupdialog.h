@@ -32,6 +32,8 @@ void GroupDialog_constructWindow( QWidget* main_window );
 void GroupDialog_destroyWindow();
 QWidget* GroupDialog_getWindow();
 void GroupDialog_show();
+bool GroupDialog_isShown();
+void GroupDialog_setShown( bool shown );
 
 inline void RawStringExport( const char* string, const StringImportCallback& importer ){
 	importer( string );
@@ -40,4 +42,5 @@ typedef ConstPointerCaller<char, void(const StringImportCallback&), RawStringExp
 QWidget* GroupDialog_addPage( const char* tabLabel, QWidget* widget, const StringExportCallback& title );
 
 void GroupDialog_showPage( QWidget* page );
+void GroupDialog_presentPage( QWidget* page );
 void GroupDialog_updatePageTitle( QWidget* page );

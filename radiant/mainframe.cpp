@@ -64,6 +64,9 @@
 #include <QGroupBox>
 #include <QDialogButtonBox>
 #include <QPushButton>
+#include <QPointer>
+#include <QTimer>
+#include <QStyle>
 
 #include "commandlib.h"
 #include "scenelib.h"
@@ -80,6 +83,7 @@
 #include "gtkutil/i18n.h"
 #include "gtkutil/menu.h"
 #include "gtkutil/guisettings.h"
+#include "gtkutil/widget.h"
 
 #include "autosave.h"
 #include "build.h"
@@ -1081,6 +1085,192 @@ void UVView_ToggleShow(){
 	GroupDialog_showPage( g_page_uvview );
 }
 
+namespace
+{
+enum class WorkspacePreset
+{
+	Modeling = 0,
+	Texturing,
+	Entity,
+	Lighting,
+};
+
+bool g_focusMode = false;
+
+struct FocusModeState
+{
+	bool groupDialogShown = true;
+	bool entityListShown = false;
+	bool surfaceInspectorShown = false;
+	bool statusBarShown = true;
+	std::vector<std::pair<QPointer<QToolBar>, bool>> toolbars;
+} g_focusModeState;
+
+ToggleItem g_focusModeItem{ BoolExportCaller( g_focusMode ) };
+
+const char* workspace_preset_name( WorkspacePreset preset ){
+	switch( preset )
+	{
+	case WorkspacePreset::Modeling: return "Modeling";
+	case WorkspacePreset::Texturing: return "Texturing";
+	case WorkspacePreset::Entity: return "Entity";
+	case WorkspacePreset::Lighting: return "Lighting";
+	default: return "Workspace";
+	}
+}
+
+void workspace_focus_cue( QWidget* widget ){
+	if( widget == nullptr ){
+		return;
+	}
+
+	widget->setProperty( "workspaceFocus", true );
+	widget->style()->unpolish( widget );
+	widget->style()->polish( widget );
+	widget->update();
+
+	QTimer::singleShot( 700, widget, [widget](){
+		widget->setProperty( "workspaceFocus", false );
+		widget->style()->unpolish( widget );
+		widget->style()->polish( widget );
+		widget->update();
+	} );
+}
+
+void FocusMode_set( bool enabled ){
+	if( g_focusMode == enabled ){
+		return;
+	}
+
+	g_focusMode = enabled;
+	g_focusModeItem.update();
+
+	if( g_pParentWnd == nullptr || g_pParentWnd->m_window == nullptr ){
+		return;
+	}
+	QMainWindow* mainWindow = g_pParentWnd->m_window;
+
+	if( enabled ){
+		g_focusModeState.groupDialogShown = GroupDialog_isShown();
+		g_focusModeState.entityListShown = EntityList_isShown();
+		g_focusModeState.surfaceInspectorShown = SurfaceInspector_isShown();
+		if( QStatusBar* status = mainWindow->statusBar() ){
+			g_focusModeState.statusBarShown = status->isVisible();
+		}
+
+		g_focusModeState.toolbars.clear();
+		for( QToolBar* toolbar : mainWindow->findChildren<QToolBar*>() )
+		{
+			g_focusModeState.toolbars.emplace_back( toolbar, toolbar->isVisible() );
+			toolbar->setVisible( false );
+		}
+
+		GroupDialog_setShown( false );
+		EntityList_setShown( false );
+		SurfaceInspector_setShown( false );
+		if( QStatusBar* status = mainWindow->statusBar() ){
+			status->setVisible( false );
+		}
+	}
+	else
+	{
+		for( const auto& [toolbar, shown] : g_focusModeState.toolbars )
+		{
+			if( toolbar ){
+				toolbar->setVisible( shown );
+			}
+		}
+		if( QStatusBar* status = mainWindow->statusBar() ){
+			status->setVisible( g_focusModeState.statusBarShown );
+		}
+
+		GroupDialog_setShown( g_focusModeState.groupDialogShown );
+		EntityList_setShown( g_focusModeState.entityListShown );
+		SurfaceInspector_setShown( g_focusModeState.surfaceInspectorShown );
+	}
+}
+
+void FocusMode_toggle(){
+	FocusMode_set( !g_focusMode );
+}
+}
+
+void WorkspacePreset_apply( WorkspacePreset preset ){
+	if( GroupDialog_getWindow() == nullptr ){
+		return;
+	}
+
+	const auto presentPage = []( QWidget* page ){
+		if( page != nullptr ){
+			GroupDialog_presentPage( page );
+			workspace_focus_cue( page );
+		}
+		else{
+			GroupDialog_setShown( true );
+		}
+	};
+
+	const bool keepPanelsHidden = g_focusMode;
+
+	switch( preset )
+	{
+	case WorkspacePreset::Modeling:
+		presentPage( g_page_layers != nullptr ? g_page_layers : g_page_entity );
+		SurfaceInspector_setShown( false );
+		EntityList_setShown( false );
+		CamWnd_setLightingPreviewEnabled( false );
+		break;
+	case WorkspacePreset::Texturing:
+		presentPage( g_page_textures != nullptr ? g_page_textures : g_page_entity );
+		SurfaceInspector_setShown( keepPanelsHidden ? false : true );
+		EntityList_setShown( false );
+		break;
+	case WorkspacePreset::Entity:
+		presentPage( g_page_entity );
+		EntityList_setShown( keepPanelsHidden ? false : true );
+		SurfaceInspector_setShown( false );
+		break;
+	case WorkspacePreset::Lighting:
+		presentPage( g_page_issues != nullptr ? g_page_issues : g_page_entity );
+		SurfaceInspector_setShown( keepPanelsHidden ? false : true );
+		EntityList_setShown( false );
+		CamWnd_setLightingPreviewEnabled( true );
+		break;
+	}
+
+	if( keepPanelsHidden ){
+		GroupDialog_setShown( false );
+	}
+
+	if( g_pParentWnd != nullptr && g_pParentWnd->m_window != nullptr ){
+		if( QStatusBar* status = g_pParentWnd->m_window->statusBar() ){
+			status->showMessage(
+				QString::fromLatin1(
+					StringStream( "Workspace: ", workspace_preset_name( preset ),
+					              keepPanelsHidden ? " (Focus Mode)" : "" ).c_str()
+				),
+				1800
+			);
+		}
+	}
+}
+
+void WorkspacePreset_Modeling(){
+	WorkspacePreset_apply( WorkspacePreset::Modeling );
+}
+
+void WorkspacePreset_Texturing(){
+	WorkspacePreset_apply( WorkspacePreset::Texturing );
+}
+
+void WorkspacePreset_Entity(){
+	WorkspacePreset_apply( WorkspacePreset::Entity );
+}
+
+void WorkspacePreset_Lighting(){
+	WorkspacePreset_apply( WorkspacePreset::Lighting );
+}
+
 
 static class EverySecondTimer
 {
@@ -1325,6 +1515,15 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 	create_menu_item_with_mnemonic( menu, "UV View", "ToggleUVView" );
 	create_menu_item_with_mnemonic( menu, "&Surface Inspector", "SurfaceInspector" );
 	create_menu_item_with_mnemonic( menu, "Entity List", "ToggleEntityList" );
+	{
+		QMenu* submenu = menu->addMenu( i18n::tr( "Workspace Presets" ) );
+		submenu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
+		create_menu_item_with_mnemonic( submenu, "Modeling", "WorkspacePresetModeling" );
+		create_menu_item_with_mnemonic( submenu, "Texturing", "WorkspacePresetTexturing" );
+		create_menu_item_with_mnemonic( submenu, "Entity", "WorkspacePresetEntity" );
+		create_menu_item_with_mnemonic( submenu, "Lighting", "WorkspacePresetLighting" );
+	}
+	create_check_menu_item_with_mnemonic( menu, "Focus Mode", "FocusMode" );
 
 	menu->addSeparator();
 	{
@@ -2535,6 +2734,11 @@ void MainFrame_Construct(){
 	GlobalCommands_insert( "ToggleIssueBrowser", makeCallbackF( IssueBrowser_ToggleShow ) );
 	GlobalCommands_insert( "ToggleUVView", makeCallbackF( UVView_ToggleShow ) );
 	GlobalCommands_insert( "ToggleEntityList", makeCallbackF( EntityList_toggleShown ), QKeySequence( "Shift+L" ) );
+	GlobalCommands_insert( "WorkspacePresetModeling", makeCallbackF( WorkspacePreset_Modeling ) );
+	GlobalCommands_insert( "WorkspacePresetTexturing", makeCallbackF( WorkspacePreset_Texturing ) );
+	GlobalCommands_insert( "WorkspacePresetEntity", makeCallbackF( WorkspacePreset_Entity ) );
+	GlobalCommands_insert( "WorkspacePresetLighting", makeCallbackF( WorkspacePreset_Lighting ) );
+	GlobalToggles_insert( "FocusMode", makeCallbackF( FocusMode_toggle ), ToggleItem::AddCallbackCaller( g_focusModeItem ), QKeySequence( "Ctrl+Shift+`" ) );
 
 	Select_registerCommands();
 	Layers_registerCommands();

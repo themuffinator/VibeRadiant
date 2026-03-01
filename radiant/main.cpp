@@ -82,6 +82,7 @@
 #include "mainframe.h"
 #include "commands.h"
 #include "preferences.h"
+#include "theme.h"
 #include "localization.h"
 #include "environment.h"
 #include "referencecache.h"
@@ -90,6 +91,7 @@
 #include "update.h"
 
 #include <QApplication>
+#include <QTimer>
 #include "gtkutil/glwidget.h"
 
 void show_splash();
@@ -281,9 +283,18 @@ bool check_version(){
 	// let's leave it disabled in debug mode in any case
 	// http://zerowing.idsoftware.com/bugzilla/show_bug.cgi?id=431
 #ifndef _DEBUG
+	const auto majorVersionFile = StringStream( AppPath_get(), "RADIANT_MAJOR" );
+	const auto minorVersionFile = StringStream( AppPath_get(), "RADIANT_MINOR" );
+
+	if ( !( file_exists( majorVersionFile.c_str() ) && file_exists( minorVersionFile.c_str() ) ) ) {
+		globalWarningStream() << "Version marker files are missing in " << AppPath_get()
+		                      << ", skipping strict install-version check\n";
+		return true;
+	}
+
 	// locate and open RADIANT_MAJOR and RADIANT_MINOR
-	if ( !( check_version_file( StringStream( AppPath_get(), "RADIANT_MAJOR" ), RADIANT_MAJOR_VERSION )
-	     && check_version_file( StringStream( AppPath_get(), "RADIANT_MINOR" ), RADIANT_MINOR_VERSION ) ) ) {
+	if ( !( check_version_file( majorVersionFile.c_str(), RADIANT_MAJOR_VERSION )
+	     && check_version_file( minorVersionFile.c_str(), RADIANT_MINOR_VERSION ) ) ) {
 		const auto msg = StringStream(
 			"This editor binary (" RADIANT_VERSION ") doesn't match what the latest setup has configured in this directory\n"
 			"Make sure you run the right/latest editor binary you installed\n", AppPath_get() );
@@ -502,6 +513,9 @@ int main( int argc, char* argv[] ){
 		MainFrame_getWindow()->raise();
 		MainFrame_getWindow()->activateWindow();
 	}
+	QTimer::singleShot( 0, [](){
+		theme_apply_startup();
+	} );
 	hide_splash();
 
 	QApplication::exec();

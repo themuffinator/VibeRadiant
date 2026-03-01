@@ -32,6 +32,8 @@
 #include <QApplication>
 #include <QAction>
 #include <QKeyEvent>
+#include <QPropertyAnimation>
+#include <QEasingCurve>
 #if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
 #include <QEnterEvent>
 #endif
@@ -177,8 +179,37 @@ void EntityList_SelectionChanged( const Selectable& selectable ){
 }
 
 
-void EntityList_SetShown( bool shown ){
-	getEntityList().m_window->setVisible( shown );
+void EntityList_setShown( bool shown ){
+	QWidget* window = getEntityList().m_window;
+	if( shown ){
+		if( !window->isVisible() ){
+			window->setWindowOpacity( 0.0 );
+			window->show();
+		}
+		auto *fade = new QPropertyAnimation( window, "windowOpacity", window );
+		fade->setDuration( 140 );
+		fade->setStartValue( window->windowOpacity() );
+		fade->setEndValue( 1.0 );
+		fade->setEasingCurve( QEasingCurve::OutCubic );
+		fade->start( QAbstractAnimation::DeleteWhenStopped );
+	}
+	else
+	{
+		if( !window->isVisible() ){
+			return;
+		}
+		auto *fade = new QPropertyAnimation( window, "windowOpacity", window );
+		fade->setDuration( 100 );
+		fade->setStartValue( window->windowOpacity() );
+		fade->setEndValue( 0.0 );
+		fade->setEasingCurve( QEasingCurve::OutCubic );
+		QObject::connect( fade, &QPropertyAnimation::finished, [window](){
+			window->hide();
+			window->setWindowOpacity( 1.0 );
+		} );
+		fade->start( QAbstractAnimation::DeleteWhenStopped );
+	}
+
 	if( shown ){ /* expand map's root node for convenience */
 		auto index = getEntityList().m_tree_model->index( 0, 0 );
 		if( index.isValid() && !getEntityList().m_tree_view->isExpanded( index ) )
@@ -186,8 +217,12 @@ void EntityList_SetShown( bool shown ){
 	}
 }
 
+bool EntityList_isShown(){
+	return getEntityList().visible();
+}
+
 void EntityList_toggleShown(){
-	EntityList_SetShown( !getEntityList().visible() );
+	EntityList_setShown( !EntityList_isShown() );
 }
 
 class Filter_QLineEdit : public QLineEdit

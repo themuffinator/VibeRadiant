@@ -21,17 +21,23 @@
 
 #pragma once
 
+#include <cstddef>
 
 void SurfaceInspector_Construct();
 void SurfaceInspector_Destroy();
 
 void SurfaceInspector_constructWindow( class QWidget* widget );
 void SurfaceInspector_destroyWindow();
+void SurfaceInspector_setShown( bool shown );
+bool SurfaceInspector_isShown();
 
 bool SelectedFaces_empty();
 void SelectedFaces_copyTexture();
 void SelectedFaces_pasteTexture();
 void FaceTextureClipboard_setDefault();
+
+const char* SurfaceFlags_getSurfaceFlagName( std::size_t bit );
+const char* SurfaceFlags_getContentFlagName( std::size_t bit );
 
 
 // the increment we are using for the surface inspector (this is saved in the prefs)

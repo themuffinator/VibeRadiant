@@ -23,6 +23,8 @@
 
 void BitmapsPath_set( const char* path );
 void Bitmaps_generateLight( const char *appPath, const char *settingsPath );
+void Bitmaps_configureTheme( const char* appPath, const char* settingsPath,
+							 const class QColor& primary, const class QColor& muted, const class QColor& disabled );
 
 #include <QPixmap>
 #include <QIcon>

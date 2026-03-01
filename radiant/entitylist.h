@@ -27,3 +27,5 @@ void EntityList_Destroy();
 void EntityList_constructWindow( class QWidget* main_window );
 void EntityList_destroyWindow();
 void EntityList_toggleShown();
+void EntityList_setShown( bool shown );
+bool EntityList_isShown();

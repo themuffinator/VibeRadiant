@@ -302,6 +302,11 @@ void CGameDialog::ScanForGames(){
 
 	globalOutputStream() << "Scanning for game description files: " << path << '\n';
 
+	if ( !file_is_directory( path.c_str() ) ) {
+		globalWarningStream() << "Game descriptions directory not found: " << path << '\n';
+		return;
+	}
+
 	/*!
 	   \todo FIXME LINUX:
 	   do we put game description files below AppPath, or in ~/.radiant
@@ -345,7 +350,10 @@ void CGameDialog::Init(){
 	theme_construct(); // after global prefs, b4 any normal windows
 	ScanForGames();
 	if ( mGames.empty() ) {
-		Error( "Didn't find any valid game file descriptions, aborting\n" );
+		const auto path = StringStream( AppPath_get(), "gamepacks/games/" );
+		Error( "Didn't find any valid game file descriptions in %s\n"
+		       "Install runtime data and gamepacks into %sgamepacks/ (for example via make install-data)\n",
+		       path.c_str(), AppPath_get() );
 	}
 	else
 	{

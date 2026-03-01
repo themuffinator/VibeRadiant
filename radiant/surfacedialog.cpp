@@ -43,6 +43,10 @@
 #include <QToolButton>
 #include <QGroupBox>
 #include <QCheckBox>
+#include <QPropertyAnimation>
+#include <QEasingCurve>
+#include <array>
+#include <cstdio>
 
 #include "signal/isignal.h"
 #include "math/vector.h"
@@ -73,6 +77,7 @@
 #include "stream/stringstream.h"
 #include "grid.h"
 #include "textureentry.h"
+#include "qerplugin.h"
 
 
 class Increment
@@ -343,14 +348,45 @@ void DoSurface(){
 	getSurfaceInspector().ShowDlg();
 }
 
-void SurfaceInspector_toggleShown(){
-	if ( getSurfaceInspector().visible() ) {
-		getSurfaceInspector().HideDlg();
+bool SurfaceInspector_isShown(){
+	return getSurfaceInspector().visible();
+}
+
+void SurfaceInspector_setShown( bool shown ){
+	QWidget* window = getSurfaceInspector().GetWidget();
+	if( window == nullptr ){
+		return;
 	}
-	else
-	{
+
+	if( shown ){
 		DoSurface();
+		window->setWindowOpacity( 0.0 );
+		auto *fade = new QPropertyAnimation( window, "windowOpacity", window );
+		fade->setDuration( 140 );
+		fade->setStartValue( 0.0 );
+		fade->setEndValue( 1.0 );
+		fade->setEasingCurve( QEasingCurve::OutCubic );
+		fade->start( QAbstractAnimation::DeleteWhenStopped );
 	}
+	else{
+		if( !window->isVisible() ){
+			return;
+		}
+		auto *fade = new QPropertyAnimation( window, "windowOpacity", window );
+		fade->setDuration( 100 );
+		fade->setStartValue( window->windowOpacity() );
+		fade->setEndValue( 0.0 );
+		fade->setEasingCurve( QEasingCurve::OutCubic );
+		QObject::connect( fade, &QPropertyAnimation::finished, [window](){
+			getSurfaceInspector().HideDlg();
+			window->setWindowOpacity( 1.0 );
+		} );
+		fade->start( QAbstractAnimation::DeleteWhenStopped );
+	}
+}
+
+void SurfaceInspector_toggleShown(){
+	SurfaceInspector_setShown( !SurfaceInspector_isShown() );
 }
 
 #include "camwindow.h"
@@ -505,90 +541,137 @@ static void OnBtnUnsetFlags(){
 
 typedef const char* FlagName;
 
-const FlagName surfaceflagNamesDefault[32] = {
-	"surf1",
-	"surf2",
-	"surf3",
-	"surf4",
-	"surf5",
-	"surf6",
-	"surf7",
-	"surf8",
-	"surf9",
-	"surf10",
-	"surf11",
-	"surf12",
-	"surf13",
-	"surf14",
-	"surf15",
-	"surf16",
-	"surf17",
-	"surf18",
-	"surf19",
-	"surf20",
-	"surf21",
-	"surf22",
-	"surf23",
-	"surf24",
-	"surf25",
-	"surf26",
-	"surf27",
-	"surf28",
-	"surf29",
-	"surf30",
-	"surf31",
-	"surf32"
+using FlagNameArray = std::array<FlagName, 32>;
+
+const FlagNameArray c_surfaceflagNamesQ2{
+	"light", "slick", "sky", "warp", "trans33", "trans66", "flow", "nodraw",
+	"hint", "skip", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+	nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+	nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
 };
 
-const FlagName contentflagNamesDefault[32] = {
-	"cont1",
-	"cont2",
-	"cont3",
-	"cont4",
-	"cont5",
-	"cont6",
-	"cont7",
-	"cont8",
-	"cont9",
-	"cont10",
-	"cont11",
-	"cont12",
-	"cont13",
-	"cont14",
-	"cont15",
-	"cont16",
-	"cont17",
-	"cont18",
-	"cont19",
-	"cont20",
-	"cont21",
-	"cont22",
-	"cont23",
-	"cont24",
-	"cont25",
-	"cont26",
-	"cont27",
-	"cont28",
-	"cont29",
-	"cont30",
-	"cont31",
-	"cont32"
+const FlagNameArray c_contentflagNamesQ2{
+	"solid", "window", "aux", "lava", "slime", "water", "mist", nullptr,
+	nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, "areaportal",
+	"playerclip", "monsterclip", "current_0", "current_90", "current_180", "current_270", "current_up", "current_down",
+	"origin", "monster", "corpse", "detail", "translucent", "ladder", nullptr, nullptr
 };
 
-const char* getSurfaceFlagName( std::size_t bit ){
-	const char* value = g_pGameDescription->getKeyValue( surfaceflagNamesDefault[bit] );
-	if ( string_empty( value ) ) {
-		return surfaceflagNamesDefault[bit];
+const FlagNameArray c_surfaceflagNamesQ3{
+	"nodamage", "slick", "sky", "ladder", "noimpact", "nomarks", "flesh", "nodraw",
+	"hint", "skip", "nolightmap", "pointlight", "metalsteps", "nosteps", "nonsolid", "lightfilter",
+	"alphashadow", "nodlight", "dust", nullptr, nullptr, nullptr, nullptr, nullptr,
+	nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+};
+
+const FlagNameArray c_contentflagNamesQ3{
+	"solid", "lava", "slime", "water", "fog", "areaportal", "playerclip", "monsterclip",
+	"teleporter", "jumppad", "clusterportal", "donotenter", "botclip", "mover", "origin", "body",
+	"corpse", "detail", "structural", "translucent", "trigger", "nodrop", nullptr, nullptr,
+	nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+};
+
+const FlagNameArray c_flagNamesEmpty{
+	nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+	nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+	nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+	nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+};
+
+struct FlagNameCache
+{
+	CopiedString gameType;
+	CopiedString brushTypes;
+	std::array<CopiedString, 32> surface;
+	std::array<CopiedString, 32> content;
+	bool built = false;
+} g_flagNameCache;
+
+const FlagNameArray& game_default_surface_labels(){
+	const char* brushTypes = GlobalRadiant().getGameDescriptionKeyValue( "brushtypes" );
+	if( string_equal( brushTypes, "quake2" ) ){
+		return c_surfaceflagNamesQ2;
 	}
-	return value;
+	if( string_equal( brushTypes, "quake3" ) ){
+		return c_surfaceflagNamesQ3;
+	}
+	return c_flagNamesEmpty;
 }
 
-const char* getContentFlagName( std::size_t bit ){
-	const char* value = g_pGameDescription->getKeyValue( contentflagNamesDefault[bit] );
-	if ( string_empty( value ) ) {
-		return contentflagNamesDefault[bit];
+const FlagNameArray& game_default_content_labels(){
+	const char* brushTypes = GlobalRadiant().getGameDescriptionKeyValue( "brushtypes" );
+	if( string_equal( brushTypes, "quake2" ) ){
+		return c_contentflagNamesQ2;
 	}
-	return value;
+	if( string_equal( brushTypes, "quake3" ) ){
+		return c_contentflagNamesQ3;
+	}
+	return c_flagNamesEmpty;
+}
+
+CopiedString format_fallback_flag_name( bool surface, std::size_t bit ){
+	char maskHex[11];
+	std::snprintf( maskHex, sizeof( maskHex ), "0x%08X", 1u << bit );
+	return CopiedString( StringStream( surface ? "surf" : "cont", bit + 1, " (", maskHex, ")" ) );
+}
+
+void rebuild_flag_names_cache(){
+	g_flagNameCache.gameType = GlobalRadiant().getGameDescriptionKeyValue( "type" );
+	g_flagNameCache.brushTypes = GlobalRadiant().getGameDescriptionKeyValue( "brushtypes" );
+
+	const FlagNameArray& defaultSurface = game_default_surface_labels();
+	const FlagNameArray& defaultContent = game_default_content_labels();
+
+	for( std::size_t bit = 0; bit < 32; ++bit )
+	{
+		g_flagNameCache.surface[bit] = format_fallback_flag_name( true, bit );
+		if( !string_empty( defaultSurface[bit] ) ){
+			g_flagNameCache.surface[bit] = defaultSurface[bit];
+		}
+		const auto surfKey = StringStream<16>( "surf", bit + 1 );
+		const char* surfOverride = GlobalRadiant().getGameDescriptionKeyValue( surfKey );
+		if( !string_empty( surfOverride ) ){
+			g_flagNameCache.surface[bit] = surfOverride;
+		}
+
+		g_flagNameCache.content[bit] = format_fallback_flag_name( false, bit );
+		if( !string_empty( defaultContent[bit] ) ){
+			g_flagNameCache.content[bit] = defaultContent[bit];
+		}
+		const auto contKey = StringStream<16>( "cont", bit + 1 );
+		const char* contOverride = GlobalRadiant().getGameDescriptionKeyValue( contKey );
+		if( !string_empty( contOverride ) ){
+			g_flagNameCache.content[bit] = contOverride;
+		}
+	}
+
+	g_flagNameCache.built = true;
+}
+
+void ensure_flag_names_cache(){
+	const char* type = GlobalRadiant().getGameDescriptionKeyValue( "type" );
+	const char* brushTypes = GlobalRadiant().getGameDescriptionKeyValue( "brushtypes" );
+	if( !g_flagNameCache.built
+	 || !string_equal( g_flagNameCache.gameType.c_str(), type )
+	 || !string_equal( g_flagNameCache.brushTypes.c_str(), brushTypes ) ){
+		rebuild_flag_names_cache();
+	}
+}
+
+const char* SurfaceFlags_getSurfaceFlagName( std::size_t bit ){
+	if( bit >= 32 ){
+		return "";
+	}
+	ensure_flag_names_cache();
+	return g_flagNameCache.surface[bit].c_str();
+}
+
+const char* SurfaceFlags_getContentFlagName( std::size_t bit ){
+	if( bit >= 32 ){
+		return "";
+	}
+	ensure_flag_names_cache();
+	return g_flagNameCache.content[bit].c_str();
 }
 
 class : public QObject
@@ -860,7 +943,7 @@ void SurfaceInspector::BuildDialog(){
 					{
 						for ( int r = 0; r != 8; ++r )
 						{
-							auto *check = new QCheckBox( getSurfaceFlagName( c * 8 + r ) );
+							auto *check = new QCheckBox( SurfaceFlags_getSurfaceFlagName( c * 8 + r ) );
 							grid->addWidget( check, r, c );
 							*p++ = check;
 							QObject::connect( check, &QAbstractButton::clicked, ApplyFlagsCaller( *this ) );
@@ -892,7 +975,7 @@ void SurfaceInspector::BuildDialog(){
 					{
 						for ( int r = 0; r != 8; ++r )
 						{
-							auto *check = new QCheckBox( getContentFlagName( c * 8 + r ) );
+							auto *check = new QCheckBox( SurfaceFlags_getContentFlagName( c * 8 + r ) );
 							grid->addWidget( check, r, c );
 							*p++ = check;
 							QObject::connect( check, &QAbstractButton::clicked, ApplyFlagsCaller( *this ) );

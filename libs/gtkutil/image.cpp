@@ -26,11 +26,148 @@
 #include "string/string.h"
 #include "stream/stringstream.h"
 #include <QDir>
+#include <QFile>
+#include <QRegularExpression>
+#include <QStringBuilder>
+#include <array>
+#include <QColor>
 
 
 namespace
 {
 CopiedString g_bitmapsPath;
+
+QString qhex( const QColor& color ){
+	return QStringLiteral( "#%1%2%3" )
+		.arg( color.red(),   2, 16, QChar( '0' ) )
+		.arg( color.green(), 2, 16, QChar( '0' ) )
+		.arg( color.blue(),  2, 16, QChar( '0' ) )
+		.toUpper();
+}
+
+void recolorSvgInPlace( QString& svg, const QString& primary, const QString& muted, const QString& disabled ){
+	const auto replaceColor = [&svg]( const char* from, const QString& to ){
+		svg.replace(
+			QRegularExpression( QStringLiteral( "(?i)%1" ).arg( QRegularExpression::escape( QString::fromLatin1( from ) ) ) ),
+			to
+		);
+	};
+
+	for( const char* color : { "#C0C0C0", "#C0C0C1", "#DBDADA", "#FFFFFF" } )
+		replaceColor( color, primary );
+	for( const char* color : { "#8E8E8E", "#9D9D9D", "#7A7A7A" } )
+		replaceColor( color, muted );
+	for( const char* color : { "#666666", "#575757" } )
+		replaceColor( color, disabled );
+}
+
+void copyAdaptiveIcons( const QDir& sourceDir, const QDir& targetDir, const QString& primary, const QString& muted, const QString& disabled ){
+	if( !sourceDir.exists() ){
+		return;
+	}
+
+	QDir target( targetDir );
+	target.mkpath( "." );
+
+	QDir source( sourceDir );
+	source.setFilter( QDir::Filter::Files );
+	source.setNameFilters( QStringList() << "*.svg" << "*.png" << "*.ico" );
+
+	for( const QFileInfo& fileinfo : source.entryInfoList() )
+	{
+		QFile file( fileinfo.absoluteFilePath() );
+		if( !file.open( QIODevice::OpenModeFlag::ReadOnly ) ){
+			continue;
+		}
+
+		QByteArray data = file.readAll();
+		file.close();
+
+		if( fileinfo.suffix().compare( "svg", Qt::CaseInsensitive ) == 0 ){
+			QString svg = QString::fromUtf8( data );
+			recolorSvgInPlace( svg, primary, muted, disabled );
+			data = svg.toUtf8();
+		}
+
+		QFile outFile( target.absoluteFilePath( fileinfo.fileName() ) );
+		if( outFile.open( QIODevice::OpenModeFlag::WriteOnly | QIODevice::OpenModeFlag::Truncate ) ){
+			outFile.write( data );
+		}
+	}
+}
+
+QString buildAdaptiveThemeName( const QColor& primary, const QColor& muted, const QColor& disabled ){
+	auto compact = []( const QColor& color ){
+		return QStringLiteral( "%1%2%3" )
+			.arg( color.red(),   2, 16, QChar( '0' ) )
+			.arg( color.green(), 2, 16, QChar( '0' ) )
+			.arg( color.blue(),  2, 16, QChar( '0' ) )
+			.toLower();
+	};
+	return QStringLiteral( "bitmaps_adaptive_%1_%2_%3" )
+		.arg( compact( primary ) )
+		.arg( compact( muted ) )
+		.arg( compact( disabled ) );
+}
+
+void writeIndexThemeFile( const QDir& themeDir, const QString& themeName ){
+	QFile indexFile( themeDir.absoluteFilePath( "index.theme" ) );
+	if( !indexFile.open( QIODevice::OpenModeFlag::WriteOnly | QIODevice::OpenModeFlag::Truncate ) ){
+		return;
+	}
+
+	const QString contents = QStringLiteral(
+		"[Icon Theme]\n"
+		"Name=%1\n"
+		"Comment=VibeRadiant adaptive icon theme\n"
+		"Directories=.,plugins\n"
+		"\n"
+		"[.]\n"
+		"Size=32\n"
+		"Type=Scalable\n"
+		"MinSize=8\n"
+		"MaxSize=256\n"
+		"\n"
+		"[plugins]\n"
+		"Size=32\n"
+		"Type=Scalable\n"
+		"MinSize=8\n"
+		"MaxSize=256\n"
+	).arg( themeName );
+
+	indexFile.write( contents.toUtf8() );
+}
+
+QString ensureAdaptiveTheme( const char* appPath, const char* settingsPath, const QColor& primary, const QColor& muted, const QColor& disabled ){
+	const QString adaptiveThemeName = buildAdaptiveThemeName( primary, muted, disabled );
+	const QDir settingsRoot( QString::fromLatin1( settingsPath ) );
+	const QDir adaptiveThemeDir( settingsRoot.absoluteFilePath( adaptiveThemeName ) );
+	const QFileInfo indexInfo( adaptiveThemeDir.absoluteFilePath( "index.theme" ) );
+
+	if( !indexInfo.exists() ){
+		QDir themeDir( adaptiveThemeDir );
+		themeDir.mkpath( "." );
+		themeDir.mkpath( "plugins" );
+
+		const QString primaryHex = qhex( primary );
+		const QString mutedHex = qhex( muted );
+		const QString disabledHex = qhex( disabled );
+
+		copyAdaptiveIcons(
+			QDir( QString::fromLatin1( appPath ) + "bitmaps/" ),
+			themeDir,
+			primaryHex, mutedHex, disabledHex
+		);
+		copyAdaptiveIcons(
+			QDir( QString::fromLatin1( appPath ) + "plugins/bitmaps/" ),
+			QDir( themeDir.absoluteFilePath( "plugins" ) ),
+			primaryHex, mutedHex, disabledHex
+		);
+		writeIndexThemeFile( themeDir, adaptiveThemeName );
+	}
+
+	return adaptiveThemeName;
+}
 }
 
 void BitmapsPath_set( const char* path ){
@@ -65,6 +202,22 @@ void Bitmaps_generateLight( const char *appPath, const char *settingsPath ){
 			}
 		}
 	}
+}
+
+void Bitmaps_configureTheme( const char* appPath, const char* settingsPath, const QColor& primary, const QColor& muted, const QColor& disabled ){
+	const QString adaptiveThemeName = ensureAdaptiveTheme( appPath, settingsPath, primary, muted, disabled );
+	const QString bitmapsPath = QDir( QString::fromLatin1( settingsPath ) ).absoluteFilePath( adaptiveThemeName + '/' );
+	BitmapsPath_set( bitmapsPath.toLatin1().constData() );
+
+	QStringList searchPaths = QIcon::themeSearchPaths();
+	for( const QString& path : { QString::fromLatin1( settingsPath ), QString::fromLatin1( appPath ) } )
+	{
+		if( !searchPaths.contains( path ) ){
+			searchPaths.push_back( path );
+		}
+	}
+	QIcon::setThemeSearchPaths( searchPaths );
+	QIcon::setThemeName( adaptiveThemeName );
 }
 
 QPixmap new_local_image( const char* filename ){
