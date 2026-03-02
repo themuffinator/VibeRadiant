@@ -1036,7 +1036,7 @@ public:
 EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 	static auto [dialog, rootLayout] = [](){
 		auto *dialog = new QDialog( MainFrame_getWindow(), Qt::Dialog | Qt::WindowCloseButtonHint );
-		dialog->setWindowTitle( "Build Menu" );
+		dialog->setWindowTitle( "Build & Launch Tasks" );
 		g_guiSettings.addWindow( dialog, "BuildMenu/geometry", 700, 500 );
 		auto *rootLayout = new QHBoxLayout( dialog );
 		rootLayout->setContentsMargins( 0, 0, 0, 0 );
@@ -1063,7 +1063,7 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 		}
 		QTreeWidget* buildView = nullptr;
 		{
-			auto *frame = new QGroupBox( "Build menu" );
+			auto *frame = new QGroupBox( "Build Tasks" );
 			grid->addWidget( frame, 0, 0 );
 			grid->setRowStretch( 0, 1 );
 			{
@@ -1077,7 +1077,7 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 			}
 		}
 		{
-			auto *frame = new QGroupBox( "Commandline" );
+			auto *frame = new QGroupBox( "Task Commands" );
 			grid->addWidget( frame, 1, 0 );
 			{
 				auto *tree = new QTreeWidget_commands;
@@ -1093,7 +1093,7 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 			}
 		}
 		{
-			auto *expander = new QGroupBox( "Build Variables" );
+			auto *expander = new QGroupBox( "Task Variables" );
 			expander->setFlat( true );
 			expander->setCheckable( true );
 			expander->setChecked( false );
@@ -1323,4 +1323,20 @@ void BuildMenu_Destroy(){
 void Build_runRecentExecutedBuild(){
 	if( !g_build_project.empty() )
 		RunBSP( Project_find( g_build_project, g_lastExecutedBuild ) );
+}
+
+void Build_runTaskBuild(){
+	if ( !g_build_project.empty() ) {
+		RunBSP( Project_find( g_build_project, g_lastExecutedBuild ), BuildLaunchMode::ForceOff );
+	}
+}
+
+void Build_runTaskLaunch(){
+	RunLaunchTaskCurrentMap();
+}
+
+void Build_runTaskBuildAndLaunch(){
+	if ( !g_build_project.empty() ) {
+		RunBSP( Project_find( g_build_project, g_lastExecutedBuild ), BuildLaunchMode::ForceOn );
+	}
 }

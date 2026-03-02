@@ -126,6 +126,26 @@ void applyShaderToBrush( Brush& brush, const char* shader ){
 	}
 }
 
+void placeEntityAtDropPoint( scene::Instance& instance, Transformable& transform, const Vector3& dropPoint, bool alignBottomToPoint ){
+	transform.setType( TRANSFORM_PRIMITIVE );
+	transform.setTranslation( dropPoint );
+	transform.freezeTransform();
+
+	const AABB bounds = instance.worldAABB();
+	const float boundsMinZ = bounds.origin.z() - bounds.extents.z();
+	const Vector3 delta(
+		dropPoint.x() - bounds.origin.x(),
+		dropPoint.y() - bounds.origin.y(),
+		alignBottomToPoint ? dropPoint.z() - boundsMinZ : dropPoint.z() - bounds.origin.z()
+	);
+	if ( std::isfinite( delta.x() ) && std::isfinite( delta.y() ) && std::isfinite( delta.z() )
+	  && ( std::fabs( delta.x() ) > 1e-4f || std::fabs( delta.y() ) > 1e-4f || std::fabs( delta.z() ) > 1e-4f ) ) {
+		Vector3 placed = dropPoint + delta;
+		transform.setTranslation( placed );
+		transform.freezeTransform();
+	}
+}
+
  bool createTexturedBrushAtPoint( const Vector3& point, const char* shader, bool alignToSurfaceZ ){
 	const Vector3 extents( 32.0f, 32.0f, 32.0f );
 	Vector3 origin = point;
@@ -164,19 +184,7 @@ bool createTargetSpeakerAtPoint( const Vector3& point, const char* soundPath ){
 	scene::Instance& instance = findInstance( entitypath );
 
 	if ( Transformable* transform = Instance_getTransformable( instance ) ) {
-		transform->setType( TRANSFORM_PRIMITIVE );
-		transform->setTranslation( point );
-		transform->freezeTransform();
-
-		const AABB bounds = instance.worldAABB();
-		const float boundsMinZ = bounds.origin.z() - bounds.extents.z();
-		const float deltaZ = point.z() - boundsMinZ;
-		if ( std::isfinite( deltaZ ) && std::fabs( deltaZ ) > 1e-4f ) {
-			Vector3 placed = point;
-			placed.z() += deltaZ;
-			transform->setTranslation( placed );
-			transform->freezeTransform();
-		}
+		placeEntityAtDropPoint( instance, *transform, point, true );
 	}
 
 	if ( Entity* entity = Node_getEntity( node ) ) {
@@ -276,19 +284,7 @@ bool AssetDrop_handleModelPath( const char* modelPath, const Vector3& point ){
 	}
 
 	if ( Transformable* transform = Instance_getTransformable( instance ) ) {
-		transform->setType( TRANSFORM_PRIMITIVE );
-		transform->setTranslation( snapped );
-		transform->freezeTransform();
-
-		const AABB bounds = instance.worldAABB();
-		const float boundsMinZ = bounds.origin.z() - bounds.extents.z();
-		const float originToMinZ = snapped.z() - boundsMinZ;
-		if ( std::isfinite( originToMinZ ) && std::fabs( originToMinZ ) > 1e-4f ) {
-			Vector3 placed = snapped;
-			placed.z() += originToMinZ;
-			transform->setTranslation( placed );
-			transform->freezeTransform();
-		}
+		placeEntityAtDropPoint( instance, *transform, snapped, true );
 	}
 
 	GlobalSelectionSystem().setSelectedAll( false );

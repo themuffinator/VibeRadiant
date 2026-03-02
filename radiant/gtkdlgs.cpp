@@ -66,6 +66,12 @@
 #include <QSplitter>
 #include <QTimer>
 #include <algorithm>
+#include <filesystem>
+#include <vector>
+#include <string>
+#include <string_view>
+#include <cctype>
+#include <cstring>
 
 #ifdef WIN32
 #include <windows.h>
@@ -99,18 +105,92 @@
 class GameComboConfiguration
 {
 public:
-	const char* basegame_dir;
-	const char* basegame;
-	const char* known_dir;
-	const char* known;
-	const char* custom;
+	struct ModPreset
+	{
+		CopiedString dir;
+		CopiedString label;
+	};
+
+	CopiedString basegame_dir;
+	CopiedString basegame_label;
+	CopiedString custom_label;
+	std::vector<ModPreset> presets;
+
+	static std::string trim( std::string value ){
+		while ( !value.empty() && std::isspace( static_cast<unsigned char>( value.front() ) ) )
+			value.erase( value.begin() );
+		while ( !value.empty() && std::isspace( static_cast<unsigned char>( value.back() ) ) )
+			value.pop_back();
+		return value;
+	}
+
+	static std::vector<CopiedString> splitList( const char* value, const char* delimiters ){
+		std::vector<CopiedString> out;
+		if ( string_empty( value ) ) {
+			return out;
+		}
+
+		std::string token;
+		for ( const char c : std::string_view( value ) )
+		{
+			if ( strchr( delimiters, c ) != nullptr ) {
+				token = trim( token );
+				if ( !token.empty() ) {
+					out.emplace_back( token.c_str() );
+				}
+				token.clear();
+				continue;
+			}
+			token.push_back( c );
+		}
+		token = trim( token );
+		if ( !token.empty() ) {
+			out.emplace_back( token.c_str() );
+		}
+		return out;
+	}
+
+	void appendPreset( const char* dir, const char* label ){
+		if ( string_empty( dir ) || string_empty( label ) ) {
+			return;
+		}
+		for ( auto& preset : presets )
+		{
+			if ( path_equal( preset.dir.c_str(), dir ) ) {
+				if ( preset.label.empty() ) {
+					preset.label = label;
+				}
+				return;
+			}
+		}
+		presets.push_back( { dir, label } );
+	}
 
 	GameComboConfiguration() :
 		basegame_dir( g_pGameDescription->getRequiredKeyValue( "basegame" ) ),
-		basegame( g_pGameDescription->getRequiredKeyValue( "basegamename" ) ),
-		known_dir( g_pGameDescription->getKeyValue( "knowngame" ) ),
-		known( g_pGameDescription->getKeyValue( "knowngamename" ) ),
-		custom( g_pGameDescription->getRequiredKeyValue( "unknowngamename" ) ){
+		basegame_label( g_pGameDescription->getRequiredKeyValue( "basegamename" ) ),
+		custom_label( g_pGameDescription->getRequiredKeyValue( "unknowngamename" ) ){
+
+		appendPreset( basegame_dir.c_str(), basegame_label.c_str() );
+
+		appendPreset(
+			g_pGameDescription->getKeyValue( "knowngame" ),
+			string_empty( g_pGameDescription->getKeyValue( "knowngamename" ) )
+				? g_pGameDescription->getKeyValue( "knowngame" )
+				: g_pGameDescription->getKeyValue( "knowngamename" )
+		);
+
+		const auto knownMods = splitList( g_pGameDescription->getKeyValue( "knownmods" ), ",;|" );
+		const auto knownModNames = splitList( g_pGameDescription->getKeyValue( "knownmodnames" ), ",;|" );
+		for ( size_t i = 0; i < knownMods.size(); ++i )
+		{
+			const char* label = i < knownModNames.size() ? knownModNames[i].c_str() : knownMods[i].c_str();
+			appendPreset( knownMods[i].c_str(), label );
+		}
+	}
+
+	int customIndex() const {
+		return static_cast<int>( presets.size() );
 	}
 };
 
@@ -132,31 +212,15 @@ struct gamecombo_t
 };
 
 gamecombo_t gamecombo_for_dir( const char* dir ){
-	if ( path_equal( dir, globalGameComboConfiguration().basegame_dir ) ) {
-		return gamecombo_t( 0, dir, false );
-	}
-	else if ( path_equal( dir, globalGameComboConfiguration().known_dir ) ) {
-		return gamecombo_t( 1, dir, false );
-	}
-	else
+	const auto& config = globalGameComboConfiguration();
+	for ( size_t i = 0; i < config.presets.size(); ++i )
 	{
-		return gamecombo_t( string_empty( globalGameComboConfiguration().known_dir ) ? 1 : 2, dir, true );
+		if ( path_equal( dir, config.presets[i].dir.c_str() ) ) {
+			return gamecombo_t( static_cast<int>( i ), config.presets[i].dir.c_str(), false );
+		}
 	}
+	return gamecombo_t( config.customIndex(), dir, true );
 }
-
-gamecombo_t gamecombo_for_gamename( const char* gamename ){
-	if ( string_empty( gamename ) || string_equal( gamename, globalGameComboConfiguration().basegame ) ) {
-		return gamecombo_t( 0, globalGameComboConfiguration().basegame_dir, false );
-	}
-	else if ( string_equal( gamename, globalGameComboConfiguration().known ) ) {
-		return gamecombo_t( 1, globalGameComboConfiguration().known_dir, false );
-	}
-	else
-	{
-		return gamecombo_t( string_empty( globalGameComboConfiguration().known_dir ) ? 1 : 2, "", true );
-	}
-}
-
 
 class MappingMode
 {
@@ -207,13 +271,112 @@ void FSGameExport( const IntImportCallback& importer ){
 }
 typedef FreeCaller<void(const IntImportCallback&), FSGameExport> FSGameExportCaller;
 
+void gamecombo_addFsGameUnique( QComboBox* combo, const char* dir ){
+	if ( combo == nullptr || string_empty( dir ) ) {
+		return;
+	}
+	for ( int i = 0; i < combo->count(); ++i )
+	{
+		if ( path_equal( combo->itemText( i ).toLatin1().constData(), dir ) ) {
+			return;
+		}
+	}
+	combo->addItem( dir );
+}
+
+bool gamecombo_directoryLooksLikeMod( const std::filesystem::path& dir, const std::vector<CopiedString>& archiveTypes ){
+	if ( !file_is_directory( dir.string().c_str() ) ) {
+		return false;
+	}
+
+	for ( const char* hint : { "maps", "scripts", "materials", "textures", "models", "sound", "shaders", "progs" } )
+	{
+		if ( file_is_directory( ( dir / hint ).string().c_str() ) ) {
+			return true;
+		}
+	}
+	for ( const char* fileHint : { "modinfo.txt", "description.txt", "gamex86.dll", "gamex64.dll", "pak0.pk3", "pak0.pak", "pak0.pk4", "default.cfg", "progs.dat" } )
+	{
+		if ( file_exists( ( dir / fileHint ).string().c_str() ) ) {
+			return true;
+		}
+	}
+
+	std::error_code err;
+	for ( const auto& entry : std::filesystem::directory_iterator( dir, std::filesystem::directory_options::skip_permission_denied, err ) )
+	{
+		if ( !entry.is_regular_file( err ) ) {
+			continue;
+		}
+		std::string ext = entry.path().extension().string();
+		if ( !ext.empty() && ext.front() == '.' ) {
+			ext.erase( ext.begin() );
+		}
+		std::transform( ext.begin(), ext.end(), ext.begin(), []( const unsigned char c ){
+			return static_cast<char>( std::tolower( c ) );
+		} );
+		if ( ext == "pk3" || ext == "pak" || ext == "pk4" ) {
+			return true;
+		}
+		for ( const auto& archiveType : archiveTypes )
+		{
+			if ( string_equal( ext.c_str(), archiveType.c_str() ) ) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void gamecombo_populateFsGameEntries(){
+	s_gameCombo.fsgame_entry->clear();
+	const auto& config = globalGameComboConfiguration();
+
+	for ( const auto& preset : config.presets )
+	{
+		gamecombo_addFsGameUnique( s_gameCombo.fsgame_entry, preset.dir.c_str() );
+	}
+	gamecombo_addFsGameUnique( s_gameCombo.fsgame_entry, gamename_get() );
+
+	std::vector<CopiedString> archiveTypes;
+	for ( const auto& token : GameComboConfiguration::splitList( g_pGameDescription->getKeyValue( "archivetypes" ), " ,;|\t\r\n" ) )
+	{
+		archiveTypes.emplace_back( token );
+	}
+
+	std::error_code err;
+	for ( const auto& entry : std::filesystem::directory_iterator( EnginePath_get(), std::filesystem::directory_options::skip_permission_denied, err ) )
+	{
+		if ( !entry.is_directory( err ) ) {
+			continue;
+		}
+
+		const auto modDir = entry.path().filename().string();
+		if ( modDir.empty() || modDir.front() == '.' ) {
+			continue;
+		}
+		if ( path_equal( modDir.c_str(), config.basegame_dir.c_str() ) ) {
+			continue;
+		}
+		if ( !gamecombo_directoryLooksLikeMod( entry.path(), archiveTypes ) ) {
+			continue;
+		}
+		gamecombo_addFsGameUnique( s_gameCombo.fsgame_entry, modDir.c_str() );
+	}
+}
+
 
 void GameImport( int value ){
-	const auto dir = s_gameCombo.fsgame_entry->currentText().toLatin1();
+	const auto& config = globalGameComboConfiguration();
+	QByteArray dir;
+	if ( value >= 0 && value < static_cast<int>( config.presets.size() ) ) {
+		dir = config.presets[value].dir.c_str();
+	}
+	else{
+		dir = s_gameCombo.fsgame_entry->currentText().toLatin1();
+	}
 
-	const char* new_gamename = dir.isEmpty()
-	                           ? globalGameComboConfiguration().basegame_dir
-	                           : dir.constData();
+	const char* new_gamename = dir.isEmpty() ? config.basegame_dir.c_str() : dir.constData();
 
 	if ( !path_equal( new_gamename, gamename_get() ) ) {
 		if ( ConfirmModified( "Edit Project Settings" ) ) {
@@ -240,6 +403,7 @@ typedef FreeCaller<void(const IntImportCallback&), GameExport> GameExportCaller;
 
 
 void Game_constructPreferences( PreferencesPage& page ){
+	const auto& config = globalGameComboConfiguration();
 	{
 		s_gameCombo.game_select = page.appendCombo(
 			"Select mod",
@@ -247,10 +411,11 @@ void Game_constructPreferences( PreferencesPage& page ){
 			IntImportCallback( GameImportCaller() ),
 			IntExportCallback( GameExportCaller() )
 		);
-		s_gameCombo.game_select->addItem( globalGameComboConfiguration().basegame );
-		if ( !string_empty( globalGameComboConfiguration().known ) )
-			s_gameCombo.game_select->addItem( globalGameComboConfiguration().known );
-		s_gameCombo.game_select->addItem( globalGameComboConfiguration().custom );
+		for ( const auto& preset : config.presets )
+		{
+			s_gameCombo.game_select->addItem( preset.label.c_str() );
+		}
+		s_gameCombo.game_select->addItem( config.custom_label.c_str() );
 	}
 	{
 		s_gameCombo.fsgame_entry = page.appendCombo(
@@ -260,15 +425,19 @@ void Game_constructPreferences( PreferencesPage& page ){
 			IntExportCallback( FSGameExportCaller() )
 		);
 		s_gameCombo.fsgame_entry->setEditable( true );
-		std::error_code err; // use func version with error handling, since other throws error on non-existing directory
-		for( const auto& entry : std::filesystem::directory_iterator( EnginePath_get(), std::filesystem::directory_options::skip_permission_denied, err ) )
-			if( entry.is_directory() )
-				s_gameCombo.fsgame_entry->addItem( entry.path().filename().string().c_str() );
+		gamecombo_populateFsGameEntries();
 	}
-	QObject::connect( s_gameCombo.game_select, &QComboBox::currentTextChanged, []( const QString& text ){
-		const gamecombo_t gamecombo = gamecombo_for_gamename( text.toLatin1().constData() );
-		s_gameCombo.fsgame_entry->setEditText( gamecombo.fs_game );
-		s_gameCombo.fsgame_entry->setEnabled( gamecombo.sensitive );
+	QObject::connect( s_gameCombo.game_select, qOverload<int>( &QComboBox::currentIndexChanged ), []( int index ){
+		const auto& config = globalGameComboConfiguration();
+		if ( index >= 0 && index < static_cast<int>( config.presets.size() ) ) {
+			s_gameCombo.fsgame_entry->setEditText( config.presets[index].dir.c_str() );
+			s_gameCombo.fsgame_entry->setEnabled( false );
+			return;
+		}
+		s_gameCombo.fsgame_entry->setEnabled( true );
+		if ( s_gameCombo.fsgame_entry->currentText().isEmpty() ) {
+			s_gameCombo.fsgame_entry->setEditText( gamename_get() );
+		}
 	} );
 
 	if( globalMappingMode().do_mapping_mode ){

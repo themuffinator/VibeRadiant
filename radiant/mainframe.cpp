@@ -47,6 +47,9 @@
 #include <vector>
 #include <array>
 #include <string>
+#include <string_view>
+#include <set>
+#include <cctype>
 
 #include <QWidget>
 #include <QSplashScreen>
@@ -63,6 +66,9 @@
 #include <QSettings>
 #include <QGroupBox>
 #include <QDialogButtonBox>
+#include <QDialog>
+#include <QPlainTextEdit>
+#include <QToolButton>
 #include <QPushButton>
 #include <QPointer>
 #include <QTimer>
@@ -344,11 +350,14 @@ namespace
 {
 struct GameInstallRule
 {
-	const char* gameFile;
-	const char* checkFile1;
-	const char* checkFile2;
-	const char* const* steamSubdirs;
-	const char* const* gogSubdirs;
+	CopiedString gameFile;
+	CopiedString gameName;
+	CopiedString basegameName;
+	CopiedString basegame;
+	CopiedString engineExecutable;
+	std::vector<CopiedString> archiveTypes;
+	std::vector<CopiedString> requiredFiles;
+	std::vector<CopiedString> aliases;
 };
 
 struct DetectedEngineInstall
@@ -360,43 +369,226 @@ struct DetectedEngineInstall
 std::vector<DetectedEngineInstall> g_detectedEngineInstalls;
 int g_detectedEngineInstallInitialSelection = -1;
 
-const char* const g_q3_steam_subdirs[] = { "Quake 3 Arena/", "Quake III Arena/", nullptr };
-const char* const g_q3_gog_subdirs[] = { "Quake III Arena/", nullptr };
-const char* const g_q1_steam_subdirs[] = { "Quake/", "Quake 1/", nullptr };
-const char* const g_q1_gog_subdirs[] = { "Quake/", nullptr };
-const char* const g_q2_steam_subdirs[] = { "Quake 2/", "Quake II/", nullptr };
-const char* const g_q2_gog_subdirs[] = { "Quake 2/", "Quake II/", nullptr };
-const char* const g_heretic2_steam_subdirs[] = { "Heretic 2/", "Heretic II/", nullptr };
-const char* const g_heretic2_gog_subdirs[] = { "Heretic II/", nullptr };
-const char* const g_kingpin_steam_subdirs[] = { "Kingpin/", "Kingpin Life of Crime/", nullptr };
-const char* const g_kingpin_gog_subdirs[] = { "Kingpin/", "Kingpin Life of Crime/", nullptr };
-const char* const g_nexuiz_steam_subdirs[] = { "Nexuiz/", nullptr };
-const char* const g_warsow_steam_subdirs[] = { "Warsow/", nullptr };
+std::string EnginePath_toLower( const std::string& value ){
+	std::string lower;
+	lower.reserve( value.size() );
+	for ( const unsigned char c : value )
+	{
+		lower.push_back( static_cast<char>( std::tolower( c ) ) );
+	}
+	return lower;
+}
 
+std::string EnginePath_normaliseToken( const char* value ){
+	std::string token;
+	if ( value == nullptr ) {
+		return token;
+	}
+	for ( const unsigned char c : std::string_view( value ) )
+	{
+		if ( std::isalnum( c ) ) {
+			token.push_back( static_cast<char>( std::tolower( c ) ) );
+		}
+	}
+	return token;
+}
+
+std::string EnginePath_trim( std::string value ){
+	while ( !value.empty() && std::isspace( static_cast<unsigned char>( value.front() ) ) )
+		value.erase( value.begin() );
+	while ( !value.empty() && std::isspace( static_cast<unsigned char>( value.back() ) ) )
+		value.pop_back();
+	return value;
+}
+
+std::vector<CopiedString> EnginePath_splitList( const char* value, const char* delimiters ){
+	std::vector<CopiedString> tokens;
+	if ( value == nullptr || string_empty( value ) ) {
+		return tokens;
+	}
+
+	std::string token;
+	for ( const char c : std::string_view( value ) )
+	{
+		if ( strchr( delimiters, c ) != nullptr ) {
+			token = EnginePath_trim( token );
+			if ( !token.empty() ) {
+				tokens.emplace_back( token.c_str() );
+			}
+			token.clear();
+			continue;
+		}
+		token.push_back( c );
+	}
+	token = EnginePath_trim( token );
+	if ( !token.empty() ) {
+		tokens.emplace_back( token.c_str() );
+	}
+	return tokens;
+}
+
+void EnginePath_appendUniqueAlias( std::vector<CopiedString>& aliases, const char* alias ){
+	if ( alias == nullptr || string_empty( alias ) ) {
+		return;
+	}
+
+	const std::string trimmed = EnginePath_trim( alias );
+	const std::string normalised = EnginePath_normaliseToken( trimmed.c_str() );
+	if ( normalised.empty() ) {
+		return;
+	}
+	for ( const auto& existing : aliases )
+	{
+		if ( EnginePath_normaliseToken( existing.c_str() ) == normalised ) {
+			return;
+		}
+	}
+	aliases.emplace_back( trimmed.c_str() );
+}
+
+void EnginePath_appendUniquePath( std::vector<CopiedString>& values, const char* value ){
+	if ( value == nullptr || string_empty( value ) ) {
+		return;
+	}
+	for ( const auto& existing : values )
+	{
+		if ( path_equal( existing.c_str(), value ) ) {
+			return;
+		}
+	}
+	values.emplace_back( value );
+}
+
+const char* EnginePath_platformEngineAttribute(){
 #if defined( WIN32 )
-const char* const nexuiz_check_file2 = "nexuiz.exe";
+	return "engine_win32";
 #elif defined( __APPLE__ )
-const char* const nexuiz_check_file2 = "Nexuiz.app/Contents/Info.plist";
+	return "engine_macos";
+#elif defined( __linux__ ) || defined ( __FreeBSD__ )
+	return "engine_linux";
 #else
-const char* const nexuiz_check_file2 = "nexuiz-linux-glx.sh";
+#error "unsupported platform"
 #endif
+}
 
-const std::array<GameInstallRule, 8> g_gameInstallRules = {{
-	{ "q3.game", "baseq3/pak0.pk3", nullptr, g_q3_steam_subdirs, g_q3_gog_subdirs },
-	{ "q1.game", "id1/pak0.pak", nullptr, g_q1_steam_subdirs, g_q1_gog_subdirs },
-	{ "q2re.game", "baseq2/pak0.pak", "rerelease", g_q2_steam_subdirs, g_q2_gog_subdirs },
-	{ "q2.game", "baseq2/pak0.pak", nullptr, g_q2_steam_subdirs, g_q2_gog_subdirs },
-	{ "heretic2.game", "base/pak0.pak", nullptr, g_heretic2_steam_subdirs, g_heretic2_gog_subdirs },
-	{ "kingpin.game", "main/pak0.pak", nullptr, g_kingpin_steam_subdirs, g_kingpin_gog_subdirs },
-	{ "nexuiz.game", "data/common-spog.pk3", nexuiz_check_file2, g_nexuiz_steam_subdirs, nullptr },
-	{ "warsow.game", "basewsw/dedicated_autoexec.cfg", nullptr, g_warsow_steam_subdirs, nullptr },
-}};
+GameInstallRule EnginePath_buildInstallRule(){
+	GameInstallRule rule;
+	rule.gameFile = g_pGameDescription->mGameFile;
+	rule.gameName = g_pGameDescription->getKeyValue( "name" );
+	rule.basegameName = g_pGameDescription->getKeyValue( "basegamename" );
+	rule.basegame = g_pGameDescription->getRequiredKeyValue( "basegame" );
+	rule.engineExecutable = g_pGameDescription->getKeyValue( EnginePath_platformEngineAttribute() );
 
-const GameInstallRule* EnginePath_findInstallRule( const char* gameFile ){
-	const auto found = std::find_if( g_gameInstallRules.begin(), g_gameInstallRules.end(), [gameFile]( const auto& rule ){
-		return string_equal( rule.gameFile, gameFile );
-	} );
-	return found != g_gameInstallRules.end()? &*found : nullptr;
+	for ( const auto& token : EnginePath_splitList( g_pGameDescription->getKeyValue( "archivetypes" ), " ,;|\t\r\n" ) )
+	{
+		EnginePath_appendUniquePath( rule.archiveTypes, EnginePath_toLower( token.c_str() ).c_str() );
+	}
+
+	for ( const char* key : { "detect_file1", "detect_file2" } )
+	{
+		const char* value = g_pGameDescription->getKeyValue( key );
+		if ( !string_empty( value ) ) {
+			rule.requiredFiles.emplace_back( value );
+		}
+	}
+	for ( const auto& token : EnginePath_splitList( g_pGameDescription->getKeyValue( "detect_files" ), ",;|" ) )
+	{
+		EnginePath_appendUniquePath( rule.requiredFiles, token.c_str() );
+	}
+
+	EnginePath_appendUniqueAlias( rule.aliases, rule.basegame.c_str() );
+	EnginePath_appendUniqueAlias( rule.aliases, rule.basegameName.c_str() );
+	EnginePath_appendUniqueAlias( rule.aliases, g_pGameDescription->mGameType.c_str() );
+	EnginePath_appendUniqueAlias( rule.aliases, rule.gameName.c_str() );
+	EnginePath_appendUniqueAlias( rule.aliases, g_pGameDescription->mGameFile.c_str() );
+	EnginePath_appendUniqueAlias( rule.aliases, g_pGameDescription->getKeyValue( "knowngame" ) );
+	EnginePath_appendUniqueAlias( rule.aliases, g_pGameDescription->getKeyValue( "knowngamename" ) );
+	EnginePath_appendUniqueAlias( rule.aliases, g_pGameDescription->getKeyValue( "unknowngamename" ) );
+	for ( const auto& token : EnginePath_splitList( g_pGameDescription->getKeyValue( "knownmods" ), ",;|" ) )
+	{
+		EnginePath_appendUniqueAlias( rule.aliases, token.c_str() );
+	}
+	for ( const auto& token : EnginePath_splitList( g_pGameDescription->getKeyValue( "knownmodnames" ), ",;|" ) )
+	{
+		EnginePath_appendUniqueAlias( rule.aliases, token.c_str() );
+	}
+	for ( const auto& token : EnginePath_splitList( g_pGameDescription->getKeyValue( "install_aliases" ), ",;|" ) )
+	{
+		EnginePath_appendUniqueAlias( rule.aliases, token.c_str() );
+	}
+
+	const std::filesystem::path gameFilePath( rule.gameFile.c_str() );
+	EnginePath_appendUniqueAlias( rule.aliases, gameFilePath.stem().string().c_str() );
+	if ( !rule.engineExecutable.empty() ) {
+		const std::filesystem::path enginePath( rule.engineExecutable.c_str() );
+		EnginePath_appendUniqueAlias( rule.aliases, enginePath.stem().string().c_str() );
+	}
+
+	return rule;
+}
+
+void EnginePath_applyLegacyHints( GameInstallRule& rule ){
+	const auto gameFileLower = EnginePath_toLower( rule.gameFile.c_str() );
+	const auto addRequired = [&rule]( const char* value ){
+		EnginePath_appendUniquePath( rule.requiredFiles, value );
+	};
+	const auto addAlias = [&rule]( const char* value ){
+		EnginePath_appendUniqueAlias( rule.aliases, value );
+	};
+
+	if ( gameFileLower == "q2re.game" ) {
+		addRequired( "rerelease" );
+		addAlias( "Quake II Rerelease" );
+		addAlias( "rerelease" );
+	}
+	else if ( gameFileLower == "q2.game" ) {
+		addAlias( "Quake 2" );
+		addAlias( "Quake II" );
+	}
+	else if ( gameFileLower == "q1.game" ) {
+		addAlias( "Quake 1" );
+		addAlias( "Quake" );
+	}
+	else if ( gameFileLower == "q3.game" ) {
+		addAlias( "Quake 3" );
+		addAlias( "Quake III Arena" );
+	}
+	else if ( gameFileLower == "heretic2.game" ) {
+		addAlias( "Heretic 2" );
+		addAlias( "Heretic II" );
+	}
+	else if ( gameFileLower == "kingpin.game" ) {
+		addAlias( "Kingpin Life of Crime" );
+	}
+	else if ( gameFileLower == "nexuiz.game" ) {
+		addRequired( "data/common-spog.pk3" );
+		addAlias( "Nexuiz" );
+	}
+	else if ( gameFileLower == "warsow.game" ) {
+		addRequired( "basewsw/dedicated_autoexec.cfg" );
+		addAlias( "Warsow" );
+	}
+}
+
+bool EnginePath_isWeakAlias( const std::string& token ){
+	static const std::set<std::string> weak = {
+		"base", "data", "main", "default", "pkg", "id1", "mod", "game"
+	};
+	return token.size() < 4 || weak.find( token ) != weak.end();
+}
+
+bool EnginePath_textMatchesAliases( const std::string& textNormalised, const GameInstallRule& rule ){
+	for ( const auto& alias : rule.aliases )
+	{
+		const std::string token = EnginePath_normaliseToken( alias.c_str() );
+		if ( EnginePath_isWeakAlias( token ) ) {
+			continue;
+		}
+		if ( textNormalised.find( token ) != std::string::npos ) {
+			return true;
+		}
+	}
+	return false;
 }
 
 const char* EnginePath_defaultPathAttribute(){
@@ -415,17 +607,110 @@ bool EnginePath_hasGameDataAt( const char* installRoot, const GameInstallRule& r
 	if ( installRoot == nullptr || string_empty( installRoot ) ) {
 		return false;
 	}
-	const auto cleaned = StringStream( DirectoryCleaned( installRoot ) );
+
+	const auto cleanedRoot = StringStream( DirectoryCleaned( installRoot ) );
+	const std::filesystem::path root{ cleanedRoot.c_str() };
+	const std::string cleaned = root.string();
 	if ( !file_is_directory( cleaned.c_str() ) ) {
 		return false;
 	}
-	if ( !file_exists( StringStream( cleaned, rule.checkFile1 ) ) ) {
-		return false;
+
+	std::vector<std::filesystem::path> baseCandidates;
+	if ( !rule.basegame.empty() ) {
+		baseCandidates.emplace_back( root / rule.basegame.c_str() );
 	}
-	if ( rule.checkFile2 != nullptr && !file_exists( StringStream( cleaned, rule.checkFile2 ) ) ) {
-		return false;
+	if ( !rule.basegame.empty() ) {
+		const std::string rootLeaf = EnginePath_toLower( root.filename().string() );
+		const std::string baseLeaf = EnginePath_toLower( rule.basegame.c_str() );
+		if ( rootLeaf == baseLeaf ) {
+			baseCandidates.emplace_back( root );
+		}
 	}
-	return true;
+
+	const bool hasBaseDir = std::ranges::any_of( baseCandidates, []( const std::filesystem::path& path ){
+		return file_is_directory( path.string().c_str() );
+	} );
+
+	bool hasEngine = false;
+	if ( !rule.engineExecutable.empty() ) {
+		hasEngine = file_exists( ( root / rule.engineExecutable.c_str() ).string().c_str() );
+	}
+
+	const auto hasArchiveType = [&rule]( const std::filesystem::path& directory ){
+		if ( rule.archiveTypes.empty() ) {
+			return false;
+		}
+		std::error_code err;
+		for ( const auto& entry : std::filesystem::directory_iterator( directory, std::filesystem::directory_options::skip_permission_denied, err ) )
+		{
+			if ( !entry.is_regular_file( err ) ) {
+				continue;
+			}
+			auto ext = entry.path().extension().string();
+			if ( !ext.empty() && ext[0] == '.' ) {
+				ext.erase( ext.begin() );
+			}
+			ext = EnginePath_toLower( ext );
+			for ( const auto& wanted : rule.archiveTypes )
+			{
+				if ( string_equal( ext.c_str(), wanted.c_str() ) ) {
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+
+	const auto hasContentHints = []( const std::filesystem::path& directory ){
+		for ( const char* hint : { "maps", "scripts", "materials", "textures", "models", "sound", "shaders" } )
+		{
+			if ( file_is_directory( ( directory / hint ).string().c_str() ) ) {
+				return true;
+			}
+		}
+		for ( const char* fileHint : { "pak0.pk3", "pak0.pak", "pak0.pk4", "gamex86.dll", "gamex64.dll" } )
+		{
+			if ( file_exists( ( directory / fileHint ).string().c_str() ) ) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	bool hasArchives = false;
+	bool hasContent = false;
+	for ( const auto& path : baseCandidates )
+	{
+		if ( !file_is_directory( path.string().c_str() ) ) {
+			continue;
+		}
+		hasArchives = hasArchives || hasArchiveType( path );
+		hasContent = hasContent || hasContentHints( path );
+	}
+
+	if ( !rule.requiredFiles.empty() ) {
+		for ( const auto& required : rule.requiredFiles )
+		{
+			const std::filesystem::path rel( required.c_str() );
+			if ( file_exists( ( root / rel ).string().c_str() ) ) {
+				continue;
+			}
+			bool foundInBase = false;
+			for ( const auto& base : baseCandidates )
+			{
+				if ( file_exists( ( base / rel ).string().c_str() ) ) {
+					foundInBase = true;
+					break;
+				}
+			}
+			if ( !foundInBase ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	return hasBaseDir && ( hasEngine || hasArchives || hasContent );
 }
 
 bool EnginePath_hasDetectedPath( const std::vector<DetectedEngineInstall>& installs, const char* path ){
@@ -436,6 +721,34 @@ bool EnginePath_hasDetectedPath( const std::vector<DetectedEngineInstall>& insta
 		}
 	}
 	return false;
+}
+
+CopiedString EnginePath_normaliseInstallRoot( const char* candidatePath, const GameInstallRule& rule ){
+	if ( candidatePath == nullptr || string_empty( candidatePath ) ) {
+		return "";
+	}
+
+	const auto cleanedCandidate = StringStream( DirectoryCleaned( candidatePath ) );
+	std::filesystem::path path{ cleanedCandidate.c_str() };
+	if ( path.empty() ) {
+		return "";
+	}
+
+	if ( !rule.basegame.empty() ) {
+		const auto leaf = EnginePath_toLower( path.filename().string() );
+		const auto base = EnginePath_toLower( rule.basegame.c_str() );
+		if ( leaf == base ) {
+			const auto parent = path.parent_path();
+			if ( !parent.empty()
+			  && file_is_directory( parent.string().c_str() )
+			  && file_is_directory( ( parent / rule.basegame.c_str() ).string().c_str() ) ) {
+				path = parent;
+			}
+		}
+	}
+
+	const auto cleaned = StringStream( DirectoryCleaned( path.string().c_str() ) );
+	return cleaned.c_str();
 }
 
 void EnginePath_addDetectedDirectory( std::vector<DetectedEngineInstall>& installs, const char* candidatePath, const char* source ){
@@ -456,7 +769,7 @@ void EnginePath_addDetectedInstall( std::vector<DetectedEngineInstall>& installs
 	if ( candidatePath == nullptr || string_empty( candidatePath ) ) {
 		return;
 	}
-	const auto cleaned = StringStream( DirectoryCleaned( candidatePath ) );
+	const auto cleaned = EnginePath_normaliseInstallRoot( candidatePath, rule );
 	if ( !EnginePath_hasGameDataAt( cleaned.c_str(), rule ) ) {
 		return;
 	}
@@ -497,6 +810,29 @@ void EnginePath_detectNearbyInstalls( std::vector<DetectedEngineInstall>& instal
 }
 
 #if defined( WIN32 )
+void EnginePath_collectSteamRoots( std::vector<CopiedString>& steamRoots ){
+	if ( const auto* steamDir = getenv( "STEAMDIR" ); steamDir != nullptr && !string_empty( steamDir ) ) {
+		EnginePath_addUniqueDirectory( steamRoots, steamDir );
+	}
+	if ( const auto* programFilesX86 = getenv( "PROGRAMFILES(X86)" ); programFilesX86 != nullptr && !string_empty( programFilesX86 ) ) {
+		EnginePath_addUniqueDirectory( steamRoots, StringStream( DirectoryCleaned( programFilesX86 ), "Steam/" ) );
+	}
+	if ( const auto* programFiles = getenv( "PROGRAMFILES" ); programFiles != nullptr && !string_empty( programFiles ) ) {
+		EnginePath_addUniqueDirectory( steamRoots, StringStream( DirectoryCleaned( programFiles ), "Steam/" ) );
+	}
+
+	auto addSteamFromRegistry = [&steamRoots]( HKEY hkey, const char* subkey, const char* valueName ){
+		char value[MAX_PATH * 4];
+		DWORD size = sizeof( value );
+		if ( RegGetValueA( hkey, subkey, valueName, RRF_RT_REG_SZ, nullptr, value, &size ) == ERROR_SUCCESS ) {
+			EnginePath_addUniqueDirectory( steamRoots, value );
+		}
+	};
+	addSteamFromRegistry( HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath" );
+	addSteamFromRegistry( HKEY_LOCAL_MACHINE, "SOFTWARE\\Valve\\Steam", "InstallPath" );
+	addSteamFromRegistry( HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Valve\\Steam", "InstallPath" );
+}
+
 void EnginePath_parseSteamLibraryFolders( const char* path, std::vector<CopiedString>& libraryRoots ){
 	std::ifstream file( path, std::ios::in );
 	if ( !file.is_open() ) {
@@ -538,15 +874,7 @@ void EnginePath_parseSteamLibraryFolders( const char* path, std::vector<CopiedSt
 
 void EnginePath_collectSteamCommonRoots( std::vector<CopiedString>& commonRoots ){
 	std::vector<CopiedString> steamRoots;
-	if ( const auto* steamDir = getenv( "STEAMDIR" ); steamDir != nullptr && !string_empty( steamDir ) ) {
-		EnginePath_addUniqueDirectory( steamRoots, steamDir );
-	}
-	if ( const auto* programFilesX86 = getenv( "PROGRAMFILES(X86)" ); programFilesX86 != nullptr && !string_empty( programFilesX86 ) ) {
-		EnginePath_addUniqueDirectory( steamRoots, StringStream( DirectoryCleaned( programFilesX86 ), "Steam/" ) );
-	}
-	if ( const auto* programFiles = getenv( "PROGRAMFILES" ); programFiles != nullptr && !string_empty( programFiles ) ) {
-		EnginePath_addUniqueDirectory( steamRoots, StringStream( DirectoryCleaned( programFiles ), "Steam/" ) );
-	}
+	EnginePath_collectSteamRoots( steamRoots );
 
 	for ( const auto& steamRoot : steamRoots )
 	{
@@ -569,18 +897,131 @@ void EnginePath_collectGogRoots( std::vector<CopiedString>& roots ){
 		EnginePath_addUniqueDirectory( roots, StringStream( DirectoryCleaned( programFiles ), "GOG Galaxy/Games/" ) );
 	}
 }
+
+void EnginePath_collectWindowsUninstallRoots( std::vector<CopiedString>& roots, const GameInstallRule& rule ){
+	const std::array<std::pair<HKEY, const char*>, 6> uninstallRoots{{
+		{ HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall" },
+		{ HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall" },
+		{ HKEY_CURRENT_USER, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall" },
+		{ HKEY_CURRENT_USER, "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall" },
+		{ HKEY_LOCAL_MACHINE, "SOFTWARE\\GOG.com\\Games" },
+		{ HKEY_CURRENT_USER, "SOFTWARE\\GOG.com\\Games" },
+	}};
+
+	for ( const auto& [hive, keyPath] : uninstallRoots )
+	{
+		HKEY uninstallKey = nullptr;
+		if ( RegOpenKeyExA( hive, keyPath, 0, KEY_READ, &uninstallKey ) != ERROR_SUCCESS ) {
+			continue;
+		}
+
+		for ( DWORD index = 0;; ++index )
+		{
+			char subKeyName[512];
+			DWORD subKeySize = static_cast<DWORD>( std::size( subKeyName ) );
+			if ( RegEnumKeyExA( uninstallKey, index, subKeyName, &subKeySize, nullptr, nullptr, nullptr, nullptr ) != ERROR_SUCCESS ) {
+				break;
+			}
+
+			const auto subPath = StringStream( keyPath, "\\", subKeyName );
+
+			char displayName[2048]{};
+			DWORD displayNameSize = sizeof( displayName );
+			const bool hasDisplayName = RegGetValueA( hive, subPath.c_str(), "DisplayName", RRF_RT_REG_SZ, nullptr, displayName, &displayNameSize ) == ERROR_SUCCESS;
+			if ( hasDisplayName ) {
+				const auto normalised = EnginePath_normaliseToken( displayName );
+				if ( !EnginePath_textMatchesAliases( normalised, rule ) ) {
+					continue;
+				}
+			}
+
+			char installLocation[4096]{};
+			DWORD installLocationSize = sizeof( installLocation );
+			if ( RegGetValueA( hive, subPath.c_str(), "InstallLocation", RRF_RT_REG_SZ, nullptr, installLocation, &installLocationSize ) == ERROR_SUCCESS ) {
+				EnginePath_addUniqueDirectory( roots, installLocation );
+			}
+			for ( const char* valueName : { "Path", "path", "InstallDir", "Install Dir" } )
+			{
+				char candidate[4096]{};
+				DWORD candidateSize = sizeof( candidate );
+				if ( RegGetValueA( hive, subPath.c_str(), valueName, RRF_RT_REG_SZ, nullptr, candidate, &candidateSize ) == ERROR_SUCCESS ) {
+					EnginePath_addUniqueDirectory( roots, candidate );
+				}
+			}
+		}
+
+		RegCloseKey( uninstallKey );
+	}
+}
 #endif
 
-void EnginePath_detectFromSubdirs( std::vector<DetectedEngineInstall>& installs, const std::vector<CopiedString>& roots, const char* source, const char* const* subdirs, const GameInstallRule& rule ){
-	if ( subdirs == nullptr ) {
-		return;
+void EnginePath_collectSystemRoots( std::vector<CopiedString>& roots ){
+	for ( const char* envVar : { "RADIANT_GAME_PATHS", "VIBERADIANT_GAME_PATHS", "GAME_INSTALL_PATHS" } )
+	{
+		if ( const auto* value = getenv( envVar ); value != nullptr && !string_empty( value ) ) {
+#if defined( WIN32 )
+			for ( const auto& token : EnginePath_splitList( value, ";" ) )
+#else
+			for ( const auto& token : EnginePath_splitList( value, ":;" ) )
+#endif
+			{
+				EnginePath_addUniqueDirectory( roots, token.c_str() );
+			}
+		}
 	}
 
+	EnginePath_addUniqueDirectory( roots, g_strEnginePath.c_str() );
+	EnginePath_addUniqueDirectory( roots, g_pGameDescription->getKeyValue( EnginePath_defaultPathAttribute() ) );
+	EnginePath_addUniqueDirectory( roots, g_qeglobals.m_userEnginePath.c_str() );
+	EnginePath_addUniqueDirectory( roots, environment_get_app_path() );
+
+#if defined( WIN32 )
+	for ( const char* defaultRoot : { "C:/Games/", "D:/Games/", "E:/Games/", "C:/", "D:/" } )
+	{
+		EnginePath_addUniqueDirectory( roots, defaultRoot );
+	}
+	if ( const auto* programFilesX86 = getenv( "PROGRAMFILES(X86)" ); programFilesX86 != nullptr && !string_empty( programFilesX86 ) ) {
+		EnginePath_addUniqueDirectory( roots, programFilesX86 );
+	}
+	if ( const auto* programFiles = getenv( "PROGRAMFILES" ); programFiles != nullptr && !string_empty( programFiles ) ) {
+		EnginePath_addUniqueDirectory( roots, programFiles );
+	}
+#elif defined( __APPLE__ )
+	for ( const char* defaultRoot : { "/Applications/", "/Applications/Games/", "/Users/Shared/" } )
+	{
+		EnginePath_addUniqueDirectory( roots, defaultRoot );
+	}
+#else
+	for ( const char* defaultRoot : { "/usr/local/games/", "/usr/games/", "/opt/", "/opt/games/" } )
+	{
+		EnginePath_addUniqueDirectory( roots, defaultRoot );
+	}
+	EnginePath_addUniqueDirectory( roots, StringStream( DirectoryCleaned( g_get_home_dir() ), ".steam/steam/steamapps/common/" ) );
+	EnginePath_addUniqueDirectory( roots, StringStream( DirectoryCleaned( g_get_home_dir() ), ".local/share/Steam/steamapps/common/" ) );
+#endif
+}
+
+void EnginePath_detectFromRoots( std::vector<DetectedEngineInstall>& installs, const std::vector<CopiedString>& roots, const char* source, const GameInstallRule& rule ){
 	for ( const auto& root : roots )
 	{
-		for ( const auto* const* subdir = subdirs; *subdir != nullptr; ++subdir )
+		EnginePath_addDetectedInstall( installs, root.c_str(), source, rule );
+
+		for ( const auto& alias : rule.aliases )
 		{
-			EnginePath_addDetectedInstall( installs, StringStream( root, *subdir ), source, rule );
+			EnginePath_addDetectedInstall( installs, StringStream( root, alias, '/' ), source, rule );
+		}
+
+		std::error_code err;
+		for ( const auto& entry : std::filesystem::directory_iterator( root.c_str(), std::filesystem::directory_options::skip_permission_denied, err ) )
+		{
+			if ( !entry.is_directory( err ) ) {
+				continue;
+			}
+			const auto childName = EnginePath_normaliseToken( entry.path().filename().string().c_str() );
+			if ( childName.empty() || !EnginePath_textMatchesAliases( childName, rule ) ) {
+				continue;
+			}
+			EnginePath_addDetectedInstall( installs, entry.path().string().c_str(), source, rule );
 		}
 	}
 }
@@ -594,8 +1035,10 @@ void EnginePath_refreshDetectedInstalls(){
 	g_detectedEngineInstalls.clear();
 	g_detectedEngineInstallInitialSelection = -1;
 
-	const auto* rule = EnginePath_findInstallRule( g_pGameDescription->mGameFile.c_str() );
-	if ( rule == nullptr ) {
+	const auto rule = EnginePath_buildInstallRule();
+	auto effectiveRule = rule;
+	EnginePath_applyLegacyHints( effectiveRule );
+	if ( effectiveRule.basegame.empty() ) {
 		return;
 	}
 
@@ -604,19 +1047,27 @@ void EnginePath_refreshDetectedInstalls(){
 		g_detectedEngineInstalls,
 		g_pGameDescription->getKeyValue( EnginePath_defaultPathAttribute() ),
 		"Gamepack default",
-		*rule
+		effectiveRule
 	);
 
-	EnginePath_detectNearbyInstalls( g_detectedEngineInstalls, *rule );
+	EnginePath_detectNearbyInstalls( g_detectedEngineInstalls, effectiveRule );
+
+	std::vector<CopiedString> systemRoots;
+	EnginePath_collectSystemRoots( systemRoots );
+	EnginePath_detectFromRoots( g_detectedEngineInstalls, systemRoots, "System", effectiveRule );
 
 #if defined( WIN32 )
 	std::vector<CopiedString> steamCommonRoots;
 	EnginePath_collectSteamCommonRoots( steamCommonRoots );
-	EnginePath_detectFromSubdirs( g_detectedEngineInstalls, steamCommonRoots, "Steam", rule->steamSubdirs, *rule );
+	EnginePath_detectFromRoots( g_detectedEngineInstalls, steamCommonRoots, "Steam", effectiveRule );
 
 	std::vector<CopiedString> gogRoots;
 	EnginePath_collectGogRoots( gogRoots );
-	EnginePath_detectFromSubdirs( g_detectedEngineInstalls, gogRoots, "GOG", rule->gogSubdirs, *rule );
+	EnginePath_detectFromRoots( g_detectedEngineInstalls, gogRoots, "GOG", effectiveRule );
+
+	std::vector<CopiedString> registryRoots;
+	EnginePath_collectWindowsUninstallRoots( registryRoots, effectiveRule );
+	EnginePath_detectFromRoots( g_detectedEngineInstalls, registryRoots, "Windows Registry", effectiveRule );
 #endif
 }
 } // namespace
@@ -815,12 +1266,14 @@ void EnginePath_verify(){
 	bool needsPrompt = !file_exists( g_strEnginePath.c_str() ) || g_strEnginePath_was_empty_1st_start;
 	if ( needsPrompt ) {
 		EnginePath_refreshDetectedInstalls();
-		const auto* rule = EnginePath_findInstallRule( g_pGameDescription->mGameFile.c_str() );
+		const auto rule = EnginePath_buildInstallRule();
+		auto effectiveRule = rule;
+		EnginePath_applyLegacyHints( effectiveRule );
 		const DetectedEngineInstall* autoSelection = nullptr;
 		int validInstallCount = 0;
 		for ( const auto& install : g_detectedEngineInstalls )
 		{
-			if ( rule != nullptr && EnginePath_hasGameDataAt( install.path.c_str(), *rule ) ) {
+			if ( EnginePath_hasGameDataAt( install.path.c_str(), effectiveRule ) ) {
 				++validInstallCount;
 				autoSelection = &install;
 			}
@@ -1058,7 +1511,12 @@ void OpenBugReportURL(){
 QWidget* g_page_console;
 
 void Console_ToggleShow(){
-	GroupDialog_showPage( g_page_console );
+	if( g_page_console != nullptr ){
+		GroupDialog_showPage( g_page_console );
+		return;
+	}
+
+	Console_setCollapsed( !Console_isCollapsed() );
 }
 
 QWidget* g_page_entity;
@@ -1487,7 +1945,7 @@ void create_edit_menu( QMenuBar *menubar ){
 	}
 
 	menu->addSeparator();
-	create_menu_item_with_mnemonic( menu, "&Shortcuts...", "Shortcuts" );
+	create_menu_item_with_mnemonic( menu, "Command Palette...", "CommandPalette" );
 	create_menu_item_with_mnemonic( menu, "Pre&ferences...", "Preferences" );
 }
 
@@ -1497,35 +1955,17 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 
 	menu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
 
+	bool hasPreCameraSection = false;
 	if ( style == MainFrame::eFloating ) {
 		create_check_menu_item_with_mnemonic( menu, "Camera View", "ToggleCamera" );
 		create_check_menu_item_with_mnemonic( menu, "XY (Top) View", "ToggleView" );
 		create_check_menu_item_with_mnemonic( menu, "XZ (Front) View", "ToggleFrontView" );
 		create_check_menu_item_with_mnemonic( menu, "YZ (Side) View", "ToggleSideView" );
+		hasPreCameraSection = true;
 	}
-	if ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) {
-		create_menu_item_with_mnemonic( menu, "Console", "ToggleConsole" );
+	if ( hasPreCameraSection ) {
+		menu->addSeparator();
 	}
-	if ( AssetBrowser_isEnabled() && ( ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) || g_Layout_builtInGroupDialog.m_value ) ) {
-		create_menu_item_with_mnemonic( menu, "Asset Browser", "ToggleTextures" );
-	}
-	create_menu_item_with_mnemonic( menu, "Entity Inspector", "ToggleEntityInspector" );
-	create_menu_item_with_mnemonic( menu, "Layers Browser", "ToggleLayersBrowser" );
-	create_menu_item_with_mnemonic( menu, "Issue Browser", "ToggleIssueBrowser" );
-	create_menu_item_with_mnemonic( menu, "UV View", "ToggleUVView" );
-	create_menu_item_with_mnemonic( menu, "&Surface Inspector", "SurfaceInspector" );
-	create_menu_item_with_mnemonic( menu, "Entity List", "ToggleEntityList" );
-	{
-		QMenu* submenu = menu->addMenu( i18n::tr( "Workspace Presets" ) );
-		submenu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
-		create_menu_item_with_mnemonic( submenu, "Modeling", "WorkspacePresetModeling" );
-		create_menu_item_with_mnemonic( submenu, "Texturing", "WorkspacePresetTexturing" );
-		create_menu_item_with_mnemonic( submenu, "Entity", "WorkspacePresetEntity" );
-		create_menu_item_with_mnemonic( submenu, "Lighting", "WorkspacePresetLighting" );
-	}
-	create_check_menu_item_with_mnemonic( menu, "Focus Mode", "FocusMode" );
-
-	menu->addSeparator();
 	{
 		QMenu* submenu = menu->addMenu( i18n::tr( "Camera" ) );
 
@@ -1542,8 +1982,8 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 		create_menu_item_with_mnemonic( submenu, "Toggle Lighting Preview", "TogglePreview" );
 		create_check_menu_item_with_mnemonic( submenu, "Animate Shaders", "AnimateShaders" );
 		submenu->addSeparator();
-		create_menu_item_with_mnemonic( submenu, "Next leak spot", "NextLeakSpot" );
-		create_menu_item_with_mnemonic( submenu, "Previous leak spot", "PrevLeakSpot" );
+		create_menu_item_with_mnemonic( submenu, "Next Leak Spot", "NextLeakSpot" );
+		create_menu_item_with_mnemonic( submenu, "Previous Leak Spot", "PrevLeakSpot" );
 		//cameramodel is not implemented in instances, thus useless
 //		submenu->addSeparator();
 //		create_menu_item_with_mnemonic( submenu, "Look Through Selected", "LookThroughSelected" );
@@ -1629,6 +2069,44 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 	}
 
 	//command_connect_accelerator( "CenterXYView" );
+}
+
+void create_window_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
+	QMenu *menu = menubar->addMenu( i18n::tr( "&Window" ) );
+
+	menu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
+
+	create_menu_item_with_mnemonic( menu, "Command Palette...", "CommandPalette" );
+	create_menu_item_with_mnemonic( menu, "Pre&ferences...", "Preferences" );
+	menu->addSeparator();
+
+	if ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) {
+		create_menu_item_with_mnemonic( menu, "Toggle Console", "ToggleConsole" );
+	}
+	if ( AssetBrowser_isEnabled() && ( ( style != MainFrame::eRegular && style != MainFrame::eRegularLeft ) || g_Layout_builtInGroupDialog.m_value ) ) {
+		create_menu_item_with_mnemonic( menu, "Toggle Asset Browser", "ToggleTextures" );
+	}
+	create_menu_item_with_mnemonic( menu, "Toggle Entity Inspector", "ToggleEntityInspector" );
+	create_menu_item_with_mnemonic( menu, "Toggle Layers Browser", "ToggleLayersBrowser" );
+	create_menu_item_with_mnemonic( menu, "Toggle Issue Browser", "ToggleIssueBrowser" );
+	create_menu_item_with_mnemonic( menu, "Toggle UV View", "ToggleUVView" );
+	create_menu_item_with_mnemonic( menu, "Toggle Surface Inspector", "SurfaceInspector" );
+	create_menu_item_with_mnemonic( menu, "Toggle Entity List", "ToggleEntityList" );
+
+	menu->addSeparator();
+	{
+		QMenu* submenu = menu->addMenu( i18n::tr( "Workspace Presets" ) );
+		submenu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
+		create_menu_item_with_mnemonic( submenu, "Apply Modeling Workspace", "WorkspacePresetModeling" );
+		create_menu_item_with_mnemonic( submenu, "Apply Texturing Workspace", "WorkspacePresetTexturing" );
+		create_menu_item_with_mnemonic( submenu, "Apply Entity Workspace", "WorkspacePresetEntity" );
+		create_menu_item_with_mnemonic( submenu, "Apply Lighting Workspace", "WorkspacePresetLighting" );
+	}
+	create_check_menu_item_with_mnemonic( menu, "Focus Mode", "FocusMode" );
+
+	menu->addSeparator();
+	create_menu_item_with_mnemonic( menu, "Fullscreen", "Fullscreen" );
+	create_menu_item_with_mnemonic( menu, "Maximize View", "MaximizeView" );
 }
 
 void create_selection_menu( QMenuBar *menubar ){
@@ -1720,8 +2198,11 @@ void create_bsp_menu( QMenuBar *menubar ){
 
 	menu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
 
-	create_menu_item_with_mnemonic( menu, "Customize...", "BuildMenuCustomize" );
-	create_menu_item_with_mnemonic( menu, "Run recent build", "Build_runRecentExecutedBuild" );
+	create_menu_item_with_mnemonic( menu, "Run Build Task", "BuildTaskBuild" );
+	create_menu_item_with_mnemonic( menu, "Run Launch Task", "BuildTaskLaunch" );
+	create_menu_item_with_mnemonic( menu, "Run Build + Launch Task", "BuildTaskBuildAndLaunch" );
+	create_menu_item_with_mnemonic( menu, "Run recent build (legacy)", "Build_runRecentExecutedBuild" );
+	create_menu_item_with_mnemonic( menu, "Customize Tasks...", "BuildMenuCustomize" );
 
 	menu->addSeparator();
 
@@ -1740,21 +2221,14 @@ void create_grid_menu( QMenuBar *menubar ){
 	Grid_constructMenu( menu );
 }
 
-void create_misc_menu( QMenuBar *menubar ){
-	// Misc menu
-	QMenu *menu = menubar->addMenu( i18n::tr( "M&isc" ) );
+void create_map_menu( QMenuBar *menubar ){
+	QMenu *menu = menubar->addMenu( i18n::tr( "&Map" ) );
 
 	menu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
-#if 0
-	create_menu_item_with_mnemonic( menu, "&Benchmark", makeCallbackF( GlobalCamera_Benchmark ) );
-#endif
-	create_colours_menu( menu );
 
-	create_menu_item_with_mnemonic( menu, "Find brush...", "FindBrush" );
+	create_menu_item_with_mnemonic( menu, "Find Brush...", "FindBrush" );
 	create_menu_item_with_mnemonic( menu, "Map Info...", "MapInfo" );
-	create_menu_item_with_mnemonic( menu, "Set 2D &Background image...", makeCallbackF( WXY_SetBackgroundImage ) );
-	create_menu_item_with_mnemonic( menu, "Fullscreen", "Fullscreen" );
-	create_menu_item_with_mnemonic( menu, "Maximize view", "MaximizeView" );
+	create_menu_item_with_mnemonic( menu, "Set 2D Background Image...", "Set2DBackgroundImage" );
 }
 
 void create_entity_menu( QMenuBar *menubar ){
@@ -1784,6 +2258,13 @@ void create_patch_menu( QMenuBar *menubar ){
 	Patch_constructMenu( menu );
 }
 
+bool game_supports_curve_tools(){
+	if ( string_equal( g_pGameDescription->getKeyValue( "no_patch" ), "1" ) ) {
+		return false;
+	}
+	return !string_equal( g_pGameDescription->getKeyValue( "brushtypes" ), "quake2" );
+}
+
 void create_help_menu( QMenuBar *menubar ){
 	// Help menu
 	QMenu *menu = menubar->addMenu( i18n::tr( "&Help" ) );
@@ -1803,15 +2284,16 @@ void create_help_menu( QMenuBar *menubar ){
 
 void create_main_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 	create_file_menu( menubar );
- 	create_edit_menu( menubar );
+  	create_edit_menu( menubar );
 	create_view_menu( menubar, style );
+	create_window_menu( menubar, style );
 	create_selection_menu( menubar );
+	create_map_menu( menubar );
 	create_bsp_menu( menubar );
 	create_grid_menu( menubar );
-	create_misc_menu( menubar );
 	create_entity_menu( menubar );
 	create_brush_menu( menubar );
-	if ( !string_equal( g_pGameDescription->getKeyValue( "no_patch" ), "1" ) )
+	if ( game_supports_curve_tools() )
 		create_patch_menu( menubar );
 	create_plugins_menu( menubar );
 	create_help_menu( menubar );
@@ -1998,7 +2480,7 @@ void create_main_toolbar( QToolBar *toolbar,  MainFrame::EViewStyle style ){
 	Manipulators_constructToolbar( toolbar );
 	toolbar_append_separator( toolbar );
 
-	if ( !string_equal( g_pGameDescription->getKeyValue( "no_patch" ), "1" ) ) {
+	if ( game_supports_curve_tools() ) {
 		Patch_constructToolbar( toolbar );
 		toolbar_append_separator( toolbar );
 	}
@@ -2021,6 +2503,147 @@ void create_main_toolbar( QToolBar *toolbar,  MainFrame::EViewStyle style ){
 
 	toolbar_append_separator( toolbar );
 	toolbar_append_button( toolbar, "Refresh Models", "refresh_models.png", "RefreshReferences" );
+}
+
+namespace
+{
+struct ConsoleSummaryStatusWidgets
+{
+	QPointer<QWidget> container;
+	QPointer<QToolButton> build;
+	QPointer<QToolButton> notifications;
+	QPointer<QToolButton> warnings;
+	QPointer<QToolButton> errors;
+	QPointer<QTimer> refreshTimer;
+} g_consoleSummaryStatusWidgets;
+
+void ConsoleSummaryStatus_refresh();
+
+void ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory category, const char* title ){
+	const auto lines = Console_getCategoryMessages( category );
+	Console_clearCategory( category );
+	ConsoleSummaryStatus_refresh();
+
+	if( lines.empty() ){
+		return;
+	}
+
+	auto *dialog = new QDialog( MainFrame_getWindow(), Qt::Dialog | Qt::WindowCloseButtonHint );
+	dialog->setAttribute( Qt::WidgetAttribute::WA_DeleteOnClose );
+	dialog->setWindowTitle( i18n::tr( title ) );
+	dialog->resize( 760, 420 );
+
+	auto *vbox = new QVBoxLayout( dialog );
+	{
+		auto *text = new QPlainTextEdit( dialog );
+		text->setReadOnly( true );
+
+		StringOutputStream content( 16384 );
+		for( const auto& line : lines )
+			content << line.c_str() << '\n';
+		text->setPlainText( QString::fromUtf8( content.c_str() ) );
+		vbox->addWidget( text );
+	}
+	{
+		auto *buttons = new QDialogButtonBox( QDialogButtonBox::StandardButton::Close, dialog );
+		QObject::connect( buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close );
+		QObject::connect( buttons, &QDialogButtonBox::accepted, dialog, &QDialog::close );
+		vbox->addWidget( buttons );
+	}
+
+	dialog->show();
+}
+
+void ConsoleSummaryStatus_refresh(){
+	if( g_consoleSummaryStatusWidgets.container.isNull() ){
+		return;
+	}
+
+	const auto updateBuildBadge = [](){
+		QToolButton* button = g_consoleSummaryStatusWidgets.build;
+		if( button == nullptr ){
+			return;
+		}
+
+		const BuildRuntimeState state = BuildMonitor_getRuntimeState();
+		const QString text = QString::fromLatin1( BuildMonitor_getRuntimeText() );
+		switch ( state )
+		{
+		case BuildRuntimeState::Building:
+			button->setText( "Build" );
+			button->setStyleSheet( "QToolButton { border: 1px solid #3f6f8f; border-radius: 9px; padding: 1px 8px; background: #21465e; color: #d9f0ff; font-weight: 600; }" );
+			button->setVisible( true );
+			break;
+		case BuildRuntimeState::Launching:
+			button->setText( "Launch" );
+			button->setStyleSheet( "QToolButton { border: 1px solid #4d6f45; border-radius: 9px; padding: 1px 8px; background: #2c4a28; color: #d8f5cf; font-weight: 600; }" );
+			button->setVisible( true );
+			break;
+		case BuildRuntimeState::Succeeded:
+			button->setText( "Done" );
+			button->setStyleSheet( "QToolButton { border: 1px solid #4d6f45; border-radius: 9px; padding: 1px 8px; background: #2f4f2a; color: #d9f5cf; font-weight: 600; }" );
+			button->setVisible( true );
+			break;
+		case BuildRuntimeState::Failed:
+			button->setText( "Failed" );
+			button->setStyleSheet( "QToolButton { border: 1px solid #8d3942; border-radius: 9px; padding: 1px 8px; background: #4f2327; color: #f7c0c6; font-weight: 600; }" );
+			button->setVisible( true );
+			break;
+		case BuildRuntimeState::Idle:
+		default:
+			button->setVisible( false );
+			break;
+		}
+		button->setToolTip( text );
+	};
+	updateBuildBadge();
+
+	const ConsoleSummary summary = Console_getSummary();
+	const auto updateBadge = []( QToolButton* button, const char* prefix, int count, const std::string& tooltip ){
+		if( button == nullptr ){
+			return;
+		}
+		button->setText( QString( "%1 %2" ).arg( prefix ).arg( count ) );
+		button->setToolTip( QString::fromUtf8( tooltip.c_str() ) );
+		button->setVisible( count > 0 );
+	};
+
+	updateBadge( g_consoleSummaryStatusWidgets.notifications, "\xE2\x84\xB9", summary.notifications, summary.notificationsTooltip ); // ℹ
+	updateBadge( g_consoleSummaryStatusWidgets.warnings, "\xE2\x9A\xA0", summary.warnings, summary.warningsTooltip ); // ⚠
+	updateBadge( g_consoleSummaryStatusWidgets.errors, "\xE2\x9C\x96", summary.errors, summary.errorsTooltip ); // ✖
+
+	const bool anyVisible = ( g_consoleSummaryStatusWidgets.build != nullptr && g_consoleSummaryStatusWidgets.build->isVisible() )
+	                     || summary.notifications > 0 || summary.warnings > 0 || summary.errors > 0;
+	g_consoleSummaryStatusWidgets.container->setVisible( anyVisible );
+}
+
+QToolButton* ConsoleSummaryStatus_createBadge( QWidget* parent, const char* tooltip, const char* stylesheet ){
+	auto *button = new QToolButton( parent );
+	button->setAutoRaise( false );
+	button->setToolButtonStyle( Qt::ToolButtonStyle::ToolButtonTextOnly );
+	button->setMinimumWidth( button->fontMetrics().horizontalAdvance( "⚠ 9999" ) );
+	button->setToolTip( tooltip );
+	button->setStyleSheet( stylesheet );
+	return button;
+}
+
+void ConsoleSummaryStatus_connect( QObject* parent ){
+	if( g_consoleSummaryStatusWidgets.refreshTimer.isNull() ){
+		auto *timer = new QTimer( parent );
+		timer->setInterval( 250 );
+		QObject::connect( timer, &QTimer::timeout, [](){ ConsoleSummaryStatus_refresh(); } );
+		timer->start();
+		g_consoleSummaryStatusWidgets.refreshTimer = timer;
+	}
+	ConsoleSummaryStatus_refresh();
+}
+
+void ConsoleSummaryStatus_disconnect(){
+	if( !g_consoleSummaryStatusWidgets.refreshTimer.isNull() ){
+		g_consoleSummaryStatusWidgets.refreshTimer->stop();
+		g_consoleSummaryStatusWidgets.refreshTimer = nullptr;
+	}
+}
 }
 
 
@@ -2070,6 +2693,52 @@ void create_main_statusbar( QStatusBar *statusbar, QLabel *pStatusLabel[c_status
 			pStatusLabel[i] = label;
 		}
 	}
+
+	{
+		auto *widget = new QWidget;
+		auto *hbox = new QHBoxLayout( widget );
+		hbox->setContentsMargins( 2, 0, 2, 0 );
+		hbox->setSpacing( 4 );
+
+		g_consoleSummaryStatusWidgets.build = ConsoleSummaryStatus_createBadge(
+			widget,
+			"Build status",
+			"QToolButton { border: 1px solid #3f6f8f; border-radius: 9px; padding: 1px 8px; background: #21465e; color: #d9f0ff; font-weight: 600; }"
+		);
+		g_consoleSummaryStatusWidgets.notifications = ConsoleSummaryStatus_createBadge(
+			widget,
+			"Notifications",
+			"QToolButton { border: 1px solid #4b6678; border-radius: 9px; padding: 1px 8px; background: #243746; color: #dcecf8; font-weight: 600; }"
+		);
+		g_consoleSummaryStatusWidgets.warnings = ConsoleSummaryStatus_createBadge(
+			widget,
+			"Warnings",
+			"QToolButton { border: 1px solid #8a6d2f; border-radius: 9px; padding: 1px 8px; background: #4a3b1f; color: #f6df95; font-weight: 600; }"
+		);
+		g_consoleSummaryStatusWidgets.errors = ConsoleSummaryStatus_createBadge(
+			widget,
+			"Errors",
+			"QToolButton { border: 1px solid #8d3942; border-radius: 9px; padding: 1px 8px; background: #4f2327; color: #f7c0c6; font-weight: 600; }"
+		);
+		QObject::connect( g_consoleSummaryStatusWidgets.notifications, &QToolButton::clicked, [](){
+			ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory::Notifications, "Notifications" );
+		} );
+		QObject::connect( g_consoleSummaryStatusWidgets.warnings, &QToolButton::clicked, [](){
+			ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory::Warnings, "Warnings" );
+		} );
+		QObject::connect( g_consoleSummaryStatusWidgets.errors, &QToolButton::clicked, [](){
+			ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory::Errors, "Errors" );
+		} );
+
+		hbox->addWidget( g_consoleSummaryStatusWidgets.build );
+		hbox->addWidget( g_consoleSummaryStatusWidgets.notifications );
+		hbox->addWidget( g_consoleSummaryStatusWidgets.warnings );
+		hbox->addWidget( g_consoleSummaryStatusWidgets.errors );
+
+		g_consoleSummaryStatusWidgets.container = widget;
+		statusbar->addWidget( widget, 0 );
+	}
+	ConsoleSummaryStatus_connect( statusbar );
 }
 
 SignalHandlerId XYWindowDestroyed_connect( const SignalHandler& handler ){
@@ -2341,8 +3010,8 @@ void MainFrame::Create(){
 				m_hSplit->addWidget( m_vSplit2 );
 				m_hSplit->addWidget( m_vSplit );
 			}
-			// console
-			m_vSplit->addWidget( Console_constructWindow() );
+
+			Console_constructWindow();
 
 			// xy + z
 			m_pXYWnd = new XYWnd();
@@ -2353,7 +3022,13 @@ void MainFrame::Create(){
 			m_xySplit->addWidget( m_pXYWnd->GetWidget() );
 			m_xySplit->setStretchFactor( 0, 0 );
 			m_xySplit->setStretchFactor( 1, 1 );
-			m_vSplit->insertWidget( 0, m_xySplit );
+			auto *xyOverlayHost = new QWidget();
+			auto *xyOverlayLayout = new QVBoxLayout( xyOverlayHost );
+			xyOverlayLayout->setContentsMargins( 0, 0, 0, 0 );
+			xyOverlayLayout->setSpacing( 0 );
+			xyOverlayLayout->addWidget( m_xySplit );
+			m_vSplit->insertWidget( 0, xyOverlayHost );
+			Console_setOverlayHost( xyOverlayHost );
 			{
 				// camera
 				m_pCamWnd = NewCamWnd();
@@ -2529,7 +3204,12 @@ void MainFrame::RestoreGuiState(){
 
 	if( !FloatingGroupDialog() && m_hSplit != nullptr && m_vSplit != nullptr && m_vSplit2 != nullptr ){
 		g_guiSettings.addSplitter( m_hSplit, "MainFrame/m_hSplit", { 384, 576 } );
-		g_guiSettings.addSplitter( m_vSplit, "MainFrame/m_vSplit", { 377, 20 } );
+		if( m_vSplit->count() > 1 ){
+			g_guiSettings.addSplitter( m_vSplit, "MainFrame/m_vSplit", { 377, 20 } );
+		}
+		else{
+			g_guiSettings.addSplitter( m_vSplit, "MainFrame/m_vSplit", { 377 } );
+		}
 		if ( m_xySplit != nullptr ) {
 			g_guiSettings.addSplitter( m_xySplit, "MainFrame/m_xySplit", { 64, 500 } );
 		}
@@ -2542,6 +3222,12 @@ void MainFrame::RestoreGuiState(){
 
 void MainFrame::Shutdown(){
 	s_qe_every_second_timer.disable();
+	ConsoleSummaryStatus_disconnect();
+	g_consoleSummaryStatusWidgets.container = nullptr;
+	g_consoleSummaryStatusWidgets.build = nullptr;
+	g_consoleSummaryStatusWidgets.notifications = nullptr;
+	g_consoleSummaryStatusWidgets.warnings = nullptr;
+	g_consoleSummaryStatusWidgets.errors = nullptr;
 
 	EntityList_destroyWindow();
 
@@ -2720,7 +3406,8 @@ void MainFrame_Construct(){
 	GlobalCommands_insert( "CheckForUpdate", makeCallbackF( OpenUpdateURL ) );
 	GlobalCommands_insert( "Exit", makeCallbackF( Exit ) );
 
-	GlobalCommands_insert( "Shortcuts", makeCallbackF( DoCommandListDlg ), QKeySequence( "Ctrl+Shift+P" ) );
+	GlobalCommands_insert( "CommandPalette", makeCallbackF( DoCommandListDlg ), QKeySequence( "Ctrl+Shift+P" ) );
+	GlobalCommands_insert( "Shortcuts", makeCallbackF( DoCommandListDlg ) ); // legacy alias
 	GlobalCommands_insert( "Preferences", makeCallbackF( PreferencesDialog_showDialog ), QKeySequence( "P" ) );
 
 	GlobalCommands_insert( "MacroRecordStart", makeCallbackF( GlobalCommandMacro_startRecording ), QKeySequence( "Ctrl+Shift+F9" ) );
@@ -2746,7 +3433,11 @@ void MainFrame_Construct(){
 	Tools_registerCommands();
 
 	GlobalCommands_insert( "BuildMenuCustomize", makeCallbackF( DoBuildMenu ) );
-	GlobalCommands_insert( "Build_runRecentExecutedBuild", makeCallbackF( Build_runRecentExecutedBuild ), QKeySequence( "F5" ) );
+	GlobalCommands_insert( "BuildTaskBuild", makeCallbackF( Build_runTaskBuild ), QKeySequence( "Ctrl+Shift+B" ) );
+	GlobalCommands_insert( "BuildTaskLaunch", makeCallbackF( Build_runTaskLaunch ), QKeySequence( "F5" ) );
+	GlobalCommands_insert( "BuildTaskBuildAndLaunch", makeCallbackF( Build_runTaskBuildAndLaunch ), QKeySequence( "Ctrl+F5" ) );
+	GlobalCommands_insert( "Build_runRecentExecutedBuild", makeCallbackF( Build_runRecentExecutedBuild ) ); // legacy alias
+	GlobalCommands_insert( "Set2DBackgroundImage", makeCallbackF( WXY_SetBackgroundImage ) );
 
 	GlobalCommands_insert( "OpenGLFont", makeCallbackF( OpenGLFont_select ) );
 
@@ -2795,6 +3486,7 @@ void MainFrame_Construct(){
 
 	Layout_registerPreferencesPage();
 	Paths_registerPreferencesPage();
+	Colors_registerPreferencesPage();
 
 	g_brushCount.setCountChangedCallback( makeCallbackF( QE_brushCountChanged ) );
 	g_patchCount.setCountChangedCallback( makeCallbackF( QE_brushCountChanged ) );

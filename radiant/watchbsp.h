@@ -36,8 +36,27 @@
 void BuildMonitor_Construct();
 void BuildMonitor_Destroy();
 
-void BuildMonitor_Run( std::vector<CopiedString>& commands, const char* mapName );
+enum class BuildLaunchMode
+{
+	UsePreference = 0,
+	ForceOff = 1,
+	ForceOn = 2,
+};
+
+void BuildMonitor_Run( std::vector<CopiedString>& commands, const char* mapName, BuildLaunchMode launchMode = BuildLaunchMode::UsePreference );
+void BuildMonitor_RunEngine( const char* mapName );
 CopiedString Build_getEngineExecutable();
+
+enum class BuildRuntimeState
+{
+	Idle = 0,
+	Building = 1,
+	Launching = 2,
+	Succeeded = 3,
+	Failed = 4,
+};
+BuildRuntimeState BuildMonitor_getRuntimeState();
+const char* BuildMonitor_getRuntimeText();
 
 extern bool g_WatchBSP_Enabled;
 extern bool g_WatchBSP_LeakStop;

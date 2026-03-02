@@ -57,6 +57,18 @@
 #include <QGroupBox>
 #include <QCheckBox>
 #include <QHeaderView>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QSplitter>
+#include <QVBoxLayout>
+#include <QComboBox>
+#include <QRadioButton>
+#include <QAbstractItemModel>
+#include <QItemSelectionModel>
+#include <QStringList>
+#include <vector>
+#include <utility>
 
 
 void Global_constructPreferences( PreferencesPage& page, bool applyImmediately ){
@@ -576,6 +588,128 @@ auto PreferencePages_addPage( QStackedWidget* notebook, const char* name ){
 	return std::pair( notebook->addWidget( frame ), grid );
 }
 
+struct PreferenceSearchEntry
+{
+	int pageIndex;
+	QString pagePath;
+	QString settingLabel;
+	QString haystack;
+};
+
+void PreferenceTree_collectPagePaths( const QStandardItem* item, const QString& prefix, std::map<int, QString>& pagePaths ){
+	for ( int row = 0; row < item->rowCount(); ++row )
+	{
+		const QStandardItem *const child = item->child( row, 0 );
+		if ( child == nullptr ) {
+			continue;
+		}
+
+		const QString name = child->text();
+		const QString path = prefix.isEmpty() ? name : QString( "%1 > %2" ).arg( prefix, name );
+		pagePaths[child->data( Qt::ItemDataRole::UserRole ).toInt()] = path;
+		PreferenceTree_collectPagePaths( child, path, pagePaths );
+	}
+}
+
+void PreferenceSearch_collectTexts( QWidget* page, std::map<QString, QString>& labels ){
+	for ( auto *label : page->findChildren<QLabel*>() )
+	{
+		const QString text = label->text().trimmed();
+		if ( !text.isEmpty() )
+			labels[text.toLower()] = text;
+	}
+	for ( auto *checkbox : page->findChildren<QCheckBox*>() )
+	{
+		const QString text = checkbox->text().trimmed();
+		if ( !text.isEmpty() )
+			labels[text.toLower()] = text;
+	}
+	for ( auto *button : page->findChildren<QPushButton*>() )
+	{
+		const QString text = button->text().trimmed();
+		if ( !text.isEmpty() )
+			labels[text.toLower()] = text;
+	}
+	for ( auto *radioButton : page->findChildren<QRadioButton*>() )
+	{
+		const QString text = radioButton->text().trimmed();
+		if ( !text.isEmpty() )
+			labels[text.toLower()] = text;
+	}
+	for ( auto *combo : page->findChildren<QComboBox*>() )
+	{
+		for ( int i = 0; i < combo->count(); ++i )
+		{
+			const QString text = combo->itemText( i ).trimmed();
+			if ( !text.isEmpty() )
+				labels[text.toLower()] = text;
+		}
+	}
+}
+
+std::vector<PreferenceSearchEntry> PreferenceSearch_buildEntries( QStackedWidget* notebook, const std::map<int, QString>& pagePaths ){
+	std::vector<PreferenceSearchEntry> entries;
+	entries.reserve( notebook->count() * 8 );
+	for ( int pageIndex = 0; pageIndex < notebook->count(); ++pageIndex )
+	{
+		QWidget *const page = notebook->widget( pageIndex );
+		const auto pagePath = pagePaths.find( pageIndex );
+		if ( page == nullptr || pagePath == pagePaths.end() ) {
+			continue;
+		}
+
+		std::map<QString, QString> labels;
+		PreferenceSearch_collectTexts( page, labels );
+		for ( const auto& it : labels )
+		{
+			const QString& label = it.second;
+			PreferenceSearchEntry entry{
+				pageIndex,
+				pagePath->second,
+				label,
+				( pagePath->second + ' ' + label ).toLower()
+			};
+			entries.push_back( std::move( entry ) );
+		}
+	}
+	return entries;
+}
+
+QModelIndex PreferenceTree_findPageIndex( const QAbstractItemModel* model, int pageIndex, const QModelIndex& parent = QModelIndex() ){
+	for ( int row = 0; row < model->rowCount( parent ); ++row )
+	{
+		const QModelIndex index = model->index( row, 0, parent );
+		if ( !index.isValid() ) {
+			continue;
+		}
+		if ( index.data( Qt::ItemDataRole::UserRole ).toInt() == pageIndex )
+			return index;
+
+		const QModelIndex childResult = PreferenceTree_findPageIndex( model, pageIndex, index );
+		if ( childResult.isValid() )
+			return childResult;
+	}
+	return QModelIndex();
+}
+
+QStringList PreferenceSearch_terms( const QString& raw ){
+	QStringList terms;
+	for ( const QString& token : raw.simplified().toLower().split( ' ', Qt::SplitBehaviorFlags::SkipEmptyParts ) )
+	{
+		terms.push_back( token );
+	}
+	return terms;
+}
+
+bool PreferenceSearch_matches( const QString& haystack, const QStringList& terms ){
+	for ( const auto& term : terms )
+	{
+		if ( !haystack.contains( term ) )
+			return false;
+	}
+	return true;
+}
+
 class PreferenceTreeGroup : public PreferenceGroup
 {
 	Dialog& m_dialog;
@@ -604,117 +738,207 @@ void PrefsDlg::BuildDialog(){
 	{
 		auto *grid = new QGridLayout( GetWidget() );
 		grid->setSizeConstraint( QLayout::SizeConstraint::SetMinimumSize );
+		grid->setContentsMargins( 12, 12, 12, 12 );
+		grid->setHorizontalSpacing( 12 );
+		grid->setVerticalSpacing( 10 );
+		{
+			m_searchEdit = new QLineEdit;
+			m_searchEdit->setPlaceholderText( i18n::tr( "Search settings..." ) );
+			m_searchEdit->setClearButtonEnabled( true );
+			grid->addWidget( m_searchEdit, 0, 0 );
+		}
+
+		auto *splitter = new QSplitter( Qt::Orientation::Horizontal );
+		splitter->setChildrenCollapsible( false );
+		grid->addWidget( splitter, 1, 0 );
+
+		auto *sidebar = new QWidget;
+		auto *sidebarLayout = new QVBoxLayout( sidebar );
+		sidebarLayout->setContentsMargins( 0, 0, 0, 0 );
+		sidebarLayout->setSpacing( 8 );
+		splitter->addWidget( sidebar );
+
+		m_treeview = new QTreeView;
+		m_treeview->setHeaderHidden( true );
+		m_treeview->setEditTriggers( QAbstractItemView::EditTrigger::NoEditTriggers );
+		m_treeview->setUniformRowHeights( true );
+		m_treeview->setAlternatingRowColors( true );
+		m_treeview->setHorizontalScrollBarPolicy( Qt::ScrollBarPolicy::ScrollBarAlwaysOff );
+		m_treeview->setSizeAdjustPolicy( QAbstractScrollArea::SizeAdjustPolicy::AdjustToContents );
+		m_treeview->header()->setStretchLastSection( false );
+		m_treeview->header()->setSectionResizeMode( QHeaderView::ResizeMode::ResizeToContents );
+		sidebarLayout->addWidget( m_treeview );
+
+		m_searchResults = new QListWidget;
+		m_searchResults->setVisible( false );
+		m_searchResults->setAlternatingRowColors( true );
+		m_searchResults->setSelectionMode( QAbstractItemView::SelectionMode::SingleSelection );
+		sidebarLayout->addWidget( m_searchResults );
+
+		m_notebook = new QStackedWidget;
+		splitter->addWidget( m_notebook );
+		splitter->setStretchFactor( 0, 0 );
+		splitter->setStretchFactor( 1, 1 );
+		splitter->setSizes( { 260, 760 } );
+
 		{
 			auto *buttons = new QDialogButtonBox( QDialogButtonBox::StandardButton::Ok | QDialogButtonBox::StandardButton::Cancel );
-			grid->addWidget( buttons, 1, 1 );
+			grid->addWidget( buttons, 2, 0 );
 			QObject::connect( buttons, &QDialogButtonBox::accepted, GetWidget(), &QDialog::accept );
 			QObject::connect( buttons, &QDialogButtonBox::rejected, GetWidget(), &QDialog::reject );
 			QObject::connect( buttons->addButton( i18n::tr( "Clean" ), QDialogButtonBox::ButtonRole::ResetRole ), &QPushButton::clicked, [this](){ OnButtonClean( this ); } );
 		}
 
+		// store display name in column #0 and page index in data( Qt::ItemDataRole::UserRole )
+		m_treeModel = new QStandardItemModel( m_treeview );
+		m_treeview->setModel( m_treeModel );
+
 		{
+			/********************************************************************/
+			/* Add preference tree options                                      */
+			/********************************************************************/
 			{
-				// prefs pages notebook
-				m_notebook = new QStackedWidget;
-				grid->addWidget( m_notebook, 0, 1 );
+				const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Global Preferences" );
 				{
-					m_treeview = new QTreeView;
-					m_treeview->setHeaderHidden( true );
-					m_treeview->setEditTriggers( QAbstractItemView::EditTrigger::NoEditTriggers );
-					m_treeview->setUniformRowHeights( true ); // optimization
-					m_treeview->setHorizontalScrollBarPolicy( Qt::ScrollBarPolicy::ScrollBarAlwaysOff );
-					m_treeview->setSizeAdjustPolicy( QAbstractScrollArea::SizeAdjustPolicy::AdjustToContents ); // scroll area will inherit column size
-					m_treeview->setSizePolicy( QSizePolicy::Policy::Fixed, m_treeview->sizePolicy().verticalPolicy() );
-					m_treeview->header()->setStretchLastSection( false ); // non greedy column sizing; + QHeaderView::ResizeMode::ResizeToContents = no text elision 🤷‍♀️
-					m_treeview->header()->setSectionResizeMode( QHeaderView::ResizeMode::ResizeToContents );
-					grid->addWidget( m_treeview, 0, 0, 2, 1 );
+					PreferencesPage preferencesPage( *this, layout );
+					Global_constructPreferences( preferencesPage, false );
+				}
+				QStandardItem *group = PreferenceTree_appendPage( m_treeModel, m_treeModel->invisibleRootItem(), "Global", pageIndex );
+				{
+					const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Game" );
+					PreferencesPage preferencesPage( *this, layout );
+					g_GamesDialog.CreateGlobalFrame( preferencesPage, false );
 
-					// store display name in column #0 and page index in data( Qt::ItemDataRole::UserRole )
-					auto *model = new QStandardItemModel( m_treeview );
-					m_treeview->setModel( model );
-
-					QObject::connect( m_treeview->selectionModel(), &QItemSelectionModel::currentChanged, [this]( const QModelIndex& current ){
-						m_notebook->setCurrentIndex( current.data( Qt::ItemDataRole::UserRole ).toInt() );
-					} );
-
-					{
-						/********************************************************************/
-						/* Add preference tree options                                      */
-						/********************************************************************/
-						{
-							const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Global Preferences" );
-							{
-								PreferencesPage preferencesPage( *this, layout );
-								Global_constructPreferences( preferencesPage, false );
-							}
-							QStandardItem *group = PreferenceTree_appendPage( model, model->invisibleRootItem(), "Global", pageIndex );
-							{
-								const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Game" );
-								PreferencesPage preferencesPage( *this, layout );
-								g_GamesDialog.CreateGlobalFrame( preferencesPage, false );
-
-								PreferenceTree_appendPage( model, group, "Game", pageIndex );
-							}
-						}
-
-						{
-							const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Game Settings" );
-							{
-								PreferencesPage preferencesPage( *this, layout );
-								Game_constructPreferences( preferencesPage );
-								PreferencesPageCallbacks_constructPage( g_gamePreferences, preferencesPage );
-							}
-
-							QStandardItem *group = PreferenceTree_appendPage( model, model->invisibleRootItem(), "Game", pageIndex );
-							PreferenceTreeGroup preferenceGroup( *this, m_notebook, model, group );
-
-							PreferenceGroupCallbacks_constructGroup( g_gameCallbacks, preferenceGroup );
-						}
-
-						{
-							const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Interface Preferences" );
-							{
-								PreferencesPage preferencesPage( *this, layout );
-								PreferencesPageCallbacks_constructPage( g_interfacePreferences, preferencesPage );
-							}
-
-							QStandardItem *group = PreferenceTree_appendPage( model, model->invisibleRootItem(), "Interface", pageIndex );
-							PreferenceTreeGroup preferenceGroup( *this, m_notebook, model, group );
-
-							PreferenceGroupCallbacks_constructGroup( g_interfaceCallbacks, preferenceGroup );
-						}
-
-						{
-							const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Display Preferences" );
-							{
-								PreferencesPage preferencesPage( *this, layout );
-								PreferencesPageCallbacks_constructPage( g_displayPreferences, preferencesPage );
-							}
-							QStandardItem *group = PreferenceTree_appendPage( model, model->invisibleRootItem(), "Display", pageIndex );
-							PreferenceTreeGroup preferenceGroup( *this, m_notebook, model, group );
-
-							PreferenceGroupCallbacks_constructGroup( g_displayCallbacks, preferenceGroup );
-						}
-
-						{
-							const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "General Settings" );
-							{
-								PreferencesPage preferencesPage( *this, layout );
-								PreferencesPageCallbacks_constructPage( g_settingsPreferences, preferencesPage );
-							}
-
-							QStandardItem *group = PreferenceTree_appendPage( model, model->invisibleRootItem(), "Settings", pageIndex );
-							PreferenceTreeGroup preferenceGroup( *this, m_notebook, model, group );
-
-							PreferenceGroupCallbacks_constructGroup( g_settingsCallbacks, preferenceGroup );
-						}
-					}
-					// convenience calls
-					m_treeview->expandAll();
-					m_treeview->setCurrentIndex( m_treeview->model()->index( 0, 0 ) );
+					PreferenceTree_appendPage( m_treeModel, group, "Game", pageIndex );
 				}
 			}
+
+			{
+				const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Game Settings" );
+				{
+					PreferencesPage preferencesPage( *this, layout );
+					Game_constructPreferences( preferencesPage );
+					PreferencesPageCallbacks_constructPage( g_gamePreferences, preferencesPage );
+				}
+
+				QStandardItem *group = PreferenceTree_appendPage( m_treeModel, m_treeModel->invisibleRootItem(), "Game", pageIndex );
+				PreferenceTreeGroup preferenceGroup( *this, m_notebook, m_treeModel, group );
+
+				PreferenceGroupCallbacks_constructGroup( g_gameCallbacks, preferenceGroup );
+			}
+
+			{
+				const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Interface Preferences" );
+				{
+					PreferencesPage preferencesPage( *this, layout );
+					PreferencesPageCallbacks_constructPage( g_interfacePreferences, preferencesPage );
+				}
+
+				QStandardItem *group = PreferenceTree_appendPage( m_treeModel, m_treeModel->invisibleRootItem(), "Interface", pageIndex );
+				PreferenceTreeGroup preferenceGroup( *this, m_notebook, m_treeModel, group );
+
+				PreferenceGroupCallbacks_constructGroup( g_interfaceCallbacks, preferenceGroup );
+			}
+
+			{
+				const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "Display Preferences" );
+				{
+					PreferencesPage preferencesPage( *this, layout );
+					PreferencesPageCallbacks_constructPage( g_displayPreferences, preferencesPage );
+				}
+				QStandardItem *group = PreferenceTree_appendPage( m_treeModel, m_treeModel->invisibleRootItem(), "Display", pageIndex );
+				PreferenceTreeGroup preferenceGroup( *this, m_notebook, m_treeModel, group );
+
+				PreferenceGroupCallbacks_constructGroup( g_displayCallbacks, preferenceGroup );
+			}
+
+			{
+				const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "General Settings" );
+				{
+					PreferencesPage preferencesPage( *this, layout );
+					PreferencesPageCallbacks_constructPage( g_settingsPreferences, preferencesPage );
+				}
+
+				QStandardItem *group = PreferenceTree_appendPage( m_treeModel, m_treeModel->invisibleRootItem(), "Settings", pageIndex );
+				PreferenceTreeGroup preferenceGroup( *this, m_notebook, m_treeModel, group );
+
+				PreferenceGroupCallbacks_constructGroup( g_settingsCallbacks, preferenceGroup );
+			}
 		}
+
+		QObject::connect( m_treeview->selectionModel(), &QItemSelectionModel::currentChanged, [this]( const QModelIndex& current ){
+			if ( !current.isValid() ) {
+				return;
+			}
+			m_notebook->setCurrentIndex( current.data( Qt::ItemDataRole::UserRole ).toInt() );
+		} );
+
+		m_treeview->expandAll();
+		m_treeview->setCurrentIndex( m_treeview->model()->index( 0, 0 ) );
+
+		std::map<int, QString> pagePaths;
+		PreferenceTree_collectPagePaths( m_treeModel->invisibleRootItem(), QString(), pagePaths );
+		auto searchEntries = PreferenceSearch_buildEntries( m_notebook, pagePaths );
+
+		auto updateSearchResults = [this, searchEntries = std::move( searchEntries )]( const QString& text ){
+			const QString trimmed = text.trimmed();
+			if ( trimmed.isEmpty() ) {
+				m_searchResults->clear();
+				m_searchResults->setVisible( false );
+				m_treeview->setVisible( true );
+				return;
+			}
+
+			const auto terms = PreferenceSearch_terms( trimmed );
+			m_searchResults->clear();
+			m_treeview->setVisible( false );
+			m_searchResults->setVisible( true );
+
+			int matches = 0;
+			for ( const auto& entry : searchEntries )
+			{
+				if ( !PreferenceSearch_matches( entry.haystack, terms ) ) {
+					continue;
+				}
+				auto *item = new QListWidgetItem( QString( "%1: %2" ).arg( entry.pagePath, entry.settingLabel ) );
+				item->setData( Qt::ItemDataRole::UserRole, entry.pageIndex );
+				m_searchResults->addItem( item );
+				++matches;
+			}
+
+			if ( matches == 0 ) {
+				auto *empty = new QListWidgetItem( i18n::tr( "No matching settings" ) );
+				empty->setFlags( empty->flags() & ~Qt::ItemFlag::ItemIsSelectable );
+				m_searchResults->addItem( empty );
+			}
+		};
+
+		auto activateResult = [this]( QListWidgetItem* item ){
+			if ( item == nullptr ) {
+				return;
+			}
+			const QVariant data = item->data( Qt::ItemDataRole::UserRole );
+			if ( !data.isValid() ) {
+				return;
+			}
+
+			const int pageIndex = data.toInt();
+			m_notebook->setCurrentIndex( pageIndex );
+			const QModelIndex index = PreferenceTree_findPageIndex( m_treeModel, pageIndex );
+			if ( index.isValid() ) {
+				m_treeview->selectionModel()->setCurrentIndex( index, QItemSelectionModel::SelectionFlag::ClearAndSelect );
+				m_treeview->scrollTo( index, QAbstractItemView::ScrollHint::PositionAtCenter );
+			}
+		};
+
+		QObject::connect( m_searchEdit, &QLineEdit::textChanged, updateSearchResults );
+		QObject::connect( m_searchResults, &QListWidget::itemActivated, activateResult );
+		QObject::connect( m_searchEdit, &QLineEdit::returnPressed, [this, activateResult](){
+			if ( m_searchResults->isVisible() && m_searchResults->count() > 0 ) {
+				if ( QListWidgetItem* item = m_searchResults->item( 0 ) )
+					activateResult( item );
+			}
+		} );
 	}
 
 	GetWidget()->setMinimumSize( 720, 540 );
@@ -805,7 +1029,7 @@ void PreferencesDialog_restartRequired( const char* staticName ){
 
 void PreferencesDialog_showDialog(){
 	//if ( ConfirmModified( "Edit Preferences" ) && g_Preferences.DoModal() == eIDOK ) {
-	g_Preferences.m_treeview->setFocus(); // focus tree to have it immediately available for text search
+	g_Preferences.m_searchEdit->setFocus();
 	if ( g_Preferences.DoModal() == QDialog::DialogCode::Accepted ) {
 		if ( !g_restart_required.empty() ) {
 			auto message = StringStream( "Preference changes require a restart:\n\n" );

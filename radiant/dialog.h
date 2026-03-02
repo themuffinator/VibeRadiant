@@ -102,6 +102,7 @@ class QButtonGroup;
 class QLineEdit;
 class QSpinBox;
 class QDoubleSpinBox;
+class QPushButton;
 
 class Dialog
 {
@@ -152,6 +153,7 @@ public:
 	QWidget* addSpinner   ( QGridLayout *grid, const char* name, int lower, int upper, const IntImportCallback& importCallback, const IntExportCallback& exportCallback );
 	QWidget* addSpinner   ( QGridLayout *grid, const char* name, double lower, double upper, const FloatImportCallback& importCallback, const FloatExportCallback& exportCallback, int decimals );
 	QWidget* addSpinner   ( QGridLayout* grid, const char* name, float& data, double lower, double upper, int decimals );
+	QPushButton* addButton( QGridLayout* grid, const char* name, const char* buttonLabel );
 
 protected:
 

@@ -22,6 +22,9 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
+#include <vector>
+#include "signal/signalfwd.h"
 
 #define SYS_VRB 0 ///< verbose support (on/off)
 #define SYS_STD 1 ///< standard print level - this is the default
@@ -36,6 +39,33 @@ TextOutputStream& getSysPrintWarningStream();
 TextOutputStream& getSysPrintErrorStream();
 
 class QWidget* Console_constructWindow();
+
+struct ConsoleSummary
+{
+	int notifications = 0;
+	int warnings = 0;
+	int errors = 0;
+	std::string notificationsTooltip;
+	std::string warningsTooltip;
+	std::string errorsTooltip;
+};
+
+enum class ConsoleSummaryCategory
+{
+	Notifications = 0,
+	Warnings,
+	Errors,
+};
+
+bool Console_isCollapsed();
+void Console_setCollapsed( bool collapsed );
+void Console_setOverlayHost( class QWidget* host );
+ConsoleSummary Console_getSummary();
+std::vector<std::string> Console_getCategoryMessages( ConsoleSummaryCategory category );
+void Console_clearCategory( ConsoleSummaryCategory category );
+
+SignalHandlerId Console_summaryChanged_connect( const SignalHandler& handler );
+void Console_summaryChanged_disconnect( SignalHandlerId id );
 
 // will open/close the log file based on the parameter
 void Sys_LogFile( bool enable );

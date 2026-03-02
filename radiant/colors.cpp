@@ -42,9 +42,11 @@
 #include "string/string.h"
 #include "stream/stringstream.h"
 #include "stream/textfilestream.h"
-#include "theme.h"
 #include <QColor>
+#include <QPushButton>
 #include <utility>
+#include <algorithm>
+#include <string>
 
 #define RAPIDJSON_PARSE_DEFAULT_FLAGS ( kParseCommentsFlag | kParseTrailingCommasFlag | kParseNanAndInfFlag )
 #include "rapidjson/document.h"
@@ -68,6 +70,7 @@ class ChooseColour
 	GetColourCallback m_get;
 	SetColourCallback m_set;
 	QAction *m_action = nullptr;
+	QPushButton *m_button = nullptr;
 	const char *m_menuName;
 public:
 	const char *m_saveName;
@@ -79,6 +82,14 @@ public:
 	{}
 	void create_menu_item( QMenu *menu ){
 		m_action = create_menu_item_with_mnemonic( menu, m_menuName, ConstMemberCaller<ChooseColour, void(), &ChooseColour::operator()>( *this ) );
+		QObject::connect( m_action, &QObject::destroyed, [this](){ m_action = nullptr; } );
+		updateIcon();
+	}
+	void create_preferences_item( PreferencesPage& page ){
+		const CopiedString label = preferenceLabel();
+		m_button = page.appendButton( label.c_str(), "Choose..." );
+		QObject::connect( m_button, &QPushButton::clicked, [this](){ ( *this )(); } );
+		QObject::connect( m_button, &QObject::destroyed, [this](){ m_button = nullptr; } );
 		updateIcon();
 	}
 	void operator()() const {
@@ -98,13 +109,30 @@ public:
 		updateIcon( colour );
 	}
 private:
-	void updateIcon( const Vector3& colour ) const {
-		if( m_action == nullptr ){
-			return;
+	CopiedString preferenceLabel() const {
+		std::string label( m_menuName );
+		label.erase( std::remove( label.begin(), label.end(), '_' ), label.end() );
+		if( label.size() >= 3 && label.compare( label.size() - 3, 3, "..." ) == 0 ){
+			label.resize( label.size() - 3 );
 		}
+		return CopiedString( label.c_str() );
+	}
+	static QIcon colorIcon( const Vector3& colour ){
 		QPixmap pixmap( QSize( 64, 64 ) ); // using larger pixmap, it gets downscaled
 		pixmap.fill( QColor::fromRgbF( colour[0], colour[1], colour[2] ) );
-		m_action->setIcon( QIcon( pixmap ) );
+		return QIcon( pixmap );
+	}
+	void updateIcon( const Vector3& colour ) const {
+		if( m_action != nullptr ){
+			m_action->setIcon( colorIcon( colour ) );
+		}
+		if( m_button != nullptr ){
+			const QColor qColor = QColor::fromRgbF( colour[0], colour[1], colour[2] );
+			m_button->setIcon( colorIcon( colour ) );
+			m_button->setToolTip( QString::fromUtf8(
+				StringStream( "Current color ", qColor.name( QColor::NameFormat::HexRgb ).toLatin1().constData() ).c_str()
+			) );
+		}
 	}
 	void updateIcon() const {
 		updateIcon( m_get() );
@@ -271,15 +299,28 @@ bool Colors_applyAccentOverride( const QColor& accent ){
 	return applied;
 }
 
+void Colors_constructPreferences( PreferencesPage& page ){
+	auto *fontButton = page.appendButton( "OpenGL Font", "Choose..." );
+	QObject::connect( fontButton, &QPushButton::clicked, [](){ OpenGLFont_select(); } );
+
+	for( auto& color : g_ColoursMenu ){
+		color.create_preferences_item( page );
+	}
+}
+
+void Colors_constructPage( PreferenceGroup& group ){
+	PreferencesPage page( group.createPage( "Viewport Colors", "Viewport Colors" ) );
+	Colors_constructPreferences( page );
+}
+
+void Colors_registerPreferencesPage(){
+	PreferencesDialog_addDisplayPage( makeCallbackF( Colors_constructPage ) );
+}
+
 void create_colours_menu( QMenu *menu ){
-	menu = menu->addMenu( i18n::tr( "Theming" ) );
+	menu = menu->addMenu( i18n::tr( "Viewport Colors" ) );
 
 	menu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
-
-	theme_construct_menu( menu );
-	menu->addAction( i18n::tr( "Reapply Active Theme" ), [](){
-		theme_reapply_active();
-	} );
 
 	create_menu_item_with_mnemonic( menu, "OpenGL Font...", "OpenGLFont" );
 

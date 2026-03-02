@@ -51,6 +51,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPushButton>
 #include <QString>
 
 
@@ -527,4 +528,10 @@ QWidget* Dialog::addSpinner( QGridLayout* grid, const char* name, double lower, 
 
 QWidget* Dialog::addSpinner( QGridLayout* grid, const char* name, float& data, double lower, double upper, int decimals ){
 	return addSpinner( grid, name, lower, upper, FloatImportCallback( FloatImportCaller( data ) ), FloatExportCallback( FloatExportCaller( data ) ), decimals );
+}
+
+QPushButton* Dialog::addButton( QGridLayout* grid, const char* name, const char* buttonLabel ){
+	auto *button = new QPushButton( i18n::tr( buttonLabel ) );
+	DialogGrid_packRow( grid, button, name );
+	return button;
 }

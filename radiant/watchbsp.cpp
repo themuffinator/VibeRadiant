@@ -36,6 +36,11 @@
 #include "watchbsp.h"
 
 #include <QTimer>
+#include <QComboBox>
+#include <QLineEdit>
+#include <QPushButton>
+#include <vector>
+#include <string>
 
 #include "commandlib.h"
 #include "string/string.h"
@@ -126,6 +131,7 @@ bool g_WatchBSP_Enabled = true;
 bool g_WatchBSP_LeakStop = true;
 bool g_WatchBSP_RunQuake = false;
 bool g_WatchBSP0_DumpLog = false;
+static BuildLaunchMode g_buildLaunchMode = BuildLaunchMode::UsePreference;
 // timeout when beginning a step (in seconds)
 // if we don't get a connection quick enough we assume something failed and go back to idling
 const int g_WatchBSP_Timeout = 5;
@@ -213,11 +219,142 @@ static DefaultableString g_engineExecutableMP( []()->CopiedString{ return g_pGam
 
 static DefaultableString g_engineArgs( constructEngineArgs<false> );
 static DefaultableString g_engineArgsMP( constructEngineArgs<true> );
+static CopiedString g_enginePreset( "Custom" );
+static BuildRuntimeState g_buildRuntimeState = BuildRuntimeState::Idle;
+static CopiedString g_buildRuntimeText( "Idle" );
+
+void BuildRuntime_setState( BuildRuntimeState state, const char* text ){
+	g_buildRuntimeState = state;
+	g_buildRuntimeText = text;
+}
+
+struct EnginePreset
+{
+	const char* name;
+	const char* executable;
+	const char* executableMP;
+	const char* extraArgs;
+	const char* extraArgsMP;
+};
+
+std::vector<EnginePreset> Build_enginePresets(){
+	std::vector<EnginePreset> presets{
+		{ "Custom", "", "", "", "" },
+		{ "Game Default", g_pGameDescription->getRequiredKeyValue( ENGINE_ATTRIBUTE ), g_pGameDescription->getKeyValue( MP_ENGINE_ATTRIBUTE ), "", "" },
+	};
+
+#if defined( WIN32 )
+	constexpr const char* q2_yamagi = "yamagi-quake2.exe";
+	constexpr const char* q2_vk = "vkquake2.exe";
+	constexpr const char* q2_rtx = "q2rtx.exe";
+	constexpr const char* q2_km = "kmquake2.exe";
+	constexpr const char* q3_ioq3 = "ioquake3.exe";
+	constexpr const char* q3_q3e = "quake3e.exe";
+	constexpr const char* q3_oa = "openarena.exe";
+	constexpr const char* q1_ironwail = "ironwail.exe";
+	constexpr const char* q1_vk = "vkquake.exe";
+	constexpr const char* q1_quakespasm = "quakespasm.exe";
+	constexpr const char* d3_dhewm = "dhewm3.exe";
+	constexpr const char* d3_rbdoom = "RBDoom3BFG.exe";
+#else
+	constexpr const char* q2_yamagi = "yamagi-quake2";
+	constexpr const char* q2_vk = "vkquake2";
+	constexpr const char* q2_rtx = "q2rtx";
+	constexpr const char* q2_km = "kmquake2";
+	constexpr const char* q3_ioq3 = "ioquake3";
+	constexpr const char* q3_q3e = "quake3e";
+	constexpr const char* q3_oa = "openarena";
+	constexpr const char* q1_ironwail = "ironwail";
+	constexpr const char* q1_vk = "vkquake";
+	constexpr const char* q1_quakespasm = "quakespasm";
+	constexpr const char* d3_dhewm = "dhewm3";
+	constexpr const char* d3_rbdoom = "rbdoom3bfg";
+#endif
+
+	const bool isIdTech2 = string_equal( g_pGameDescription->getRequiredKeyValue( "brushtypes" ), "quake2" );
+	const bool isIdTech3 = string_equal( g_pGameDescription->getRequiredKeyValue( "brushtypes" ), "quake3" );
+	const bool isQuake1 = string_equal( g_pGameDescription->getRequiredKeyValue( "brushtypes" ), "quake" );
+	const bool isDoom3Like = string_equal( g_pGameDescription->getRequiredKeyValue( "brushtypes" ), "doom3" )
+	                      || string_equal( g_pGameDescription->getRequiredKeyValue( "brushtypes" ), "quake4" );
+
+	if ( isIdTech2 ) {
+		presets.push_back( { "Yamagi Quake II", q2_yamagi, q2_yamagi, "", "" } );
+		presets.push_back( { "vkQuake2", q2_vk, q2_vk, "+set vid_renderer vk", "+set vid_renderer vk" } );
+		presets.push_back( { "Q2RTX", q2_rtx, q2_rtx, "", "" } );
+		presets.push_back( { "KMQuake2", q2_km, q2_km, "", "" } );
+	}
+	else if ( isIdTech3 ) {
+		presets.push_back( { "ioquake3", q3_ioq3, q3_ioq3, "", "" } );
+		presets.push_back( { "quake3e", q3_q3e, q3_q3e, "", "" } );
+		presets.push_back( { "OpenArena", q3_oa, q3_oa, "", "" } );
+	}
+	else if ( isQuake1 ) {
+		presets.push_back( { "Ironwail", q1_ironwail, q1_ironwail, "", "" } );
+		presets.push_back( { "vkQuake", q1_vk, q1_vk, "", "" } );
+		presets.push_back( { "Quakespasm", q1_quakespasm, q1_quakespasm, "", "" } );
+	}
+	else if ( isDoom3Like ) {
+		presets.push_back( { "dhewm3", d3_dhewm, d3_dhewm, "", "" } );
+		presets.push_back( { "RBDOOM-3-BFG", d3_rbdoom, d3_rbdoom, "", "" } );
+	}
+	return presets;
+}
+
+void Build_applyEnginePreset( const EnginePreset& preset ){
+	if ( string_equal( preset.name, "Custom" ) ) {
+		return;
+	}
+
+	const auto baseSP = constructEngineArgs<false>();
+	const auto baseMP = constructEngineArgs<true>();
+
+	g_engineExecutable.Import( preset.executable );
+	if ( !string_empty( preset.executableMP ) ) {
+		g_engineExecutableMP.Import( preset.executableMP );
+	}
+
+	g_engineArgs.Import( string_empty( preset.extraArgs ) ? baseSP.c_str() : StringStream( baseSP, ' ', preset.extraArgs ) );
+	if ( !string_empty( preset.executableMP ) || !string_empty( preset.extraArgsMP ) ) {
+		g_engineArgsMP.Import( string_empty( preset.extraArgsMP ) ? baseMP.c_str() : StringStream( baseMP, ' ', preset.extraArgsMP ) );
+	}
+}
 
 extern CopiedString g_regionBoxShader;
+static StringOutputStream runEngineCmd( const char *bspName );
+static void runEngine( char *cmd );
+static void Build_enginePresetImport( int idx ){
+	const auto presets = Build_enginePresets();
+	if ( idx >= 0 && idx < static_cast<int>( presets.size() ) ) {
+		g_enginePreset = presets[idx].name;
+	}
+}
+static void Build_enginePresetExport( const IntImportCallback& importer ){
+	const auto presets = Build_enginePresets();
+	for ( std::size_t i = 0; i < presets.size(); ++i )
+	{
+		if ( string_equal( g_enginePreset.c_str(), presets[i].name ) ) {
+			importer( static_cast<int>( i ) );
+			return;
+		}
+	}
+	importer( 0 );
+}
 
 
 void Build_constructPreferences( PreferencesPage& page ){
+	const auto presets = Build_enginePresets();
+	std::vector<const char*> presetNames;
+	presetNames.reserve( presets.size() );
+	for ( const auto& preset : presets )
+		presetNames.push_back( preset.name );
+
+	QComboBox* presetCombo = page.appendCombo(
+		"Source Port Preset",
+		StringArrayRange( presetNames ),
+		IntImportCallback( FreeCaller<void( int ), Build_enginePresetImport>() ),
+		IntExportCallback( FreeCaller<void( const IntImportCallback& ), Build_enginePresetExport>() )
+	);
+
 	QCheckBox* monitorbsp = page.appendCheckBox( "", "Enable Build Process Monitoring", g_WatchBSP_Enabled );
 	QCheckBox* leakstop = page.appendCheckBox( "", "Stop Compilation on Leak", g_WatchBSP_LeakStop );
 	QCheckBox* runengine = page.appendCheckBox( "", "Run Engine After Compile", g_WatchBSP_RunQuake );
@@ -228,12 +365,42 @@ void Build_constructPreferences( PreferencesPage& page ){
 	Widget_connectToggleDependency( engine, runengine );
 	QWidget* engineargs = page.appendEntry( "Engine Arguments", g_engineArgs.getImportCaller(), g_engineArgs.getExportWithDefaultCaller() );
 	Widget_connectToggleDependency( engineargs, runengine );
+	QWidget* mpengine = nullptr;
+	QWidget* mpengineargs = nullptr;
 	if( !string_empty( g_pGameDescription->getKeyValue( "show_gamemode" ) ) ){
-		QWidget* mpengine = page.appendEntry( "MP Engine to Run", g_engineExecutableMP.getImportCaller(), g_engineExecutableMP.getExportWithDefaultCaller() );
+		mpengine = page.appendEntry( "MP Engine to Run", g_engineExecutableMP.getImportCaller(), g_engineExecutableMP.getExportWithDefaultCaller() );
 		Widget_connectToggleDependency( mpengine, runengine );
-		QWidget* mpengineargs = page.appendEntry( "MP Engine Arguments", g_engineArgsMP.getImportCaller(), g_engineArgsMP.getExportWithDefaultCaller() );
+		mpengineargs = page.appendEntry( "MP Engine Arguments", g_engineArgsMP.getImportCaller(), g_engineArgsMP.getExportWithDefaultCaller() );
 		Widget_connectToggleDependency( mpengineargs, runengine );
 	}
+	QPushButton* applyPreset = page.appendButton( "Preset Actions", "Apply Selected Preset" );
+	QObject::connect( applyPreset, &QPushButton::clicked, [presetCombo, presets, engine, engineargs, mpengine, mpengineargs](){
+		const int idx = presetCombo->currentIndex();
+		if ( idx < 0 || idx >= static_cast<int>( presets.size() ) ) {
+			return;
+		}
+		Build_applyEnginePreset( presets[idx] );
+		if ( auto *line = qobject_cast<QLineEdit*>( engine ) )
+			line->setText( g_engineExecutable.string().c_str() );
+		if ( auto *line = qobject_cast<QLineEdit*>( engineargs ) )
+			line->setText( g_engineArgs.string().c_str() );
+		if ( auto *line = qobject_cast<QLineEdit*>( mpengine ) )
+			line->setText( g_engineExecutableMP.string().c_str() );
+		if ( auto *line = qobject_cast<QLineEdit*>( mpengineargs ) )
+			line->setText( g_engineArgsMP.string().c_str() );
+	} );
+	const auto setCustomPreset = [presetCombo](){
+		g_enginePreset = "Custom";
+		presetCombo->setCurrentIndex( 0 );
+	};
+	if ( auto *line = qobject_cast<QLineEdit*>( engine ) )
+		QObject::connect( line, &QLineEdit::textEdited, [setCustomPreset]( const QString& ){ setCustomPreset(); } );
+	if ( auto *line = qobject_cast<QLineEdit*>( engineargs ) )
+		QObject::connect( line, &QLineEdit::textEdited, [setCustomPreset]( const QString& ){ setCustomPreset(); } );
+	if ( auto *line = qobject_cast<QLineEdit*>( mpengine ) )
+		QObject::connect( line, &QLineEdit::textEdited, [setCustomPreset]( const QString& ){ setCustomPreset(); } );
+	if ( auto *line = qobject_cast<QLineEdit*>( mpengineargs ) )
+		QObject::connect( line, &QLineEdit::textEdited, [setCustomPreset]( const QString& ){ setCustomPreset(); } );
 
 	page.appendCheckBox( "", "Dump non Monitored Builds Log", g_WatchBSP0_DumpLog );
 
@@ -252,6 +419,7 @@ void Build_registerPreferencesPage(){
 
 void BuildMonitor_Construct(){
 	g_pWatchBSP = new CWatchBSP();
+	BuildRuntime_setState( BuildRuntimeState::Idle, "Idle" );
 
 	g_WatchBSP_Enabled = !string_equal( g_pGameDescription->getKeyValue( "no_bsp_monitor" ), "1" );
 
@@ -262,6 +430,7 @@ void BuildMonitor_Construct(){
 	GlobalPreferenceSystem().registerPreference( "BuildEngineExecutableMP", g_engineExecutableMP.getImportCaller(), g_engineExecutableMP.getExportCaller() );
 	GlobalPreferenceSystem().registerPreference( "BuildEngineArgs", g_engineArgs.getImportCaller(), g_engineArgs.getExportCaller() );
 	GlobalPreferenceSystem().registerPreference( "BuildEngineArgsMP", g_engineArgsMP.getImportCaller(), g_engineArgsMP.getExportCaller() );
+	GlobalPreferenceSystem().registerPreference( "BuildEnginePreset", CopiedStringImportStringCaller( g_enginePreset ), CopiedStringExportStringCaller( g_enginePreset ) );
 	GlobalPreferenceSystem().registerPreference( "BuildDumpLog", BoolImportStringCaller( g_WatchBSP0_DumpLog ), BoolExportStringCaller( g_WatchBSP0_DumpLog ) );
 	GlobalPreferenceSystem().registerPreference( "RegionBoxShader", CopiedStringImportStringCaller( g_regionBoxShader ), CopiedStringExportStringCaller( g_regionBoxShader ) );
 	Build_registerPreferencesPage();
@@ -269,18 +438,34 @@ void BuildMonitor_Construct(){
 
 void BuildMonitor_Destroy(){
 	delete std::exchange( g_pWatchBSP, nullptr );
+	BuildRuntime_setState( BuildRuntimeState::Idle, "Idle" );
 }
 
 CWatchBSP *GetWatchBSP(){
 	return g_pWatchBSP;
 }
 
-void BuildMonitor_Run( std::vector<CopiedString>& commands, const char* mapName ){
+void BuildMonitor_Run( std::vector<CopiedString>& commands, const char* mapName, BuildLaunchMode launchMode ){
+	g_buildLaunchMode = launchMode;
+	BuildRuntime_setState( BuildRuntimeState::Building, "Build task running" );
 	GetWatchBSP()->DoMonitoringLoop( commands, mapName );
+}
+
+void BuildMonitor_RunEngine( const char* mapName ){
+	BuildRuntime_setState( BuildRuntimeState::Launching, "Launching engine" );
+	runEngine( runEngineCmd( mapName ).c_str() );
 }
 
 CopiedString Build_getEngineExecutable(){
 	return g_engineExecutable.string();
+}
+
+BuildRuntimeState BuildMonitor_getRuntimeState(){
+	return g_buildRuntimeState;
+}
+
+const char* BuildMonitor_getRuntimeText(){
+	return g_buildRuntimeText.c_str();
 }
 
 
@@ -311,14 +496,18 @@ static void runEngine( char *cmd ){
 	if ( !Q_Exec( nullptr, cmd, EnginePath_get(), false, false ) ) {
 		const auto msg = StringStream( "Failed to execute the following command: ", cmd, '\n' );
 		globalOutputStream() << msg;
+		BuildRuntime_setState( BuildRuntimeState::Failed, "Launch failed" );
 		qt_MessageBox( MainFrame_getWindow(), msg, "Build monitoring", EMessageBoxType::Error );
+		return;
 	}
+	BuildRuntime_setState( BuildRuntimeState::Succeeded, "Engine launched" );
 }
 
 // Static functions for the SAX callbacks -------------------------------------------------------
 
 // utility for saxStartElement below
 static void abortStream( message_info_t *data ){
+	BuildRuntime_setState( BuildRuntimeState::Failed, "Build stream parse failed" );
 	GetWatchBSP()->EndMonitoringLoop();
 	// tell there has been an error
 #if 0
@@ -592,15 +781,28 @@ bool CWatchBSP::SetupListening(){
 
 void CWatchBSP::DoEBeginStep(){
 	Reset();
+	const bool runEngineAfterBuild =
+		g_buildLaunchMode == BuildLaunchMode::ForceOn
+		|| ( g_buildLaunchMode == BuildLaunchMode::UsePreference && g_WatchBSP_RunQuake );
 
 	if( m_iCurrentStep == m_commands.size() ){ // finita
-		if( g_WatchBSP_RunQuake )
+		if( runEngineAfterBuild ) {
+			BuildRuntime_setState( BuildRuntimeState::Launching, "Build complete, launching engine" );
 			runEngine( runEngineCmd( m_sBSPName.c_str() ).c_str() );
+		}
+		else{
+			BuildRuntime_setState( BuildRuntimeState::Succeeded, "Build completed" );
+		}
 		return;
 	} // monitoring off or unmonitored command
 	else if( !g_WatchBSP_Enabled || strstr( m_commands[ m_iCurrentStep ].c_str(), RADIANT_MONITOR_ADDRESS ) == nullptr ){
-		if( g_WatchBSP_RunQuake )
+		if( runEngineAfterBuild ) {
+			BuildRuntime_setState( BuildRuntimeState::Building, "Build running (batch), engine will launch" );
 			m_commands.emplace_back( runEngineCmd( m_sBSPName.c_str() ) );
+		}
+		else{
+			BuildRuntime_setState( BuildRuntimeState::Building, "Build running (batch)" );
+		}
 		m_commands.erase( m_commands.cbegin(), m_commands.cbegin() + m_iCurrentStep );
 		RunBatch( m_commands );
 		return;
@@ -609,11 +811,13 @@ void CWatchBSP::DoEBeginStep(){
 	if ( !SetupListening() ) {
 		const char* msg = "Failed to get a listening socket on port 39000.\nTry running with Build monitoring disabled if you can't fix this.\n";
 		globalOutputStream() << msg;
+		BuildRuntime_setState( BuildRuntimeState::Failed, "Build monitor setup failed" );
 		qt_MessageBox( MainFrame_getWindow(), msg, "Build monitoring", EMessageBoxType::Error );
 		return;
 	}
 	// set the timer for timeouts and step cancellation
 	m_timeout_timer.start();
+	BuildRuntime_setState( BuildRuntimeState::Building, "Build running" );
 
 	if ( !m_bBSPPlugin ) {
 		globalOutputStream() << "=== running build command ===\n"
@@ -623,6 +827,7 @@ void CWatchBSP::DoEBeginStep(){
 			const auto msg = StringStream( "Failed to execute the following command: ", m_commands[m_iCurrentStep],
 			                               "\nCheck that the file exists and that you don't run out of system resources.\n" );
 			globalOutputStream() << msg;
+			BuildRuntime_setState( BuildRuntimeState::Failed, "Build command failed to start" );
 			qt_MessageBox( MainFrame_getWindow(), msg, "Build monitoring", EMessageBoxType::Error );
 			return;
 		}
@@ -644,6 +849,7 @@ void CWatchBSP::RoutineProcessing(){
 			qt_MessageBox( MainFrame_getWindow(),  "The connection timed out, assuming the build process failed\n"
 			                                       "Make sure you are using a networked version of Q3Map?\n"
 			                                       "Otherwise you need to disable BSP Monitoring in prefs.", "BSP process monitoring" );
+			BuildRuntime_setState( BuildRuntimeState::Failed, "Build monitor timed out" );
 			EndMonitoringLoop();
 #if 0
 			if ( m_bBSPPlugin ) {
@@ -685,6 +891,7 @@ void CWatchBSP::RoutineProcessing(){
 			if ( ret == -1 ) {
 				globalErrorStream() << "SOCKET_ERROR in CWatchBSP::RoutineProcessing\n";
 				globalErrorStream() << "Terminating the connection.\n";
+				BuildRuntime_setState( BuildRuntimeState::Failed, "Build monitor socket error" );
 				EndMonitoringLoop();
 				return;
 			}

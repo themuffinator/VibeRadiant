@@ -99,6 +99,9 @@ public:
 	QWidget* appendSpinner( const char* name, float& data, double lower, double upper, int decimals = 2 ){
 		return m_dialog.addSpinner( m_grid, name, data, lower, upper, decimals );
 	}
+	QPushButton* appendButton( const char* name, const char* buttonLabel ){
+		return m_dialog.addButton( m_grid, name, buttonLabel );
+	}
 };
 
 typedef Callback<void(PreferencesPage&)> PreferencesPageCallback;
@@ -323,6 +326,9 @@ public:
 
 	class QStackedWidget *m_notebook;
 	class QTreeView *m_treeview;
+	class QLineEdit *m_searchEdit;
+	class QListWidget *m_searchResults;
+	class QStandardItemModel *m_treeModel;
 
 	virtual ~PrefsDlg() = default;
 

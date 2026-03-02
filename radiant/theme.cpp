@@ -803,86 +803,6 @@ void theme_set( ETheme theme ){
 	s_themeApplied = true;
 }
 
-void theme_construct_menu( class QMenu *menu ){
-	auto *m = menu->addMenu( i18n::tr( "Unified Theme" ) );
-	m->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
-	auto *group = new QActionGroup( m );
-
-	const std::array themeMenuEntries{
-		std::pair{ ETheme::System, "System (OS)" },
-		std::pair{ ETheme::Light, "Light" },
-		std::pair{ ETheme::Dark, "Dark" },
-		std::pair{ ETheme::Darker, "Darker" },
-		std::pair{ ETheme::Blender, "Blender" },
-	};
-
-	for( const auto& [ theme, name ] : themeMenuEntries )
-	{
-		auto *a = m->addAction( name );
-		a->setCheckable( true );
-		a->setData( static_cast<int>( theme ) );
-		group->addAction( a );
-	}
-	// init radio
-	for( QAction* action : group->actions() )
-	{
-		if( action->data().toInt() == static_cast<int>( s_theme ) ){
-			action->setChecked( true );
-			break;
-		}
-	}
-
-	QObject::connect( group, &QActionGroup::triggered, []( QAction *action ){
-		theme_set( static_cast<ETheme>( action->data().toInt() ) );
-	} );
-
-	auto *densityMenu = menu->addMenu( i18n::tr( "Interface Density" ) );
-	densityMenu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
-	auto *densityGroup = new QActionGroup( densityMenu );
-
-	const std::array densityEntries{
-		std::pair{ EInterfaceDensity::Compact, "Compact" },
-		std::pair{ EInterfaceDensity::Standard, "Standard" },
-		std::pair{ EInterfaceDensity::Comfortable, "Comfortable" },
-	};
-	for( const auto& [ density, label ] : densityEntries )
-	{
-		auto *a = densityMenu->addAction( i18n::tr( label ) );
-		a->setCheckable( true );
-		a->setData( static_cast<int>( density ) );
-		densityGroup->addAction( a );
-	}
-	for( QAction* action : densityGroup->actions() )
-	{
-		if( action->data().toInt() == static_cast<int>( s_density ) ){
-			action->setChecked( true );
-			break;
-		}
-	}
-	QObject::connect( densityGroup, &QActionGroup::triggered, []( QAction *action ){
-		s_density = static_cast<EInterfaceDensity>( action->data().toInt() );
-		theme_set( s_theme );
-	} );
-
-	menu->addSeparator();
-	menu->addAction( i18n::tr( "Accent Color..." ), [](){
-		const QColor fallback = visuals_for_theme( s_theme ).accent;
-		const QColor initial = s_accentOverrideEnabled ? s_accentOverride : fallback;
-		const QColor picked = QColorDialog::getColor( initial, MainFrame_getWindow(), i18n::tr( "Choose Accent Color" ) );
-		if( picked.isValid() ){
-			s_accentOverrideEnabled = true;
-			s_accentOverride = picked;
-			theme_set( s_theme );
-		}
-	} );
-	menu->addAction( i18n::tr( "Use Theme Default Accent" ), [](){
-		if( s_accentOverrideEnabled ){
-			s_accentOverrideEnabled = false;
-			theme_set( s_theme );
-		}
-	} );
-}
-
 void ThemeImport( int value ){
 	switch( value )
 	{
@@ -937,6 +857,116 @@ void ThemeAccentColorExport( const IntImportCallback& importer ){
 	importer( ( s_accentOverride.red() << 16 ) | ( s_accentOverride.green() << 8 ) | s_accentOverride.blue() );
 }
 typedef FreeCaller<void(const IntImportCallback&), ThemeAccentColorExport> ThemeAccentColorExportCaller;
+
+void ThemePreferenceImport( int value ){
+	ThemeImport( value );
+	theme_set( s_theme );
+}
+typedef FreeCaller<void(int), ThemePreferenceImport> ThemePreferenceImportCaller;
+
+void ThemeDensityPreferenceImport( int value ){
+	ThemeDensityImport( value );
+	theme_set( s_theme );
+}
+typedef FreeCaller<void(int), ThemeDensityPreferenceImport> ThemeDensityPreferenceImportCaller;
+
+void ThemeAccentEnabledPreferenceImport( bool value ){
+	ThemeAccentEnabledImport( value );
+	theme_set( s_theme );
+}
+typedef FreeCaller<void(bool), ThemeAccentEnabledPreferenceImport> ThemeAccentEnabledPreferenceImportCaller;
+
+void ThemeAccentRedImport( int value ){
+	s_accentOverride.setRed( std::clamp( value, 0, 255 ) );
+	theme_set( s_theme );
+}
+typedef FreeCaller<void(int), ThemeAccentRedImport> ThemeAccentRedImportCaller;
+
+void ThemeAccentRedExport( const IntImportCallback& importer ){
+	importer( s_accentOverride.red() );
+}
+typedef FreeCaller<void(const IntImportCallback&), ThemeAccentRedExport> ThemeAccentRedExportCaller;
+
+void ThemeAccentGreenImport( int value ){
+	s_accentOverride.setGreen( std::clamp( value, 0, 255 ) );
+	theme_set( s_theme );
+}
+typedef FreeCaller<void(int), ThemeAccentGreenImport> ThemeAccentGreenImportCaller;
+
+void ThemeAccentGreenExport( const IntImportCallback& importer ){
+	importer( s_accentOverride.green() );
+}
+typedef FreeCaller<void(const IntImportCallback&), ThemeAccentGreenExport> ThemeAccentGreenExportCaller;
+
+void ThemeAccentBlueImport( int value ){
+	s_accentOverride.setBlue( std::clamp( value, 0, 255 ) );
+	theme_set( s_theme );
+}
+typedef FreeCaller<void(int), ThemeAccentBlueImport> ThemeAccentBlueImportCaller;
+
+void ThemeAccentBlueExport( const IntImportCallback& importer ){
+	importer( s_accentOverride.blue() );
+}
+typedef FreeCaller<void(const IntImportCallback&), ThemeAccentBlueExport> ThemeAccentBlueExportCaller;
+
+void theme_construct_preferences( PreferencesPage& page ){
+	const char* themeEntries[] = {
+		"System (OS)",
+		"Light",
+		"Dark",
+		"Darker",
+		"Blender",
+	};
+	page.appendCombo(
+	    "Unified Theme",
+	    StringArrayRange( themeEntries ),
+	    IntImportCallback( ThemePreferenceImportCaller() ),
+	    IntExportCallback( ThemeExportCaller() )
+	);
+
+	const char* densityEntries[] = {
+		"Compact",
+		"Standard",
+		"Comfortable",
+	};
+	page.appendCombo(
+	    "Interface Density",
+	    StringArrayRange( densityEntries ),
+	    IntImportCallback( ThemeDensityPreferenceImportCaller() ),
+	    IntExportCallback( ThemeDensityExportCaller() )
+	);
+
+	auto* accentOverrideToggle = page.appendCheckBox(
+	    "Accent",
+	    "Use custom accent color",
+	    BoolImportCallback( ThemeAccentEnabledPreferenceImportCaller() ),
+	    BoolExportCallback( ThemeAccentEnabledExportCaller() )
+	);
+	QWidget* accentRed = page.appendSpinner(
+	    "Accent Red",
+	    0,
+	    255,
+	    IntImportCallback( ThemeAccentRedImportCaller() ),
+	    IntExportCallback( ThemeAccentRedExportCaller() )
+	);
+	QWidget* accentGreen = page.appendSpinner(
+	    "Accent Green",
+	    0,
+	    255,
+	    IntImportCallback( ThemeAccentGreenImportCaller() ),
+	    IntExportCallback( ThemeAccentGreenExportCaller() )
+	);
+	QWidget* accentBlue = page.appendSpinner(
+	    "Accent Blue",
+	    0,
+	    255,
+	    IntImportCallback( ThemeAccentBlueImportCaller() ),
+	    IntExportCallback( ThemeAccentBlueExportCaller() )
+	);
+	Widget_connectToggleDependency( accentRed, accentOverrideToggle );
+	Widget_connectToggleDependency( accentGreen, accentOverrideToggle );
+	Widget_connectToggleDependency( accentBlue, accentOverrideToggle );
+}
 
 
 void theme_construct(){

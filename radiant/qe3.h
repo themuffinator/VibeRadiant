@@ -22,6 +22,7 @@
 #pragma once
 
 #include "string/string.h"
+#include "watchbsp.h"
 #include <vector>
 
 //
@@ -29,7 +30,8 @@
 //
 void    Sys_SetTitle( const char *text, bool modified );
 
-void RunBSP( size_t buildIdx );
+void RunBSP( size_t buildIdx, BuildLaunchMode launchMode = BuildLaunchMode::UsePreference );
+void RunLaunchTaskCurrentMap();
 void RunBatch( const std::vector<CopiedString>& commands );
 
 void QE_InitVFS();

@@ -625,8 +625,9 @@ void rebuild_flag_names_cache(){
 	for( std::size_t bit = 0; bit < 32; ++bit )
 	{
 		g_flagNameCache.surface[bit] = format_fallback_flag_name( true, bit );
-		if( !string_empty( defaultSurface[bit] ) ){
-			g_flagNameCache.surface[bit] = defaultSurface[bit];
+		const char* defaultSurfaceLabel = defaultSurface[bit];
+		if( defaultSurfaceLabel != nullptr && !string_empty( defaultSurfaceLabel ) ){
+			g_flagNameCache.surface[bit] = defaultSurfaceLabel;
 		}
 		const auto surfKey = StringStream<16>( "surf", bit + 1 );
 		const char* surfOverride = GlobalRadiant().getGameDescriptionKeyValue( surfKey );
@@ -635,8 +636,9 @@ void rebuild_flag_names_cache(){
 		}
 
 		g_flagNameCache.content[bit] = format_fallback_flag_name( false, bit );
-		if( !string_empty( defaultContent[bit] ) ){
-			g_flagNameCache.content[bit] = defaultContent[bit];
+		const char* defaultContentLabel = defaultContent[bit];
+		if( defaultContentLabel != nullptr && !string_empty( defaultContentLabel ) ){
+			g_flagNameCache.content[bit] = defaultContentLabel;
 		}
 		const auto contKey = StringStream<16>( "cont", bit + 1 );
 		const char* contOverride = GlobalRadiant().getGameDescriptionKeyValue( contKey );

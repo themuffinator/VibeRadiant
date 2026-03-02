@@ -250,3 +250,4 @@ void XYWindowMouseDown_disconnect( MouseEventHandlerId id );
 extern QWidget* g_page_entity;
 
 void FocusAllViews();
+void OpenGLFont_select();

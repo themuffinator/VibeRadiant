@@ -269,7 +269,7 @@ void RunBatch( const std::vector<CopiedString>& commands ){
 }
 
 
-void RunBSP( size_t buildIdx ){
+void RunBSP( size_t buildIdx, BuildLaunchMode launchMode ){
 	if( !g_region_active )
 		SaveMap();
 
@@ -290,7 +290,21 @@ void RunBSP( size_t buildIdx ){
 
 	std::vector<CopiedString> commands = build_construct_commands( buildIdx );
 	const auto bspname = StringStream<64>( PathFilename( Map_Name( g_map ) ) ); // grab the file name for engine running
-	BuildMonitor_Run( commands, bspname );
+	BuildMonitor_Run( commands, bspname, launchMode );
+}
+
+void RunLaunchTaskCurrentMap(){
+	if ( Map_Unnamed( g_map ) ) {
+		globalErrorStream() << "launch cancelled: the map is unnamed\n";
+		return;
+	}
+
+	if ( Map_Modified( g_map ) ) {
+		SaveMap();
+	}
+
+	const auto bspname = StringStream<64>( PathFilename( Map_Name( g_map ) ) );
+	BuildMonitor_RunEngine( bspname );
 }
 
 // =============================================================================

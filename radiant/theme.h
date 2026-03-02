@@ -21,8 +21,8 @@
 
 #pragma once
 
-void theme_construct_menu( class QMenu *menu );
 void theme_construct();
 void theme_apply_startup();
 void theme_reapply_active();
+void theme_construct_preferences( class PreferencesPage& page );
 void theme_registerGlobalPreference( class PreferenceSystem& preferences );
