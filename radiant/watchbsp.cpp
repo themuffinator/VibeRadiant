@@ -45,6 +45,7 @@
 #include "commandlib.h"
 #include "string/string.h"
 #include "stream/stringstream.h"
+#include "os/path.h"
 
 #include "gtkutil/messagebox.h"
 #include "xmlstuff.h"
@@ -433,6 +434,10 @@ void BuildMonitor_Construct(){
 	GlobalPreferenceSystem().registerPreference( "BuildEnginePreset", CopiedStringImportStringCaller( g_enginePreset ), CopiedStringExportStringCaller( g_enginePreset ) );
 	GlobalPreferenceSystem().registerPreference( "BuildDumpLog", BoolImportStringCaller( g_WatchBSP0_DumpLog ), BoolExportStringCaller( g_WatchBSP0_DumpLog ) );
 	GlobalPreferenceSystem().registerPreference( "RegionBoxShader", CopiedStringImportStringCaller( g_regionBoxShader ), CopiedStringExportStringCaller( g_regionBoxShader ) );
+	if ( const char* startupEngine = StartupGameInstallationEngineExecutable_get(); !string_empty( startupEngine ) ) {
+		g_engineExecutable.Import( startupEngine );
+		g_enginePreset = "Custom";
+	}
 	Build_registerPreferencesPage();
 }
 
@@ -471,15 +476,20 @@ const char* BuildMonitor_getRuntimeText(){
 
 static StringOutputStream runEngineCmd( const char *bspName ){
 	// this is game dependant
-	const auto [exe, args] = [](){
+	auto [exe, args] = [](){
 		if( string_equal( gamemode_get(), "mp" ) ){
 			if( auto exe = g_engineExecutableMP.string(); !exe.empty() )
 				return std::pair( std::move( exe ), g_engineArgsMP.string() );
 		}
 		return std::pair( g_engineExecutable.string(), g_engineArgs.string() );
 	}();
+	if ( const char* startupEngine = StartupGameInstallationEngineExecutable_get(); !string_empty( startupEngine ) ) {
+		exe = startupEngine;
+	}
 
-	auto cmd = StringStream( '"', EnginePath_get(), exe, '"', ' ' );
+	auto cmd = path_is_absolute( exe.c_str() )
+		? StringStream( '"', exe, '"', ' ' )
+		: StringStream( '"', EnginePath_get(), exe, '"', ' ' );
 	{ // substitute "%mapname%"
 		const char *a = args.c_str();
 		while( const char *map = strstr( a, "%mapname%" ) ){

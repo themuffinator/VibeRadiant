@@ -9,6 +9,7 @@
 #include "assetbrowser.h"
 #include "commands.h"
 #include "iselection.h"
+#include "gtkutil/i18n.h"
 
 #include <QGridLayout>
 #include <QGroupBox>
@@ -31,55 +32,55 @@ void run_toggle( const char* name ){
 	GlobalToggles_find( name ).m_command.m_callback();
 }
 
-const char* manipulator_mode_name( SelectionSystem::EManipulatorMode mode ){
+QString manipulator_mode_name( SelectionSystem::EManipulatorMode mode ){
 	switch ( mode )
 	{
 	case SelectionSystem::eTranslate:
-		return "Translate";
+		return i18n::tr( "Translate" );
 	case SelectionSystem::eRotate:
-		return "Rotate";
+		return i18n::tr( "Rotate" );
 	case SelectionSystem::eScale:
-		return "Scale";
+		return i18n::tr( "Scale" );
 	case SelectionSystem::eSkew:
-		return "Transform";
+		return i18n::tr( "Transform" );
 	case SelectionSystem::eDrag:
-		return "Drag";
+		return i18n::tr( "Drag" );
 	case SelectionSystem::eClip:
-		return "Clipper";
+		return i18n::tr( "Clipper" );
 	case SelectionSystem::eBuild:
-		return "Build";
+		return i18n::tr( "Build" );
 	case SelectionSystem::eUV:
-		return "UV";
+		return i18n::tr( "UV" );
 	}
-	return "Unknown";
+	return i18n::tr( "Unknown" );
 }
 
-const char* component_mode_name( SelectionSystem::EComponentMode mode ){
+QString component_mode_name( SelectionSystem::EComponentMode mode ){
 	switch ( mode )
 	{
 	case SelectionSystem::eDefault:
-		return "Default";
+		return i18n::tr( "Default" );
 	case SelectionSystem::eVertex:
-		return "Vertex";
+		return i18n::tr( "Vertex" );
 	case SelectionSystem::eEdge:
-		return "Edge";
+		return i18n::tr( "Edge" );
 	case SelectionSystem::eFace:
-		return "Face";
+		return i18n::tr( "Face" );
 	}
-	return "Unknown";
+	return i18n::tr( "Unknown" );
 }
 
-const char* selection_mode_name( SelectionSystem::EMode mode ){
+QString selection_mode_name( SelectionSystem::EMode mode ){
 	switch ( mode )
 	{
 	case SelectionSystem::eEntity:
-		return "Entity";
+		return i18n::tr( "Entity" );
 	case SelectionSystem::ePrimitive:
-		return "Primitive";
+		return i18n::tr( "Primitive" );
 	case SelectionSystem::eComponent:
-		return "Component";
+		return i18n::tr( "Component" );
 	}
-	return "Unknown";
+	return i18n::tr( "Unknown" );
 }
 
 class UVViewPanel final : public QWidget
@@ -95,11 +96,11 @@ class UVViewPanel final : public QWidget
 		std::size_t entities = 0;
 		selection.countSelectedStuff( brushes, patches, entities );
 
-		m_modeLabel->setText( QString( "Mode: %1 / %2 / %3" )
+		m_modeLabel->setText( i18n::tr( "Mode: %1 / %2 / %3" )
 		                      .arg( selection_mode_name( selection.Mode() ) )
 		                      .arg( component_mode_name( selection.ComponentMode() ) )
 		                      .arg( manipulator_mode_name( selection.ManipulatorMode() ) ) );
-		m_selectionLabel->setText( QString( "Selection: %1 brushes, %2 patches, %3 entities" )
+		m_selectionLabel->setText( i18n::tr( "Selection: %1 brushes, %2 patches, %3 entities" )
 		                           .arg( brushes )
 		                           .arg( patches )
 		                           .arg( entities ) );
@@ -113,21 +114,21 @@ public:
 
 		m_modeLabel = new QLabel( this );
 		m_selectionLabel = new QLabel( this );
-		m_hintLabel = new QLabel( "Dedicated UV workflow: switch to UV mode, then align with the controls below.", this );
+		m_hintLabel = new QLabel( i18n::tr( "Dedicated UV workflow: switch to UV mode, then align with the controls below." ), this );
 		m_hintLabel->setWordWrap( true );
 		mainLayout->addWidget( m_modeLabel );
 		mainLayout->addWidget( m_selectionLabel );
 		mainLayout->addWidget( m_hintLabel );
 
 		{
-			auto* group = new QGroupBox( "Workflow", this );
+			auto* group = new QGroupBox( i18n::tr( "Workflow" ), this );
 			auto* layout = new QHBoxLayout( group );
 
-			auto* uvTool = new QPushButton( "UV Tool (G)", group );
-			auto* translate = new QPushButton( "Translate (W)", group );
-			auto* rotate = new QPushButton( "Rotate (R)", group );
-			auto* scale = new QPushButton( "Scale", group );
-			auto* surfaceInspector = new QPushButton( "Surface Inspector (S)", group );
+			auto* uvTool = new QPushButton( i18n::tr( "UV Tool (G)" ), group );
+			auto* translate = new QPushButton( i18n::tr( "Translate (W)" ), group );
+			auto* rotate = new QPushButton( i18n::tr( "Rotate (R)" ), group );
+			auto* scale = new QPushButton( i18n::tr( "Scale" ), group );
+			auto* surfaceInspector = new QPushButton( i18n::tr( "Surface Inspector (S)" ), group );
 
 			layout->addWidget( uvTool );
 			layout->addWidget( translate );
@@ -145,13 +146,13 @@ public:
 		}
 
 		{
-			auto* group = new QGroupBox( "Projection / Fit", this );
+			auto* group = new QGroupBox( i18n::tr( "Projection / Fit" ), this );
 			auto* layout = new QHBoxLayout( group );
 
-			auto* fit = new QPushButton( "Fit", group );
-			auto* fitW = new QPushButton( "Fit Width", group );
-			auto* fitH = new QPushButton( "Fit Height", group );
-			auto* axial = new QPushButton( "Project Axial", group );
+			auto* fit = new QPushButton( i18n::tr( "Fit" ), group );
+			auto* fitW = new QPushButton( i18n::tr( "Fit Width" ), group );
+			auto* fitH = new QPushButton( i18n::tr( "Fit Height" ), group );
+			auto* axial = new QPushButton( i18n::tr( "Project Axial" ), group );
 
 			layout->addWidget( fit );
 			layout->addWidget( fitW );
@@ -167,17 +168,17 @@ public:
 		}
 
 		{
-			auto* group = new QGroupBox( "UV Nudge", this );
+			auto* group = new QGroupBox( i18n::tr( "UV Nudge" ), this );
 			auto* grid = new QGridLayout( group );
 
-			auto* shiftLeft = new QPushButton( "Shift U-", group );
-			auto* shiftRight = new QPushButton( "Shift U+", group );
-			auto* shiftUp = new QPushButton( "Shift V+", group );
-			auto* shiftDown = new QPushButton( "Shift V-", group );
-			auto* scaleLeft = new QPushButton( "Scale U-", group );
-			auto* scaleRight = new QPushButton( "Scale U+", group );
-			auto* scaleUp = new QPushButton( "Scale V+", group );
-			auto* scaleDown = new QPushButton( "Scale V-", group );
+			auto* shiftLeft = new QPushButton( i18n::tr( "Shift U-" ), group );
+			auto* shiftRight = new QPushButton( i18n::tr( "Shift U+" ), group );
+			auto* shiftUp = new QPushButton( i18n::tr( "Shift V+" ), group );
+			auto* shiftDown = new QPushButton( i18n::tr( "Shift V-" ), group );
+			auto* scaleLeft = new QPushButton( i18n::tr( "Scale U-" ), group );
+			auto* scaleRight = new QPushButton( i18n::tr( "Scale U+" ), group );
+			auto* scaleUp = new QPushButton( i18n::tr( "Scale V+" ), group );
+			auto* scaleDown = new QPushButton( i18n::tr( "Scale V-" ), group );
 
 			grid->addWidget( shiftLeft, 0, 0 );
 			grid->addWidget( shiftRight, 0, 1 );
@@ -201,7 +202,7 @@ public:
 		}
 
 		if( AssetBrowser_isEnabled() ){
-			auto* openAssetBrowser = new QPushButton( "Open Asset Browser", this );
+			auto* openAssetBrowser = new QPushButton( i18n::tr( "Open Asset Browser" ), this );
 			QObject::connect( openAssetBrowser, &QPushButton::clicked, [](){ run_command( "ToggleTextures" ); } );
 			mainLayout->addWidget( openAssetBrowser );
 		}

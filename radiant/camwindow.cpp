@@ -2273,12 +2273,12 @@ void CamWnd::Cam_Draw(){
 	if ( g_camwindow_globals.m_showStats ) {
 		gl().glRasterPos3f( 1, m_Camera.height, 0 );
 		extern const char* Renderer_GetStats( int frame2frame );
-		GlobalOpenGL().drawString( Renderer_GetStats( m_render_time.elapsed_msec() ) );
+		OpenGLFont_drawStringSafe( Renderer_GetStats( m_render_time.elapsed_msec() ) );
 		m_render_time.start();
 
-		gl().glRasterPos3f( 1, m_Camera.height - GlobalOpenGL().m_font->getPixelHeight(), 0 );
+		gl().glRasterPos3f( 1, m_Camera.height - OpenGLFont_getPixelHeightSafe(), 0 );
 		extern const char* Cull_GetStats();
-		GlobalOpenGL().drawString( Cull_GetStats() );
+		OpenGLFont_drawStringSafe( Cull_GetStats() );
 	}
 
 	// bind back to the default texture so that we don't have problems

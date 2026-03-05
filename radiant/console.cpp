@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "gtkutil/accelerator.h"
+#include "gtkutil/i18n.h"
 #include "gtkutil/messagebox.h"
 #include "stream/stringstream.h"
 #include "signal/signal.h"
@@ -122,9 +123,9 @@ class QPlainTextEdit_console : public QPlainTextEdit
 protected:
 	void contextMenuEvent( QContextMenuEvent *event ) override {
 		QMenu *menu = createStandardContextMenu();
-		connect( menu->addAction( "Copy All" ), &QAction::triggered,
+		connect( menu->addAction( i18n::tr( "Copy All" ) ), &QAction::triggered,
 		         [this](){ QApplication::clipboard()->setText( toPlainText() ); } );
-		connect( menu->addAction( "Clear" ), &QAction::triggered, this,
+		connect( menu->addAction( i18n::tr( "Clear" ) ), &QAction::triggered, this,
 		         &QPlainTextEdit::clear );
 		menu->exec( event->globalPos() );
 		delete menu;
@@ -211,12 +212,12 @@ bool console_track_summary( int level, const char* buffer, std::size_t length ){
 
 std::string console_build_tooltip( const char* title, const ConsoleSummaryState& state ){
 	StringOutputStream text( 2048 );
-	text << title << ": " << state.unreadCount << '\n';
+	text << i18n::tr( title ).toUtf8().constData() << ": " << state.unreadCount << '\n';
 	if( state.unreadCount == 0 ){
-		text << "No entries.";
+		text << i18n::tr( "No entries." ).toUtf8().constData();
 		return text.c_str();
 	}
-	text << "Recent unread entries:";
+	text << i18n::tr( "Recent unread entries:" ).toUtf8().constData();
 	for( const auto& line : state.recentLines )
 	{
 		text << "\n - " << line.c_str();
@@ -262,7 +263,7 @@ class ConsolePane : public QWidget
 
 	void updateCollapsedUi(){
 		m_toggleButton->setArrowType( m_collapsed ? Qt::UpArrow : Qt::DownArrow );
-		m_toggleButton->setToolTip( m_collapsed ? "Expand console" : "Collapse console" );
+		m_toggleButton->setToolTip( m_collapsed ? i18n::tr( "Expand console" ) : i18n::tr( "Collapse console" ) );
 		m_text->setVisible( !m_collapsed );
 
 		if( m_overlayHost.isNull() ){

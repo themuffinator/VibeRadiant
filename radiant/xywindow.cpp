@@ -1383,18 +1383,18 @@ void XYWnd::XY_DrawAxis(){
 	gl().glEnd();
 	gl().glLineWidth( 1 );
 	// now print axis symbols
-	const int fontHeight = GlobalOpenGL().m_font->getPixelHeight();
+	const int fontHeight = OpenGLFont_getPixelHeightSafe();
 	const float fontWidth = fontHeight * .55f;
 	gl().glColor3ubv( &colourX.r );
 	gl().glRasterPos2f( m_vOrigin[nDim1] - w + ( 65 - 3 - fontWidth ) / m_fScale, m_vOrigin[nDim2] + h - ( 45 + 3 + fontHeight ) / m_fScale );
-	GlobalOpenGL().drawChar( g_AxisName[nDim1] );
+	OpenGLFont_drawCharSafe( g_AxisName[nDim1] );
 	gl().glRasterPos2f( ( 32 - fontWidth / 2 ) / m_fScale, -( 0 + 3 + fontHeight ) / m_fScale );
-	GlobalOpenGL().drawChar( g_AxisName[nDim1] );
+	OpenGLFont_drawCharSafe( g_AxisName[nDim1] );
 	gl().glColor3ubv( &colourY.r );
 	gl().glRasterPos2f( m_vOrigin[nDim1] - w + ( 40 - 4 - fontWidth ) / m_fScale, m_vOrigin[nDim2] + h - ( 20 + 3 + fontHeight ) / m_fScale );
-	GlobalOpenGL().drawChar( g_AxisName[nDim2] );
+	OpenGLFont_drawCharSafe( g_AxisName[nDim2] );
 	gl().glRasterPos2f( ( 0 - 3 - fontWidth ) / m_fScale, ( 32 - fontHeight / 2 ) / m_fScale );
-	GlobalOpenGL().drawChar( g_AxisName[nDim2] );
+	OpenGLFont_drawCharSafe( g_AxisName[nDim2] );
 }
 
 void XYWnd::XY_DrawGrid() {
@@ -1540,18 +1540,18 @@ void XYWnd::XY_DrawGrid() {
 	// draw coordinate text if needed
 	if ( g_xywindow_globals_private.show_coordinates ) {
 		gl().glColor4fv( vector4_to_array( Vector4( g_xywindow_globals.color_gridtext, 1 ) ) );
-		const float offx = m_vOrigin[nDim2] + h - ( 1 + GlobalOpenGL().m_font->getPixelHeight() ) / m_fScale;
+		const float offx = m_vOrigin[nDim2] + h - ( 1 + OpenGLFont_getPixelHeightSafe() ) / m_fScale;
 		const float offy = m_vOrigin[nDim1] - w +  4                                            / m_fScale;
-		const float fontDescent = ( GlobalOpenGL().m_font->getPixelDescent() - 1 ) / m_fScale;
+		const float fontDescent = ( OpenGLFont_getPixelDescentSafe() - 1 ) / m_fScale;
 		for ( x = xb - fmod( xb, stepx ); x <= xe; x += stepx ) {
 			gl().glRasterPos2f( x, offx );
 			sprintf( text, "%g", x );
-			GlobalOpenGL().drawString( text );
+			OpenGLFont_drawStringSafe( text );
 		}
 		for ( y = yb - fmod( yb, stepy ); y <= ye; y += stepy ) {
 			gl().glRasterPos2f( offy, y - fontDescent );
 			sprintf( text, "%g", y );
-			GlobalOpenGL().drawString( text );
+			OpenGLFont_drawStringSafe( text );
 		}
 	}
 
@@ -1560,8 +1560,8 @@ void XYWnd::XY_DrawGrid() {
 	}
 	else{
 		gl().glColor3fv( vector3_to_array( Active()? g_xywindow_globals.color_viewname : g_xywindow_globals.color_gridtext ) );
-		gl().glRasterPos2f( m_vOrigin[nDim1] - w + 35 / m_fScale, m_vOrigin[nDim2] + h - ( GlobalOpenGL().m_font->getPixelHeight() * 2 ) / m_fScale );
-		GlobalOpenGL().drawString( ViewType_getTitle( m_viewType ) );
+		gl().glRasterPos2f( m_vOrigin[nDim1] - w + 35 / m_fScale, m_vOrigin[nDim2] + h - ( OpenGLFont_getPixelHeightSafe() * 2 ) / m_fScale );
+		OpenGLFont_drawStringSafe( ViewType_getTitle( m_viewType ) );
 	}
 
 	// show current work zone?
@@ -1748,22 +1748,22 @@ void XYWnd::PaintSizeInfo( const int nDim1, const int nDim2 ){
 	gl().glVertex3fv( vector3_to_array( v ) );
 	gl().glEnd();
 
-	const int fontHeight = GlobalOpenGL().m_font->getPixelHeight();
+	const int fontHeight = OpenGLFont_getPixelHeightSafe();
 
 	v[nDim1] = mid[nDim1];
 	v[nDim2] = min[nDim2] - ( 10 + 2 + fontHeight ) / m_fScale;
 	gl().glRasterPos3fv( vector3_to_array( v ) );
-	GlobalOpenGL().drawString( dimensions( dimStrings[nDim1], size[nDim1] ) );
+	OpenGLFont_drawStringSafe( dimensions( dimStrings[nDim1], size[nDim1] ) );
 
 	v[nDim1] = max[nDim1] + 16.f / m_fScale;
 	v[nDim2] = mid[nDim2] - fontHeight / m_fScale / 2;
 	gl().glRasterPos3fv( vector3_to_array( v ) );
-	GlobalOpenGL().drawString( dimensions( dimStrings[nDim2], size[nDim2] ) );
+	OpenGLFont_drawStringSafe( dimensions( dimStrings[nDim2], size[nDim2] ) );
 
 	v[nDim1] = min[nDim1] + 4.f / m_fScale;
 	v[nDim2] = max[nDim2] + 5.f / m_fScale;
 	gl().glRasterPos3fv( vector3_to_array( v ) );
-	GlobalOpenGL().drawString( dimensions( '(', dimStrings[nDim1], min[nDim1], "  ", dimStrings[nDim2], max[nDim2], ')' ) );
+	OpenGLFont_drawStringSafe( dimensions( '(', dimStrings[nDim1], min[nDim1], "  ", dimStrings[nDim2], max[nDim2], ')' ) );
 }
 
 class XYRenderer : public Renderer
@@ -2053,28 +2053,28 @@ static ClipperOrthoDebugInfo ClipperOrthoDebugDraw( VIEWTYPE viewType, const Vec
 
 	const float text_left = left;
 	float text_y = bottom - ( 8.0f / scale );
-	const float line_height = ( GlobalOpenGL().m_font->getPixelHeight() + 2 ) / scale;
+	const float line_height = ( OpenGLFont_getPixelHeightSafe() + 2 ) / scale;
 
 	StringOutputStream line( 128 );
 	gl().glColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
 	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
-	GlobalOpenGL().drawString( line( "Clipper Ortho Debug" ) );
+	OpenGLFont_drawStringSafe( line( "Clipper Ortho Debug" ) );
 	text_y -= line_height;
 
 	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
-	GlobalOpenGL().drawString( line( "LineStipple: ", ClipperOrthoDebugErrorName( info.line_error ) ) );
+	OpenGLFont_drawStringSafe( line( "LineStipple: ", ClipperOrthoDebugErrorName( info.line_error ) ) );
 	text_y -= line_height;
 
 	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
-	GlobalOpenGL().drawString( line( "PolygonStipple: ", ClipperOrthoDebugErrorName( info.polygon_error ) ) );
+	OpenGLFont_drawStringSafe( line( "PolygonStipple: ", ClipperOrthoDebugErrorName( info.polygon_error ) ) );
 	text_y -= line_height;
 
 	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
-	GlobalOpenGL().drawString( line( "PointSize: 6 (range ", info.point_range[0], " - ", info.point_range[1], ")" ) );
+	OpenGLFont_drawStringSafe( line( "PointSize: 6 (range ", info.point_range[0], " - ", info.point_range[1], ")" ) );
 	text_y -= line_height;
 
 	gl().glRasterPos3fv( vector3_to_array( make_point( text_left, text_y ) ) );
-	GlobalOpenGL().drawString( line( "LineWidth: 2 (range ", info.line_width_range[0], " - ", info.line_width_range[1], ")" ) );
+	OpenGLFont_drawStringSafe( line( "LineWidth: 2 (range ", info.line_width_range[0], " - ", info.line_width_range[1], ")" ) );
 
 	gl().glLineStipple( prev_line_repeat, static_cast<GLushort>( prev_line_pattern ) );
 	if ( was_line_stipple ) {
@@ -2266,7 +2266,7 @@ void XYWnd::XY_Draw(){
 
 		gl().glRasterPos3f( 2, 0, 0 );
 		extern const char* Renderer_GetStats( int frame2frame );
-		GlobalOpenGL().drawString( Renderer_GetStats( m_render_time.elapsed_msec() ) );
+		OpenGLFont_drawStringSafe( Renderer_GetStats( m_render_time.elapsed_msec() ) );
 		m_render_time.start();
 	}
 }

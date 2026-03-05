@@ -51,7 +51,6 @@
 
 #include "gtkutil/cursor.h"
 #include "gtkutil/fbo.h"
-#include "gtkutil/glfont.h"
 #include "gtkutil/glwidget.h"
 #include "gtkutil/guisettings.h"
 #include "gtkutil/image.h"
@@ -79,6 +78,14 @@ bool string_contains_nocase( const char* haystack, const char* needle ){
 	constexpr float kAssetBrowserHoverEpsilon = 0.001f;
 	constexpr float kAssetBrowserHoverRotateDegrees = 12.0f;
 	constexpr float kAssetBrowserHoverSpinDegreesPerSecond = 90.0f;
+
+int AssetBrowser_fontPixelHeight(){
+	return OpenGLFont_getPixelHeightSafe();
+}
+
+int AssetBrowser_fontPixelDescent(){
+	return OpenGLFont_getPixelDescentSafe();
+}
 
 float AssetBrowser_approachHoverScale( float current, float target ){
 	return current + ( target - current ) * kAssetBrowserHoverLerp;
@@ -633,9 +640,9 @@ class CellPos
 
 	int m_index = 0;
 public:
-	CellPos( int width, int cellSize, int fontHeight ) :
+	CellPos( int width, int cellSize, int fontHeight, int fontDescent ) :
 		m_cellSize( cellSize ), m_fontHeight( fontHeight ),
-		m_fontDescent( GlobalOpenGL().m_font->getPixelDescent() ),
+		m_fontDescent( fontDescent ),
 		m_plusWidth( 8 ),
 		m_plusHeight( 0 ),
 		m_cellsInRow( std::max( 1, ( width - m_plusWidth ) / ( m_cellSize * 2 + m_plusWidth ) ) ){
@@ -719,7 +726,7 @@ public:
 	Timer m_hoverSpinTimer;
 
 	CellPos constructCellPos() const {
-		return CellPos( m_width, m_cellSize, GlobalOpenGL().m_font->getPixelHeight() );
+		return CellPos( m_width, m_cellSize, AssetBrowser_fontPixelHeight(), AssetBrowser_fontPixelDescent() );
 	}
 	void testSelect( int x, int z ){
 		m_currentEntityId = constructCellPos().testSelect( x, z - m_originZ );
@@ -1380,14 +1387,16 @@ void EntityBrowser_render(){
 			}
 		}
 		{	// render entity class names
-			CellPos cellPos = g_EntityBrowser.constructCellPos();
-			for( const EntityClass* eclass : g_EntityBrowser.visibleClasses() ){
-				const Vector3 pos = cellPos.getTextPos();
-				if( m_view.TestPoint( pos ) ){
-					gl().glRasterPos3f( pos.x(), pos.y(), pos.z() );
-					GlobalOpenGL().drawString( eclass->name() );
+			if ( OpenGLFont_canDrawSafe() ) {
+				CellPos cellPos = g_EntityBrowser.constructCellPos();
+				for( const EntityClass* eclass : g_EntityBrowser.visibleClasses() ){
+					const Vector3 pos = cellPos.getTextPos();
+					if( m_view.TestPoint( pos ) ){
+						gl().glRasterPos3f( pos.x(), pos.y(), pos.z() );
+						OpenGLFont_drawStringSafe( eclass->name() );
+					}
+					++cellPos;
 				}
-				++cellPos;
 			}
 		}
 	}

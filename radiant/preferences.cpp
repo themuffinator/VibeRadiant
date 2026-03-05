@@ -61,12 +61,35 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QSplitter>
+#include <QScrollArea>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QComboBox>
 #include <QRadioButton>
 #include <QAbstractItemModel>
 #include <QItemSelectionModel>
 #include <QStringList>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QCursor>
+#include <QDialog>
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QFileDialog>
+#include <QInputDialog>
+#include <QMessageBox>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QFrame>
+#include <QPainter>
+#include <QUuid>
+#include <QStyle>
+#include <cctype>
+#include <cstdlib>
+#include <algorithm>
+#include <string_view>
 #include <vector>
 #include <utility>
 
@@ -93,6 +116,57 @@ inline const char* xmlAttr_getValue( xmlAttrPtr attr ){
 	return reinterpret_cast<const char*>( attr->children->content );
 }
 
+CopiedString CGameDescription::normaliseKey( const char* key ){
+	if ( key == nullptr ) {
+		return "";
+	}
+
+	StringOutputStream token( 64 );
+	for ( const unsigned char c : std::string_view( key ) )
+	{
+		if ( std::isalnum( c ) ) {
+			token << static_cast<char>( std::tolower( c ) );
+		}
+	}
+	return token.c_str();
+}
+
+const char* CGameDescription::getKeyValue( const char* key ) const {
+	if ( key == nullptr || string_empty( key ) ) {
+		return "";
+	}
+
+	if ( GameDescription::const_iterator i = m_gameDescription.find( key ); i != m_gameDescription.end() ) {
+		return ( *i ).second.c_str();
+	}
+
+	const CopiedString normalised = normaliseKey( key );
+	if ( !normalised.empty() ) {
+		if ( GameDescription::const_iterator i = m_gameDescriptionNormalised.find( normalised ); i != m_gameDescriptionNormalised.end() ) {
+			return ( *i ).second.c_str();
+		}
+	}
+
+	return "";
+}
+
+const char* CGameDescription::getRequiredKeyValue( const char* key ) const {
+	if ( key != nullptr && !string_empty( key ) ) {
+		if ( GameDescription::const_iterator i = m_gameDescription.find( key ); i != m_gameDescription.end() ) {
+			return ( *i ).second.c_str();
+		}
+
+		const CopiedString normalised = normaliseKey( key );
+		if ( !normalised.empty() ) {
+			if ( GameDescription::const_iterator i = m_gameDescriptionNormalised.find( normalised ); i != m_gameDescriptionNormalised.end() ) {
+				return ( *i ).second.c_str();
+			}
+		}
+	}
+	ERROR_MESSAGE( "game attribute " << Quoted( key ) << " not found in " << Quoted( mGameFile ) );
+	return "";
+}
+
 CGameDescription::CGameDescription( xmlDocPtr pDoc, const CopiedString& gameFile ){
 	// read the user-friendly game name
 	xmlNodePtr pNode = pDoc->children;
@@ -107,7 +181,15 @@ CGameDescription::CGameDescription( xmlDocPtr pDoc, const CopiedString& gameFile
 
 	for ( xmlAttrPtr attr = pNode->properties; attr != 0; attr = attr->next )
 	{
-		m_gameDescription.insert( GameDescription::value_type( xmlAttr_getName( attr ), xmlAttr_getValue( attr ) ) );
+		const CopiedString attrName = xmlAttr_getName( attr );
+		const CopiedString attrValue = xmlAttr_getValue( attr );
+
+		m_gameDescription.insert( GameDescription::value_type( attrName, attrValue ) );
+
+		const CopiedString normalised = normaliseKey( attrName.c_str() );
+		if ( !normalised.empty() ) {
+			m_gameDescriptionNormalised.insert( GameDescription::value_type( normalised, attrValue ) );
+		}
 	}
 
 	mGameToolsPath = StringStream( AppPath_get(), "gamepacks/", gameFile, '/' );
@@ -117,15 +199,15 @@ CGameDescription::CGameDescription( xmlDocPtr pDoc, const CopiedString& gameFile
 	mGameFile = gameFile;
 
 	{
-		GameDescription::iterator i = m_gameDescription.find( "type" );
-		if ( i == m_gameDescription.end() ) {
+		const char* type = getKeyValue( "type" );
+		if ( string_empty( type ) ) {
 			globalWarningStream() << "Warning, 'type' attribute not found in " << SingleQuoted( reinterpret_cast<const char*>( pDoc->URL ) ) << '\n';
 			// default
 			mGameType = "q3";
 		}
 		else
 		{
-			mGameType = ( *i ).second.c_str();
+			mGameType = type;
 		}
 	}
 }
@@ -209,6 +291,1639 @@ void GlobalPreferences_Init(){
 
 constexpr const char* PREFS_GLOBAL_FILENAME = "global.pref";
 
+namespace
+{
+constexpr const char* GAME_INSTALL_STATE_FILENAME = "game_installations.json";
+
+struct GameInstallationEntry
+{
+	QString id;
+	QString gameFile;
+	QString name;
+	QString path;
+	QString engineExecutable;
+};
+
+struct GameInstallationState
+{
+	QVector<GameInstallationEntry> installations;
+	QString selectedGameFile;
+	QHash<QString, QString> selectedInstallByGame;
+};
+
+CopiedString g_startupGameInstallationPath;
+CopiedString g_startupGameInstallationEngineExecutable;
+CopiedString g_startupGameInstallationId;
+
+const char* installation_engine_attribute(){
+#if defined( WIN32 )
+	return "engine_win32";
+#elif defined( __APPLE__ )
+	return "engine_macos";
+#elif defined( __linux__ ) || defined( __FreeBSD__ )
+	return "engine_linux";
+#else
+#error "unsupported platform"
+#endif
+}
+
+QString game_install_state_file_path(){
+	const QString root = QString::fromUtf8( g_Preferences.m_global_rc_path.c_str() );
+	if ( root.isEmpty() ) {
+		return {};
+	}
+	QDir dir( root );
+	if ( !dir.exists() ) {
+		dir.mkpath( "." );
+	}
+	return dir.filePath( GAME_INSTALL_STATE_FILENAME );
+}
+
+QString normalise_installation_path( const QString& path ){
+	QString cleaned = QDir::cleanPath( path.trimmed() );
+#if defined( WIN32 )
+	cleaned = cleaned.toLower();
+#endif
+	return cleaned;
+}
+
+bool installation_path_equal( const QString& lhs, const QString& rhs ){
+	return normalise_installation_path( lhs ) == normalise_installation_path( rhs );
+}
+
+const CGameDescription* find_game_by_file( const QVector<const CGameDescription*>& games, const QString& gameFile ){
+	for ( const CGameDescription* game : games )
+	{
+		if ( game == nullptr ) {
+			continue;
+		}
+		if ( QString::fromUtf8( game->mGameFile.c_str() ) == gameFile ) {
+			return game;
+		}
+	}
+	return nullptr;
+}
+
+QVector<int> installation_indexes_for_game( const GameInstallationState& state, const QString& gameFile ){
+	QVector<int> indexes;
+	for ( int i = 0; i < state.installations.size(); ++i )
+	{
+		if ( state.installations[i].gameFile == gameFile ) {
+			indexes.push_back( i );
+		}
+	}
+	return indexes;
+}
+
+int installation_count_for_game( const GameInstallationState& state, const QString& gameFile ){
+	return installation_indexes_for_game( state, gameFile ).size();
+}
+
+const GameInstallationEntry* find_installation_by_id( const GameInstallationState& state, const QString& id ){
+	if ( id.isEmpty() ) {
+		return nullptr;
+	}
+	for ( const GameInstallationEntry& entry : state.installations )
+	{
+		if ( entry.id == id ) {
+			return &entry;
+		}
+	}
+	return nullptr;
+}
+
+GameInstallationEntry* find_installation_by_id( GameInstallationState& state, const QString& id ){
+	if ( id.isEmpty() ) {
+		return nullptr;
+	}
+	for ( GameInstallationEntry& entry : state.installations )
+	{
+		if ( entry.id == id ) {
+			return &entry;
+		}
+	}
+	return nullptr;
+}
+
+QString infer_installation_storefront( const QString& path, const QString& sourceHint ){
+	const QString sourceLower = sourceHint.trimmed().toLower();
+	if ( sourceLower.contains( "steam" ) ) {
+		return "Steam";
+	}
+	if ( sourceLower.contains( "gog" ) ) {
+		return "GOG.com";
+	}
+	if ( sourceLower.contains( "epic" ) ) {
+		return "Epic Games";
+	}
+	if ( sourceLower.contains( "itch" ) ) {
+		return "itch.io";
+	}
+	if ( sourceLower.contains( "microsoft" ) || sourceLower.contains( "xbox" ) ) {
+		return "Microsoft Store";
+	}
+
+	const QString normalisedPath = QDir::fromNativeSeparators( QDir::cleanPath( path ) ).toLower();
+	if ( normalisedPath.contains( "/steamapps/" ) ) {
+		return "Steam";
+	}
+	if ( normalisedPath.contains( "/gog galaxy/" ) || normalisedPath.contains( "/gog games/" ) || normalisedPath.contains( "/gog.com/" ) ) {
+		return "GOG.com";
+	}
+	if ( normalisedPath.contains( "/epic games/" ) || normalisedPath.contains( "/epicgameslauncher/" ) ) {
+		return "Epic Games";
+	}
+	if ( normalisedPath.contains( "/itch.io/" ) ) {
+		return "itch.io";
+	}
+	if ( normalisedPath.contains( "/xboxgames/" ) || normalisedPath.contains( "/windowsapps/" ) ) {
+		return "Microsoft Store";
+	}
+	return {};
+}
+
+QString installation_name_base( const CGameDescription& game, const QString& path, const QString& sourceHint ){
+	const QString gameName = QString::fromUtf8( game.getRequiredKeyValue( "name" ) );
+	QString leaf = QFileInfo( path ).fileName().trimmed();
+	if ( leaf.isEmpty() ) {
+		leaf = gameName;
+	}
+	const bool leafUseful = leaf.compare( gameName, Qt::CaseInsensitive ) != 0;
+
+	const QString storefront = infer_installation_storefront( path, sourceHint );
+	if ( !storefront.isEmpty() && leafUseful ) {
+		return QString( "%1 (%2 - %3)" ).arg( gameName, storefront, leaf );
+	}
+	if ( !storefront.isEmpty() ) {
+		return QString( "%1 (%2)" ).arg( gameName, storefront );
+	}
+	return leafUseful ? QString( "%1 (%2)" ).arg( gameName, leaf ) : gameName;
+}
+
+QString installation_name_without_generated_suffix( const QString& name ){
+	const QString trimmed = name.trimmed();
+	const int marker = trimmed.lastIndexOf( " #" );
+	if ( marker <= 0 ) {
+		return trimmed;
+	}
+	for ( int i = marker + 2; i < trimmed.size(); ++i )
+	{
+		if ( !trimmed[i].isDigit() ) {
+			return trimmed;
+		}
+	}
+	return trimmed.left( marker ).trimmed();
+}
+
+bool installation_name_looks_autogenerated(
+	const CGameDescription& game,
+	const QString& name,
+	const QString& path,
+	const QString& sourceHint ){
+	const QString base = installation_name_without_generated_suffix( name );
+	const QString legacyBase = installation_name_base( game, path, QString() );
+	if ( base.compare( legacyBase, Qt::CaseInsensitive ) == 0 ) {
+		return true;
+	}
+	const QString storefrontBase = installation_name_base( game, path, sourceHint );
+	return base.compare( storefrontBase, Qt::CaseInsensitive ) == 0;
+}
+
+QString choose_installation_name(
+	const CGameDescription& game,
+	const QString& path,
+	const GameInstallationState& state,
+	const QString& sourceHint = QString(),
+	const QString& skipId = QString() ){
+	const QString baseName = installation_name_base( game, path, sourceHint );
+
+	auto nameTaken = [&state, &skipId]( const QString& candidate ){
+		for ( const GameInstallationEntry& existing : state.installations )
+		{
+			if ( !skipId.isEmpty() && existing.id == skipId ) {
+				continue;
+			}
+			if ( existing.name.compare( candidate, Qt::CaseInsensitive ) == 0 ) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	if ( !nameTaken( baseName ) ) {
+		return baseName;
+	}
+
+	for ( int suffix = 2; suffix < 1000; ++suffix )
+	{
+		const QString candidate = QString( "%1 #%2" ).arg( baseName ).arg( suffix );
+		if ( !nameTaken( candidate ) ) {
+			return candidate;
+		}
+	}
+	return baseName;
+}
+
+QString installation_detail_text( const GameInstallationEntry& entry ){
+	QString detail = QFileInfo( entry.path ).absoluteFilePath();
+	if ( !entry.engineExecutable.trimmed().isEmpty() ) {
+		detail += QString( "\nEngine: %1" ).arg( entry.engineExecutable.trimmed() );
+	}
+	return detail;
+}
+
+QString engine_default_for_game( const CGameDescription& game ){
+	return QString::fromUtf8( game.getKeyValue( installation_engine_attribute() ) );
+}
+
+const char* installation_mp_engine_attribute(){
+#if defined( WIN32 )
+	return "mp_engine_win32";
+#elif defined( __APPLE__ )
+	return "mp_engine_macos";
+#elif defined( __linux__ ) || defined( __FreeBSD__ )
+	return "mp_engine_linux";
+#else
+#error "unsupported platform"
+#endif
+}
+
+QString engine_mp_default_for_game( const CGameDescription& game ){
+	return QString::fromUtf8( game.getKeyValue( installation_mp_engine_attribute() ) );
+}
+
+int source_port_preference_score( const QString& lowerFileName ){
+	struct TokenScore
+	{
+		const char* token;
+		int score;
+	};
+
+	static const TokenScore kTokenScores[] = {
+		{ "ironwail", 600 },
+		{ "vkquake", 590 },
+		{ "quakespasm", 580 },
+		{ "quakespasm-spiked", 585 },
+		{ "fteqw", 560 },
+		{ "ezquake", 550 },
+		{ "yquake2", 600 },
+		{ "q2pro", 590 },
+		{ "kmquake2", 585 },
+		{ "q2vkpt", 580 },
+		{ "q2rtx", 570 },
+		{ "ioq3", 600 },
+		{ "ioquake3", 600 },
+		{ "quake3e", 595 },
+		{ "etlegacy", 600 },
+		{ "iowolfsp", 590 },
+		{ "iowolfmp", 590 },
+		{ "dhewm3", 600 },
+		{ "rbdoom3bfg", 595 },
+		{ "darkplaces", 580 },
+		{ "daemon", 560 },
+		{ "xonotic", 560 },
+		{ "warsow", 550 },
+		{ "warfork", 550 },
+		{ "openarena", 540 }
+	};
+
+	int bestScore = 0;
+	for ( const TokenScore& token : kTokenScores )
+	{
+		if ( lowerFileName.contains( QLatin1String( token.token ) ) && token.score > bestScore ) {
+			bestScore = token.score;
+		}
+	}
+	return bestScore;
+}
+
+QString detect_best_engine_executable_for_installation( const CGameDescription& game, const QString& installPath ){
+	const QString installRoot = QDir::cleanPath( installPath.trimmed() );
+	if ( installRoot.isEmpty() ) {
+		return {};
+	}
+
+	const QDir rootDir( installRoot );
+	if ( !rootDir.exists() ) {
+		return {};
+	}
+
+	const QString defaultEngine = QDir::fromNativeSeparators( engine_default_for_game( game ).trimmed() );
+	const QString mpEngine = QDir::fromNativeSeparators( engine_mp_default_for_game( game ).trimmed() );
+	const QString defaultEngineFile = QFileInfo( defaultEngine ).fileName().toLower();
+	const QString mpEngineFile = QFileInfo( mpEngine ).fileName().toLower();
+	const QString baseGameToken = QString::fromUtf8( game.getKeyValue( "basegame" ) ).toLower();
+
+	struct Candidate
+	{
+		QString executable;
+		int score;
+	};
+
+	QVector<Candidate> candidates;
+	QHash<QString, bool> seenCanonicalPaths;
+
+	auto addCandidate = [&]( const QString& candidateInput ){
+		QString candidate = QDir::fromNativeSeparators( candidateInput.trimmed() );
+		if ( candidate.isEmpty() ) {
+			return;
+		}
+
+		const QByteArray candidateUtf8 = candidate.toUtf8();
+		const bool absolute = path_is_absolute( candidateUtf8.constData() );
+		const QString absolutePath = absolute
+			? QDir::cleanPath( candidate )
+			: QDir::cleanPath( rootDir.filePath( candidate ) );
+
+		const QFileInfo info( absolutePath );
+		if ( !info.exists() || !info.isFile() ) {
+			return;
+		}
+
+#if defined( WIN32 )
+		if ( info.suffix().compare( "exe", Qt::CaseInsensitive ) != 0 ) {
+			return;
+		}
+#else
+		if ( !info.isExecutable() ) {
+			return;
+		}
+#endif
+
+		const QString lowerName = info.fileName().toLower();
+		if ( lowerName.contains( "dedicated" )
+		  || lowerName.contains( "server" )
+		  || lowerName.contains( "headless" )
+		  || lowerName.contains( "launcher" )
+		  || lowerName.contains( "updater" )
+		  || lowerName.contains( "patcher" ) ) {
+			return;
+		}
+
+		const QString canonical = QDir::cleanPath( QDir::fromNativeSeparators( info.absoluteFilePath() ) ).toLower();
+		if ( seenCanonicalPaths.value( canonical ) ) {
+			return;
+		}
+
+		QString storedExecutable = absolute
+			? QDir::cleanPath( QDir::fromNativeSeparators( info.absoluteFilePath() ) )
+			: QDir::cleanPath( QDir::fromNativeSeparators( rootDir.relativeFilePath( info.absoluteFilePath() ) ) );
+
+		int score = source_port_preference_score( lowerName );
+		if ( !defaultEngineFile.isEmpty() && lowerName == defaultEngineFile ) {
+			score += 140;
+		}
+		if ( !mpEngineFile.isEmpty() && lowerName == mpEngineFile ) {
+			score += 110;
+		}
+		if ( !baseGameToken.isEmpty() && lowerName.contains( baseGameToken ) ) {
+			score += 20;
+		}
+		if ( lowerName.contains( "64" ) || lowerName.contains( "x64" ) ) {
+			score += 15;
+		}
+		if ( lowerName.contains( "sdl" ) ) {
+			score += 8;
+		}
+		score -= storedExecutable.count( '/' ) * 2;
+
+		candidates.push_back( { storedExecutable, score } );
+		seenCanonicalPaths.insert( canonical, true );
+	};
+
+	addCandidate( defaultEngine );
+	addCandidate( mpEngine );
+
+	QStringList scanDirectories;
+	scanDirectories << "." << "bin" << "bin64" << "bin32" << "x64" << "x86";
+
+	if ( !defaultEngine.isEmpty() ) {
+		const QByteArray defaultEngineUtf8 = defaultEngine.toUtf8();
+		if ( !path_is_absolute( defaultEngineUtf8.constData() ) ) {
+			const QString defaultParent = QDir::cleanPath( QFileInfo( defaultEngine ).path() );
+			if ( !defaultParent.isEmpty()
+			  && defaultParent != "."
+			  && !scanDirectories.contains( defaultParent, Qt::CaseInsensitive ) ) {
+				scanDirectories.push_back( defaultParent );
+			}
+		}
+	}
+
+	for ( const QString& relativeDirRaw : scanDirectories )
+	{
+		const QString relativeDir = QDir::cleanPath( relativeDirRaw.trimmed() );
+		QDir dir( installRoot );
+		if ( relativeDir != "." && relativeDir != "/" ) {
+			if ( !dir.cd( relativeDir ) ) {
+				continue;
+			}
+		}
+
+#if defined( WIN32 )
+		const QStringList filters = { "*.exe" };
+#else
+		const QStringList filters = { "*" };
+#endif
+		const QFileInfoList files = dir.entryInfoList(
+			filters,
+			QDir::Files | QDir::NoSymLinks | QDir::Readable,
+			QDir::Name | QDir::IgnoreCase );
+
+		for ( const QFileInfo& fileInfo : files )
+		{
+#if !defined( WIN32 )
+			if ( !fileInfo.isExecutable() ) {
+				continue;
+			}
+#endif
+			addCandidate( rootDir.relativeFilePath( fileInfo.absoluteFilePath() ) );
+		}
+	}
+
+	if ( candidates.isEmpty() ) {
+		return {};
+	}
+
+	int bestIndex = 0;
+	for ( int i = 1; i < candidates.size(); ++i )
+	{
+		const Candidate& current = candidates[i];
+		const Candidate& best = candidates[bestIndex];
+		if ( current.score > best.score ) {
+			bestIndex = i;
+			continue;
+		}
+		if ( current.score == best.score && current.executable.size() < best.executable.size() ) {
+			bestIndex = i;
+			continue;
+		}
+		if ( current.score == best.score
+		  && current.executable.size() == best.executable.size()
+		  && QString::compare( current.executable, best.executable, Qt::CaseInsensitive ) < 0 ) {
+			bestIndex = i;
+		}
+	}
+
+	return candidates[bestIndex].executable;
+}
+
+QPixmap game_icon_pixmap( const QString& gameName ){
+	const int size = 34;
+	QPixmap pixmap( size, size );
+	pixmap.fill( Qt::transparent );
+
+	uint seed = 0;
+	for ( const QChar c : gameName )
+	{
+		seed = seed * 33u + static_cast<uint>( c.unicode() );
+	}
+	const int hue = static_cast<int>( seed % 360u );
+	const QColor base = QColor::fromHsv( hue, 165, 180 );
+	const QColor accent = QColor::fromHsv( ( hue + 30 ) % 360, 150, 230 );
+
+	QPainter painter( &pixmap );
+	painter.setRenderHint( QPainter::Antialiasing, true );
+	QLinearGradient gradient( 0, 0, size, size );
+	gradient.setColorAt( 0.0, accent );
+	gradient.setColorAt( 1.0, base );
+	painter.setPen( Qt::NoPen );
+	painter.setBrush( gradient );
+	painter.drawRoundedRect( QRectF( 0, 0, size, size ), 8.0, 8.0 );
+
+	const QString initial = gameName.trimmed().isEmpty() ? QString( "?" ) : gameName.trimmed().left( 1 ).toUpper();
+	QFont font = painter.font();
+	font.setBold( true );
+	font.setPointSize( 12 );
+	painter.setFont( font );
+	painter.setPen( Qt::white );
+	painter.drawText( QRect( 0, 0, size, size ), Qt::AlignCenter, initial );
+	return pixmap;
+}
+
+GameInstallationState load_game_installation_state( QString* error ){
+	if ( error != nullptr ) {
+		error->clear();
+	}
+
+	GameInstallationState state;
+	const QString filePath = game_install_state_file_path();
+	if ( filePath.isEmpty() ) {
+		return state;
+	}
+
+	QFile file( filePath );
+	if ( !file.exists() ) {
+		return state;
+	}
+	if ( !file.open( QIODevice::ReadOnly ) ) {
+		if ( error != nullptr ) {
+			*error = QString( "Unable to open installation state: %1" ).arg( file.errorString() );
+		}
+		return state;
+	}
+
+	QJsonParseError parseError{};
+	const QJsonDocument doc = QJsonDocument::fromJson( file.readAll(), &parseError );
+	if ( parseError.error != QJsonParseError::NoError || !doc.isObject() ) {
+		if ( error != nullptr ) {
+			*error = QString( "Failed to parse installation state: %1" ).arg( parseError.errorString() );
+		}
+		return state;
+	}
+
+	const QJsonObject root = doc.object();
+	state.selectedGameFile = root.value( "selected_game_file" ).toString();
+
+	const QJsonObject selectedByGame = root.value( "selected_installation_by_game" ).toObject();
+	for ( auto it = selectedByGame.begin(); it != selectedByGame.end(); ++it )
+	{
+		if ( it.value().isString() ) {
+			state.selectedInstallByGame.insert( it.key(), it.value().toString() );
+		}
+	}
+
+	const QJsonArray installations = root.value( "installations" ).toArray();
+	state.installations.reserve( installations.size() );
+	for ( const QJsonValue& value : installations )
+	{
+		if ( !value.isObject() ) {
+			continue;
+		}
+		const QJsonObject object = value.toObject();
+		GameInstallationEntry entry;
+		entry.id = object.value( "id" ).toString();
+		entry.gameFile = object.value( "game_file" ).toString();
+		entry.name = object.value( "name" ).toString();
+		entry.path = object.value( "path" ).toString();
+		entry.engineExecutable = object.value( "engine_executable" ).toString();
+
+		if ( entry.id.isEmpty() || entry.gameFile.isEmpty() || entry.path.trimmed().isEmpty() ) {
+			continue;
+		}
+		entry.path = QDir::cleanPath( entry.path.trimmed() );
+		entry.name = entry.name.trimmed();
+		if ( entry.name.isEmpty() ) {
+			entry.name = QFileInfo( entry.path ).fileName();
+		}
+		state.installations.push_back( entry );
+	}
+
+	return state;
+}
+
+bool save_game_installation_state( const GameInstallationState& state, QString* error ){
+	if ( error != nullptr ) {
+		error->clear();
+	}
+
+	const QString filePath = game_install_state_file_path();
+	if ( filePath.isEmpty() ) {
+		if ( error != nullptr ) {
+			*error = "Global settings path is unavailable.";
+		}
+		return false;
+	}
+
+	QJsonObject root;
+	root.insert( "version", 1 );
+	root.insert( "selected_game_file", state.selectedGameFile );
+
+	QJsonObject selectedByGame;
+	for ( auto it = state.selectedInstallByGame.begin(); it != state.selectedInstallByGame.end(); ++it )
+	{
+		if ( !it.value().isEmpty() ) {
+			selectedByGame.insert( it.key(), it.value() );
+		}
+	}
+	root.insert( "selected_installation_by_game", selectedByGame );
+
+	QJsonArray installations;
+	for ( const GameInstallationEntry& entry : state.installations )
+	{
+		if ( entry.id.isEmpty() || entry.gameFile.isEmpty() || entry.path.trimmed().isEmpty() ) {
+			continue;
+		}
+		QJsonObject object;
+		object.insert( "id", entry.id );
+		object.insert( "game_file", entry.gameFile );
+		object.insert( "name", entry.name );
+		object.insert( "path", QDir::cleanPath( entry.path ) );
+		object.insert( "engine_executable", entry.engineExecutable.trimmed() );
+		installations.push_back( object );
+	}
+	root.insert( "installations", installations );
+
+	QFile file( filePath );
+	if ( !file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
+		if ( error != nullptr ) {
+			*error = QString( "Unable to save installation state: %1" ).arg( file.errorString() );
+		}
+		return false;
+	}
+	if ( file.write( QJsonDocument( root ).toJson( QJsonDocument::Indented ) ) < 0 ) {
+		if ( error != nullptr ) {
+			*error = QString( "Unable to write installation state: %1" ).arg( file.errorString() );
+		}
+		return false;
+	}
+	return true;
+}
+} // namespace
+
+const char* StartupGameInstallationPath_get(){
+	return g_startupGameInstallationPath.c_str();
+}
+
+const char* StartupGameInstallationEngineExecutable_get(){
+	return g_startupGameInstallationEngineExecutable.c_str();
+}
+
+const char* StartupGameInstallationId_get(){
+	return g_startupGameInstallationId.c_str();
+}
+
+bool StartupGameInstallationConfigured(){
+	return !g_startupGameInstallationPath.empty();
+}
+
+class GameInstallationEditorDialog : public QDialog
+{
+	const CGameDescription& m_game;
+	GameInstallationEntry m_entry;
+	QLineEdit* m_nameEdit = nullptr;
+	QLineEdit* m_pathEdit = nullptr;
+	QLineEdit* m_engineEdit = nullptr;
+
+public:
+	GameInstallationEditorDialog( const CGameDescription& game, const GameInstallationEntry& initial, QWidget* parent ) :
+		QDialog( parent ),
+		m_game( game ),
+		m_entry( initial ){
+		buildUi();
+		loadState();
+	}
+
+	const GameInstallationEntry& result() const {
+		return m_entry;
+	}
+
+private:
+	void buildUi(){
+		setModal( true );
+		setWindowTitle( m_entry.id.isEmpty() ? "Add Installation" : "Edit Installation" );
+		setMinimumWidth( 600 );
+
+		auto* root = new QVBoxLayout( this );
+		root->setContentsMargins( 18, 16, 18, 16 );
+		root->setSpacing( 12 );
+
+		auto* title = new QLabel( "Installation Settings", this );
+		QFont titleFont = title->font();
+		titleFont.setPointSize( titleFont.pointSize() + 3 );
+		titleFont.setBold( true );
+		title->setFont( titleFont );
+		root->addWidget( title );
+
+		auto* hint = new QLabel(
+			"Set the game installation directory and optional engine executable override for Run Map.",
+			this );
+		hint->setWordWrap( true );
+		root->addWidget( hint );
+
+		auto* form = new QGridLayout;
+		form->setColumnStretch( 0, 0 );
+		form->setColumnStretch( 1, 1 );
+		form->setHorizontalSpacing( 10 );
+		form->setVerticalSpacing( 10 );
+
+		form->addWidget( new QLabel( "Name", this ), 0, 0 );
+		m_nameEdit = new QLineEdit( this );
+		form->addWidget( m_nameEdit, 0, 1 );
+
+		form->addWidget( new QLabel( "Installation Path", this ), 1, 0 );
+		{
+			auto* rowWidget = new QWidget( this );
+			auto* row = new QHBoxLayout( rowWidget );
+			row->setContentsMargins( 0, 0, 0, 0 );
+			row->setSpacing( 8 );
+			m_pathEdit = new QLineEdit( rowWidget );
+			m_pathEdit->setPlaceholderText( "Directory containing game data and executables" );
+			auto* browse = new QPushButton( "Browse...", rowWidget );
+			row->addWidget( m_pathEdit, 1 );
+			row->addWidget( browse, 0 );
+			form->addWidget( rowWidget, 1, 1 );
+			QObject::connect( browse, &QPushButton::clicked, this, [this](){
+				const QString initial = m_pathEdit->text().trimmed();
+				const QString picked = QFileDialog::getExistingDirectory(
+					this,
+					"Choose Installation Directory",
+					initial.isEmpty() ? QString() : initial
+				);
+				if ( !picked.isEmpty() ) {
+					m_pathEdit->setText( QDir::cleanPath( picked ) );
+				}
+			} );
+		}
+
+		form->addWidget( new QLabel( "Engine Override", this ), 2, 0 );
+		{
+			auto* rowWidget = new QWidget( this );
+			auto* row = new QHBoxLayout( rowWidget );
+			row->setContentsMargins( 0, 0, 0, 0 );
+			row->setSpacing( 8 );
+			m_engineEdit = new QLineEdit( rowWidget );
+			m_engineEdit->setPlaceholderText( "Optional custom engine executable (absolute path or file name)" );
+			auto* browse = new QPushButton( "Browse...", rowWidget );
+			auto* clear = new QPushButton( "Use Default", rowWidget );
+			row->addWidget( m_engineEdit, 1 );
+			row->addWidget( browse, 0 );
+			row->addWidget( clear, 0 );
+			form->addWidget( rowWidget, 2, 1 );
+			QObject::connect( browse, &QPushButton::clicked, this, [this](){
+				const QString initial = m_engineEdit->text().trimmed();
+				const QString startDir = QFileInfo( initial ).exists()
+					? QFileInfo( initial ).absolutePath()
+					: m_pathEdit->text().trimmed();
+				const QString picked = QFileDialog::getOpenFileName(
+					this,
+					"Choose Engine Executable",
+					startDir
+				);
+				if ( !picked.isEmpty() ) {
+					m_engineEdit->setText( QDir::cleanPath( picked ) );
+				}
+			} );
+			QObject::connect( clear, &QPushButton::clicked, this, [this](){
+				m_engineEdit->clear();
+			} );
+		}
+
+		root->addLayout( form );
+
+		auto* defaults = new QLabel(
+			QString( "Game default engine: %1" ).arg( engine_default_for_game( m_game ) ),
+			this
+		);
+		defaults->setWordWrap( true );
+		root->addWidget( defaults );
+
+		auto* buttons = new QDialogButtonBox( QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this );
+		root->addWidget( buttons );
+		QObject::connect( buttons, &QDialogButtonBox::accepted, this, [this](){
+			if ( validateAndStore() ) {
+				accept();
+			}
+		} );
+		QObject::connect( buttons, &QDialogButtonBox::rejected, this, &QDialog::reject );
+	}
+
+	void loadState(){
+		if ( m_nameEdit != nullptr ) {
+			m_nameEdit->setText( m_entry.name.trimmed() );
+		}
+		if ( m_pathEdit != nullptr ) {
+			m_pathEdit->setText( QDir::cleanPath( m_entry.path.trimmed() ) );
+		}
+		if ( m_engineEdit != nullptr ) {
+			m_engineEdit->setText( m_entry.engineExecutable.trimmed() );
+		}
+
+		if ( m_nameEdit != nullptr && m_nameEdit->text().trimmed().isEmpty() ) {
+			m_nameEdit->setText( QString::fromUtf8( m_game.getRequiredKeyValue( "name" ) ) );
+		}
+	}
+
+	bool validateAndStore(){
+		const QString name = m_nameEdit != nullptr ? m_nameEdit->text().trimmed() : QString();
+		const QString path = m_pathEdit != nullptr ? m_pathEdit->text().trimmed() : QString();
+		const QString engine = m_engineEdit != nullptr ? m_engineEdit->text().trimmed() : QString();
+
+		if ( name.isEmpty() ) {
+			QMessageBox::warning( this, "Installation", "Name cannot be empty." );
+			return false;
+		}
+		if ( path.isEmpty() ) {
+			QMessageBox::warning( this, "Installation", "Installation path cannot be empty." );
+			return false;
+		}
+		const QFileInfo pathInfo( path );
+		if ( !pathInfo.exists() || !pathInfo.isDir() ) {
+			QMessageBox::warning( this, "Installation", QString( "Invalid installation directory:\n%1" ).arg( path ) );
+			return false;
+		}
+		if ( !engine.isEmpty() && path_is_absolute( engine.toUtf8().constData() ) ) {
+			const QFileInfo exeInfo( engine );
+			if ( !exeInfo.exists() || !exeInfo.isFile() ) {
+				QMessageBox::warning( this, "Installation", QString( "Invalid engine executable:\n%1" ).arg( engine ) );
+				return false;
+			}
+		}
+
+		m_entry.name = name;
+		m_entry.path = QDir::cleanPath( path );
+		m_entry.engineExecutable = engine;
+		return true;
+	}
+};
+
+class GameSetupManagerDialog : public QDialog
+{
+	QVector<const CGameDescription*> m_games;
+	GameInstallationState m_state;
+	QString m_selectedGameFile;
+	QString m_selectedInstallationId;
+
+	QStackedWidget* m_pages = nullptr;
+	QListWidget* m_gameList = nullptr;
+	QListWidget* m_installList = nullptr;
+	QLabel* m_installPageTitle = nullptr;
+	QPushButton* m_continueButton = nullptr;
+	QPushButton* m_removeGameInstallButton = nullptr;
+	QPushButton* m_finishButton = nullptr;
+	QPushButton* m_editInstallButton = nullptr;
+	QPushButton* m_removeInstallButton = nullptr;
+	QPushButton* m_detectGameButton = nullptr;
+	QPushButton* m_detectInstallButton = nullptr;
+	QHash<QString, QFrame*> m_gameRowFrames;
+	QHash<QString, QLabel*> m_gameRowBadges;
+
+public:
+	GameSetupManagerDialog(
+		QVector<const CGameDescription*> games,
+		GameInstallationState initialState,
+		const QString& initialGameFile,
+		QWidget* parent = nullptr ) :
+		QDialog( parent ),
+		m_games( std::move( games ) ),
+		m_state( std::move( initialState ) ),
+		m_selectedGameFile( initialGameFile ){
+		buildUi();
+		refreshGameList();
+		selectInitialGame();
+		updateGamePageState();
+	}
+
+	const GameInstallationState& state() const {
+		return m_state;
+	}
+
+	QString selectedGameFile() const {
+		return m_selectedGameFile;
+	}
+
+	QString selectedInstallationId() const {
+		return m_selectedInstallationId;
+	}
+
+private:
+	void buildUi(){
+		setModal( true );
+		setWindowTitle( "Game Setup" );
+		resize( 900, 620 );
+
+		auto* root = new QVBoxLayout( this );
+		root->setContentsMargins( 18, 16, 18, 16 );
+		root->setSpacing( 12 );
+
+		auto* title = new QLabel( "Game Setup", this );
+		QFont titleFont = title->font();
+		titleFont.setPointSize( titleFont.pointSize() + 6 );
+		titleFont.setBold( true );
+		title->setFont( titleFont );
+		root->addWidget( title );
+
+		auto* subtitle = new QLabel(
+			"Choose a game, manage its installations, then continue to select which installation VibeRadiant should use.",
+			this
+		);
+		subtitle->setWordWrap( true );
+		root->addWidget( subtitle );
+
+		m_pages = new QStackedWidget( this );
+		root->addWidget( m_pages, 1 );
+
+		buildGamePage();
+		buildInstallPage();
+	}
+
+	void buildGamePage(){
+		auto* page = new QWidget( m_pages );
+		auto* layout = new QVBoxLayout( page );
+		layout->setContentsMargins( 0, 0, 0, 0 );
+		layout->setSpacing( 10 );
+
+		m_gameList = new QListWidget( page );
+		m_gameList->setSelectionMode( QAbstractItemView::SingleSelection );
+		m_gameList->setSpacing( 4 );
+		layout->addWidget( m_gameList, 1 );
+
+		auto* buttons = new QHBoxLayout;
+		buttons->setSpacing( 8 );
+		auto* addInstall = new QPushButton( "Add Installation...", page );
+		m_removeGameInstallButton = new QPushButton( "Remove Installation...", page );
+		m_detectGameButton = new QPushButton( "Auto-detect", page );
+		m_continueButton = new QPushButton( "Continue", page );
+		auto* cancelButton = new QPushButton( "Cancel", page );
+		m_continueButton->setDefault( true );
+
+		buttons->addWidget( addInstall );
+		buttons->addWidget( m_removeGameInstallButton );
+		buttons->addWidget( m_detectGameButton );
+		buttons->addStretch( 1 );
+		buttons->addWidget( m_continueButton );
+		buttons->addWidget( cancelButton );
+		layout->addLayout( buttons );
+
+		m_pages->addWidget( page );
+
+		QObject::connect( m_gameList, &QListWidget::itemSelectionChanged, this, [this](){
+			updateGameSelectionState();
+		} );
+		QObject::connect( m_gameList, &QListWidget::itemDoubleClicked, this, [this]( QListWidgetItem* ){
+			openInstallSelectionPage();
+		} );
+		QObject::connect( addInstall, &QPushButton::clicked, this, [this](){
+			addInstallationForSelectedGame();
+		} );
+		QObject::connect( m_removeGameInstallButton, &QPushButton::clicked, this, [this](){
+			removeInstallationFromSelectedGame();
+		} );
+		QObject::connect( m_detectGameButton, &QPushButton::clicked, this, [this](){
+			autoDetectForSelectedGame();
+		} );
+		QObject::connect( m_continueButton, &QPushButton::clicked, this, [this](){
+			openInstallSelectionPage();
+		} );
+		QObject::connect( cancelButton, &QPushButton::clicked, this, &QDialog::reject );
+	}
+
+	void buildInstallPage(){
+		auto* page = new QWidget( m_pages );
+		auto* layout = new QVBoxLayout( page );
+		layout->setContentsMargins( 0, 0, 0, 0 );
+		layout->setSpacing( 10 );
+
+		m_installPageTitle = new QLabel( page );
+		QFont titleFont = m_installPageTitle->font();
+		titleFont.setPointSize( titleFont.pointSize() + 2 );
+		titleFont.setBold( true );
+		m_installPageTitle->setFont( titleFont );
+		layout->addWidget( m_installPageTitle );
+
+		m_installList = new QListWidget( page );
+		m_installList->setSelectionMode( QAbstractItemView::SingleSelection );
+		m_installList->setAlternatingRowColors( true );
+		layout->addWidget( m_installList, 1 );
+
+		auto* buttons = new QHBoxLayout;
+		buttons->setSpacing( 8 );
+		auto* addInstall = new QPushButton( "Add...", page );
+		m_editInstallButton = new QPushButton( "Edit...", page );
+		m_removeInstallButton = new QPushButton( "Remove", page );
+		m_detectInstallButton = new QPushButton( "Auto-detect", page );
+		auto* backButton = new QPushButton( "Back", page );
+		m_finishButton = new QPushButton( "Start with Installation", page );
+		m_finishButton->setDefault( true );
+
+		buttons->addWidget( addInstall );
+		buttons->addWidget( m_editInstallButton );
+		buttons->addWidget( m_removeInstallButton );
+		buttons->addWidget( m_detectInstallButton );
+		buttons->addStretch( 1 );
+		buttons->addWidget( backButton );
+		buttons->addWidget( m_finishButton );
+		layout->addLayout( buttons );
+
+		m_pages->addWidget( page );
+
+		QObject::connect( m_installList, &QListWidget::itemSelectionChanged, this, [this](){
+			updateInstallPageState();
+		} );
+		QObject::connect( m_installList, &QListWidget::itemDoubleClicked, this, [this]( QListWidgetItem* ){
+			acceptSelectedInstallation();
+		} );
+		QObject::connect( addInstall, &QPushButton::clicked, this, [this](){
+			addInstallationForSelectedGame();
+		} );
+		QObject::connect( m_editInstallButton, &QPushButton::clicked, this, [this](){
+			editSelectedInstallation();
+		} );
+		QObject::connect( m_removeInstallButton, &QPushButton::clicked, this, [this](){
+			removeSelectedInstallation();
+		} );
+		QObject::connect( m_detectInstallButton, &QPushButton::clicked, this, [this](){
+			autoDetectForSelectedGame();
+		} );
+		QObject::connect( backButton, &QPushButton::clicked, this, [this](){
+			m_pages->setCurrentIndex( 0 );
+			updateGamePageState();
+		} );
+		QObject::connect( m_finishButton, &QPushButton::clicked, this, [this](){
+			acceptSelectedInstallation();
+		} );
+	}
+
+	void refreshGameList(){
+		m_gameRowFrames.clear();
+		m_gameRowBadges.clear();
+		m_gameList->clear();
+		for ( const CGameDescription* game : m_games )
+		{
+			if ( game == nullptr ) {
+				continue;
+			}
+			const QString gameFile = QString::fromUtf8( game->mGameFile.c_str() );
+			const QString gameName = QString::fromUtf8( game->getRequiredKeyValue( "name" ) );
+			const int count = installation_count_for_game( m_state, gameFile );
+			if ( count <= 0 ) {
+				continue;
+			}
+
+			auto* item = new QListWidgetItem;
+			item->setData( Qt::UserRole, gameFile );
+			item->setSizeHint( QSize( 0, 66 ) );
+			m_gameList->addItem( item );
+
+			auto* frame = new QFrame( m_gameList );
+			auto* row = new QHBoxLayout( frame );
+			row->setContentsMargins( 12, 8, 12, 8 );
+			row->setSpacing( 10 );
+
+			auto* iconLabel = new QLabel( frame );
+			iconLabel->setPixmap( game_icon_pixmap( gameName ) );
+			iconLabel->setFixedSize( 34, 34 );
+			row->addWidget( iconLabel, 0, Qt::AlignVCenter );
+
+			auto* titleLabel = new QLabel( gameName, frame );
+			QFont nameFont = titleLabel->font();
+			nameFont.setPointSize( nameFont.pointSize() + 1 );
+			nameFont.setBold( true );
+			titleLabel->setFont( nameFont );
+			row->addWidget( titleLabel, 1, Qt::AlignVCenter );
+
+			auto* badge = new QLabel(
+				count == 1
+					? QStringLiteral( "1 installation" )
+					: QString( "%1 installations" ).arg( count ),
+				frame );
+			badge->setStyleSheet(
+				"QLabel { "
+				"background: palette(highlight); "
+				"color: palette(highlighted-text); "
+				"border: 1px solid palette(mid); "
+				"border-radius: 10px; "
+				"padding: 3px 10px; "
+				"font-weight: 600; "
+				"}"
+			);
+			row->addWidget( badge, 0, Qt::AlignVCenter );
+
+			frame->setToolTip( QString::fromUtf8( game->mGameFile.c_str() ) );
+			m_gameList->setItemWidget( item, frame );
+			m_gameRowFrames.insert( gameFile, frame );
+			m_gameRowBadges.insert( gameFile, badge );
+		}
+		updateGameSelectionState();
+	}
+
+	void refreshInstallList(){
+		m_installList->clear();
+		const QString gameFile = selectedGameFileFromList();
+		if ( gameFile.isEmpty() ) {
+			updateInstallPageState();
+			return;
+		}
+
+		const QVector<int> indexes = installation_indexes_for_game( m_state, gameFile );
+		for ( const int index : indexes )
+		{
+			const GameInstallationEntry& entry = m_state.installations[index];
+			auto* item = new QListWidgetItem( entry.name, m_installList );
+			item->setData( Qt::UserRole, entry.id );
+			item->setToolTip( installation_detail_text( entry ) );
+			item->setIcon( style()->standardIcon( QStyle::SP_DirOpenIcon ) );
+			item->setText( QString( "%1\n%2" ).arg( entry.name, QFileInfo( entry.path ).absoluteFilePath() ) );
+		}
+
+		QString preferredId = m_state.selectedInstallByGame.value( gameFile );
+		if ( preferredId.isEmpty() && !indexes.isEmpty() ) {
+			preferredId = m_state.installations[indexes.first()].id;
+		}
+
+		for ( int i = 0; i < m_installList->count(); ++i )
+		{
+			QListWidgetItem* item = m_installList->item( i );
+			if ( item != nullptr && item->data( Qt::UserRole ).toString() == preferredId ) {
+				m_installList->setCurrentItem( item );
+				break;
+			}
+		}
+		if ( m_installList->currentItem() == nullptr && m_installList->count() > 0 ) {
+			m_installList->setCurrentRow( 0 );
+		}
+		updateInstallPageState();
+	}
+
+	void selectInitialGame(){
+		QString initialGame = m_selectedGameFile;
+		if ( initialGame.isEmpty() ) {
+			initialGame = m_state.selectedGameFile;
+		}
+		if ( initialGame.isEmpty() && !m_games.isEmpty() ) {
+			initialGame = QString::fromUtf8( m_games.front()->mGameFile.c_str() );
+		}
+
+		for ( int i = 0; i < m_gameList->count(); ++i )
+		{
+			QListWidgetItem* item = m_gameList->item( i );
+			if ( item != nullptr && item->data( Qt::UserRole ).toString() == initialGame ) {
+				m_gameList->setCurrentItem( item );
+				break;
+			}
+		}
+		if ( m_gameList->currentItem() == nullptr && m_gameList->count() > 0 ) {
+			m_gameList->setCurrentRow( 0 );
+		}
+		updateGameSelectionState();
+	}
+
+	QString selectedGameFileFromList() const {
+		const QListWidgetItem* item = m_gameList->currentItem();
+		if ( item == nullptr ) {
+			return {};
+		}
+		return item->data( Qt::UserRole ).toString();
+	}
+
+	QString selectedInstallIdFromList() const {
+		const QListWidgetItem* item = m_installList->currentItem();
+		if ( item == nullptr ) {
+			return {};
+		}
+		return item->data( Qt::UserRole ).toString();
+	}
+
+	void updateGameSelectionState(){
+		m_selectedGameFile = selectedGameFileFromList();
+		for ( int i = 0; i < m_gameList->count(); ++i )
+		{
+			QListWidgetItem* item = m_gameList->item( i );
+			if ( item == nullptr ) {
+				continue;
+			}
+			const QString gameFile = item->data( Qt::UserRole ).toString();
+			if ( QFrame* frame = m_gameRowFrames.value( gameFile, nullptr ) ) {
+				const bool selected = ( gameFile == m_selectedGameFile );
+				frame->setStyleSheet(
+					selected
+					? "QFrame { border: 1px solid palette(highlight); border-radius: 10px; background: palette(alternate-base); }"
+					: "QFrame { border: 1px solid palette(midlight); border-radius: 10px; background: palette(base); }"
+				);
+			}
+			if ( QLabel* badge = m_gameRowBadges.value( gameFile, nullptr ) ) {
+				const int count = installation_count_for_game( m_state, gameFile );
+				badge->setText(
+					count == 1
+						? QStringLiteral( "1 installation" )
+						: QString( "%1 installations" ).arg( count ) );
+			}
+		}
+		updateGamePageState();
+		if ( m_pages->currentIndex() == 1 ) {
+			refreshInstallList();
+		}
+	}
+
+	const CGameDescription* promptGameForInstallation() {
+		QStringList labels;
+		QVector<const CGameDescription*> choices;
+		labels.reserve( m_games.size() );
+		choices.reserve( m_games.size() );
+		for ( const CGameDescription* game : m_games )
+		{
+			if ( game == nullptr ) {
+				continue;
+			}
+			const QString gameName = QString::fromUtf8( game->getRequiredKeyValue( "name" ) );
+			const QString gameFile = QString::fromUtf8( game->mGameFile.c_str() );
+			labels.push_back( QString( "%1 (%2)" ).arg( gameName, gameFile ) );
+			choices.push_back( game );
+		}
+		if ( choices.isEmpty() ) {
+			return nullptr;
+		}
+		bool ok = false;
+		const QString chosen = QInputDialog::getItem(
+			this,
+			"Choose Game",
+			"Game",
+			labels,
+			0,
+			false,
+			&ok
+		);
+		if ( !ok || chosen.isEmpty() ) {
+			return nullptr;
+		}
+		const int index = labels.indexOf( chosen );
+		if ( index < 0 || index >= choices.size() ) {
+			return nullptr;
+		}
+		return choices[index];
+	}
+
+	void updateGamePageState(){
+		const bool hasGame = !selectedGameFileFromList().isEmpty();
+		const int count = installation_count_for_game( m_state, selectedGameFileFromList() );
+		m_continueButton->setEnabled( hasGame && count > 0 );
+		m_removeGameInstallButton->setEnabled( hasGame && count > 0 );
+		m_detectGameButton->setEnabled( true );
+	}
+
+	void updateInstallPageState(){
+		const bool hasSelection = !selectedInstallIdFromList().isEmpty();
+		m_editInstallButton->setEnabled( hasSelection );
+		m_removeInstallButton->setEnabled( hasSelection );
+		m_finishButton->setEnabled( hasSelection );
+		m_detectInstallButton->setEnabled( !m_games.isEmpty() );
+	}
+
+	void openInstallSelectionPage(){
+		const QString gameFile = selectedGameFileFromList();
+		const CGameDescription* game = find_game_by_file( m_games, gameFile );
+		if ( game == nullptr ) {
+			return;
+		}
+		if ( installation_count_for_game( m_state, gameFile ) == 0 ) {
+			QMessageBox::information( this, "Game Setup", "Add or detect an installation before continuing." );
+			return;
+		}
+		m_installPageTitle->setText( QString( "Installations for %1" ).arg( game->getRequiredKeyValue( "name" ) ) );
+		refreshInstallList();
+		m_pages->setCurrentIndex( 1 );
+	}
+
+	bool gameHasInstallationPath( const QString& gameFile, const QString& path, const QString& skipId = QString() ) const {
+		for ( const GameInstallationEntry& entry : m_state.installations )
+		{
+			if ( entry.gameFile != gameFile ) {
+				continue;
+			}
+			if ( !skipId.isEmpty() && entry.id == skipId ) {
+				continue;
+			}
+			if ( installation_path_equal( entry.path, path ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	GameInstallationEntry* findInstallationForGamePath( const QString& gameFile, const QString& path ){
+		for ( GameInstallationEntry& entry : m_state.installations )
+		{
+			if ( entry.gameFile != gameFile ) {
+				continue;
+			}
+			if ( installation_path_equal( entry.path, path ) ) {
+				return &entry;
+			}
+		}
+		return nullptr;
+	}
+
+	void addInstallationForSelectedGame(){
+		if ( m_games.isEmpty() ) {
+			QMessageBox::warning( this, "Installation", "No game profiles are available. Install gamepacks first." );
+			return;
+		}
+
+		QString gameFile = selectedGameFileFromList();
+		const CGameDescription* game = find_game_by_file( m_games, gameFile );
+		if ( game == nullptr ) {
+			game = promptGameForInstallation();
+			if ( game != nullptr ) {
+				gameFile = QString::fromUtf8( game->mGameFile.c_str() );
+			}
+		}
+		if ( game == nullptr ) {
+			return;
+		}
+
+		GameInstallationEntry entry;
+		entry.id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+		entry.gameFile = gameFile;
+		entry.name = QString::fromUtf8( game->getRequiredKeyValue( "name" ) );
+
+		GameInstallationEditorDialog editor( *game, entry, this );
+		if ( editor.exec() != QDialog::Accepted ) {
+			return;
+		}
+
+		entry = editor.result();
+		if ( gameHasInstallationPath( gameFile, entry.path ) ) {
+			QMessageBox::warning( this, "Installation", "That installation path is already configured for this game." );
+			return;
+		}
+		if ( entry.name.trimmed().isEmpty() ) {
+			entry.name = choose_installation_name( *game, entry.path, m_state );
+		}
+		m_state.installations.push_back( entry );
+		m_state.selectedGameFile = gameFile;
+		m_state.selectedInstallByGame[gameFile] = entry.id;
+		m_selectedInstallationId = entry.id;
+		refreshGameList();
+		selectGameInList( gameFile );
+		if ( m_pages->currentIndex() == 1 ) {
+			refreshInstallList();
+		}
+	}
+
+	void removeInstallationFromSelectedGame(){
+		const QString gameFile = selectedGameFileFromList();
+		if ( gameFile.isEmpty() ) {
+			return;
+		}
+		const QVector<int> indexes = installation_indexes_for_game( m_state, gameFile );
+		if ( indexes.isEmpty() ) {
+			return;
+		}
+
+		int removeIndex = indexes.first();
+		if ( indexes.size() > 1 ) {
+			QStringList labels;
+			labels.reserve( indexes.size() );
+			for ( const int i : indexes )
+			{
+				const GameInstallationEntry& entry = m_state.installations[i];
+				labels.push_back( QString( "%1 - %2" ).arg( entry.name, QFileInfo( entry.path ).absoluteFilePath() ) );
+			}
+			bool ok = false;
+			const QString selected = QInputDialog::getItem(
+				this,
+				"Remove Installation",
+				"Choose installation to remove:",
+				labels,
+				0,
+				false,
+				&ok
+			);
+			if ( !ok || selected.isEmpty() ) {
+				return;
+			}
+			const int listIndex = labels.indexOf( selected );
+			if ( listIndex < 0 || listIndex >= indexes.size() ) {
+				return;
+			}
+			removeIndex = indexes[listIndex];
+		}
+
+		const GameInstallationEntry toRemove = m_state.installations[removeIndex];
+		if ( QMessageBox::question(
+				this,
+				"Remove Installation",
+				QString( "Remove \"%1\"?" ).arg( toRemove.name ) ) != QMessageBox::Yes ) {
+			return;
+		}
+
+		m_state.installations.removeAt( removeIndex );
+		if ( m_state.selectedInstallByGame.value( gameFile ) == toRemove.id ) {
+			m_state.selectedInstallByGame.remove( gameFile );
+		}
+		if ( m_selectedInstallationId == toRemove.id ) {
+			m_selectedInstallationId.clear();
+		}
+		refreshGameList();
+		selectGameInList( gameFile );
+		if ( m_pages->currentIndex() == 1 ) {
+			refreshInstallList();
+		}
+	}
+
+	void autoDetectForSelectedGame(){
+		if ( m_games.isEmpty() ) {
+			QMessageBox::warning( this, "Auto-detect", "No game profiles are available. Install gamepacks first." );
+			return;
+		}
+
+		const QString previousSelectedGame = selectedGameFileFromList();
+		int scannedGames = 0;
+		int detectedPaths = 0;
+		int added = 0;
+		int engineAssignedForNew = 0;
+		int engineUpdatedExisting = 0;
+		QString firstTouchedGame;
+
+		for ( const CGameDescription* game : m_games )
+		{
+			if ( game == nullptr ) {
+				continue;
+			}
+			++scannedGames;
+
+			const QString gameFile = QString::fromUtf8( game->mGameFile.c_str() );
+			const GameInstallationEntry* selectedEntry = find_installation_by_id( m_state, m_state.selectedInstallByGame.value( gameFile ) );
+			const QByteArray currentPath = ( selectedEntry != nullptr )
+				? selectedEntry->path.toUtf8()
+				: QByteArray();
+			const std::vector<DetectedGameInstallPath> detected = EnginePath_detectInstallationsForGame(
+				*game,
+				currentPath.isEmpty() ? nullptr : currentPath.constData()
+			);
+
+			for ( const DetectedGameInstallPath& install : detected )
+			{
+				const QString path = QDir::cleanPath( QString::fromUtf8( install.path.c_str() ).trimmed() );
+				if ( path.isEmpty() ) {
+					continue;
+				}
+				++detectedPaths;
+
+				const QString sourceHint = QString::fromUtf8( install.source.c_str() ).trimmed();
+				const QString bestEngine = detect_best_engine_executable_for_installation( *game, path ).trimmed();
+				if ( GameInstallationEntry* existing = findInstallationForGamePath( gameFile, path ); existing != nullptr ) {
+					if ( existing->name.trimmed().isEmpty()
+					  || installation_name_looks_autogenerated( *game, existing->name, existing->path, sourceHint ) ) {
+						existing->name = choose_installation_name( *game, existing->path, m_state, sourceHint, existing->id );
+					}
+					if ( !bestEngine.isEmpty() && existing->engineExecutable.trimmed() != bestEngine ) {
+						existing->engineExecutable = bestEngine;
+						++engineUpdatedExisting;
+						if ( firstTouchedGame.isEmpty() ) {
+							firstTouchedGame = gameFile;
+						}
+					}
+					if ( m_state.selectedInstallByGame.value( gameFile ).isEmpty() ) {
+						m_state.selectedInstallByGame[gameFile] = existing->id;
+					}
+					continue;
+				}
+
+				GameInstallationEntry entry;
+				entry.id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+				entry.gameFile = gameFile;
+				entry.path = path;
+				entry.name = choose_installation_name( *game, entry.path, m_state, sourceHint );
+				entry.engineExecutable = bestEngine;
+
+				m_state.installations.push_back( entry );
+				if ( m_state.selectedInstallByGame.value( gameFile ).isEmpty() ) {
+					m_state.selectedInstallByGame[gameFile] = entry.id;
+				}
+				if ( firstTouchedGame.isEmpty() ) {
+					firstTouchedGame = gameFile;
+				}
+				if ( !bestEngine.isEmpty() ) {
+					++engineAssignedForNew;
+				}
+				++added;
+			}
+		}
+
+		for ( const CGameDescription* game : m_games )
+		{
+			if ( game == nullptr ) {
+				continue;
+			}
+			const QString gameFile = QString::fromUtf8( game->mGameFile.c_str() );
+			if ( !m_state.selectedInstallByGame.value( gameFile ).isEmpty() ) {
+				continue;
+			}
+			const QVector<int> indexes = installation_indexes_for_game( m_state, gameFile );
+			if ( !indexes.isEmpty() ) {
+				m_state.selectedInstallByGame[gameFile] = m_state.installations[indexes.front()].id;
+			}
+		}
+
+		if ( added == 0 && engineUpdatedExisting == 0 ) {
+			QMessageBox::information( this, "Auto-detect", "No new installations or engine updates were detected." );
+			return;
+		}
+
+		refreshGameList();
+		QString focusGame = previousSelectedGame;
+		if ( installation_count_for_game( m_state, focusGame ) == 0 ) {
+			focusGame = firstTouchedGame;
+		}
+		if ( installation_count_for_game( m_state, focusGame ) == 0 && !m_state.selectedGameFile.isEmpty() ) {
+			focusGame = m_state.selectedGameFile;
+		}
+		if ( installation_count_for_game( m_state, focusGame ) == 0 && !m_state.installations.isEmpty() ) {
+			focusGame = m_state.installations.front().gameFile;
+		}
+		if ( !focusGame.isEmpty() ) {
+			m_state.selectedGameFile = focusGame;
+			selectGameInList( focusGame );
+			m_selectedInstallationId = m_state.selectedInstallByGame.value( focusGame );
+		}
+		if ( m_pages->currentIndex() == 1 ) {
+			refreshInstallList();
+		}
+		QMessageBox::information(
+			this,
+			"Auto-detect",
+			QString(
+				"Scanned %1 game profile(s).\n"
+				"Detected %2 installation path(s).\n"
+				"Added %3 installation(s).\n"
+				"Assigned engine for %4 new installation(s).\n"
+				"Updated engine for %5 existing installation(s)." )
+				.arg( scannedGames )
+				.arg( detectedPaths )
+				.arg( added )
+				.arg( engineAssignedForNew )
+				.arg( engineUpdatedExisting ) );
+	}
+
+	void editSelectedInstallation(){
+		const QString id = selectedInstallIdFromList();
+		GameInstallationEntry* entry = find_installation_by_id( m_state, id );
+		if ( entry == nullptr ) {
+			return;
+		}
+		const CGameDescription* game = find_game_by_file( m_games, entry->gameFile );
+		if ( game == nullptr ) {
+			return;
+		}
+
+		GameInstallationEditorDialog editor( *game, *entry, this );
+		if ( editor.exec() != QDialog::Accepted ) {
+			return;
+		}
+
+		GameInstallationEntry updated = editor.result();
+		if ( gameHasInstallationPath( entry->gameFile, updated.path, entry->id ) ) {
+			QMessageBox::warning( this, "Installation", "That installation path is already configured for this game." );
+			return;
+		}
+		*entry = updated;
+		m_state.selectedInstallByGame[entry->gameFile] = entry->id;
+		m_selectedInstallationId = entry->id;
+		refreshGameList();
+		selectGameInList( entry->gameFile );
+		refreshInstallList();
+	}
+
+	void removeSelectedInstallation(){
+		const QString id = selectedInstallIdFromList();
+		if ( id.isEmpty() ) {
+			return;
+		}
+		GameInstallationEntry* entry = find_installation_by_id( m_state, id );
+		if ( entry == nullptr ) {
+			return;
+		}
+		const QString gameFile = entry->gameFile;
+		if ( QMessageBox::question(
+				this,
+				"Remove Installation",
+				QString( "Remove \"%1\"?" ).arg( entry->name ) ) != QMessageBox::Yes ) {
+			return;
+		}
+
+		for ( int i = 0; i < m_state.installations.size(); ++i )
+		{
+			if ( m_state.installations[i].id == id ) {
+				m_state.installations.removeAt( i );
+				break;
+			}
+		}
+		if ( m_state.selectedInstallByGame.value( gameFile ) == id ) {
+			m_state.selectedInstallByGame.remove( gameFile );
+		}
+		if ( m_selectedInstallationId == id ) {
+			m_selectedInstallationId.clear();
+		}
+		refreshGameList();
+		selectGameInList( gameFile );
+		refreshInstallList();
+	}
+
+	void acceptSelectedInstallation(){
+		const QString gameFile = selectedGameFileFromList();
+		const QString installId = selectedInstallIdFromList();
+		if ( gameFile.isEmpty() || installId.isEmpty() ) {
+			return;
+		}
+		m_selectedGameFile = gameFile;
+		m_selectedInstallationId = installId;
+		m_state.selectedGameFile = gameFile;
+		m_state.selectedInstallByGame[gameFile] = installId;
+		accept();
+	}
+
+	void selectGameInList( const QString& gameFile ){
+		for ( int i = 0; i < m_gameList->count(); ++i )
+		{
+			QListWidgetItem* item = m_gameList->item( i );
+			if ( item != nullptr && item->data( Qt::UserRole ).toString() == gameFile ) {
+				m_gameList->setCurrentItem( item );
+				return;
+			}
+		}
+	}
+};
+
 void CGameDialog::LoadPrefs(){
 	// load global .pref file
 	const auto strGlobalPref = StringStream( g_Preferences.m_global_rc_path, PREFS_GLOBAL_FILENAME );
@@ -281,6 +1996,55 @@ void CGameDialog::CreateGlobalFrame( PreferencesPage& page, bool global ){
 	    ConstMemberCaller<CGameDialog, void(const IntImportCallback&), &CGameDialog::GameFileExport>( *this )
 	);
 	page.appendCheckBox( "Startup", "Show Global Preferences", m_bGamePrompt );
+	QPushButton* manageInstallations = page.appendButton( "Installations", "Manage Installations..." );
+	QObject::connect( manageInstallations, &QPushButton::clicked, [this, global](){
+		QVector<const CGameDescription*> gamesVector;
+		gamesVector.reserve( static_cast<int>( mGames.size() ) );
+		for ( const CGameDescription* game : mGames )
+		{
+			gamesVector.push_back( game );
+		}
+
+		QString stateError;
+		GameInstallationState installState = load_game_installation_state( &stateError );
+		if ( !stateError.isEmpty() ) {
+			QMessageBox::warning( g_Preferences.GetWidget(), "Installations", stateError );
+		}
+
+		GameSetupManagerDialog dialog(
+			gamesVector,
+			installState,
+			QString::fromUtf8( m_sGameFile.m_latched.c_str() ),
+			g_Preferences.GetWidget() );
+		if ( dialog.exec() != QDialog::Accepted ) {
+			return;
+		}
+
+		installState = dialog.state();
+		const QString selectedGameFile = dialog.selectedGameFile();
+		const QString selectedInstallId = dialog.selectedInstallationId();
+		if ( !selectedGameFile.isEmpty() ) {
+			installState.selectedGameFile = selectedGameFile;
+		}
+		if ( !selectedInstallId.isEmpty() && !selectedGameFile.isEmpty() ) {
+			installState.selectedInstallByGame[selectedGameFile] = selectedInstallId;
+		}
+
+		QString saveError;
+		if ( !save_game_installation_state( installState, &saveError ) && !saveError.isEmpty() ) {
+			QMessageBox::warning( g_Preferences.GetWidget(), "Installations", saveError );
+		}
+
+		if ( !selectedGameFile.isEmpty() ) {
+			const QByteArray gameFileUtf8 = selectedGameFile.toUtf8();
+			if ( global ) {
+				m_sGameFile.assign( gameFileUtf8.constData() );
+			}
+			else{
+				m_sGameFile.import( gameFileUtf8.constData() );
+			}
+		}
+	} );
 }
 
 void CGameDialog::BuildDialog(){
@@ -354,6 +2118,11 @@ void CGameDialog::Reset(){
 	}
 
 	file_remove( StringStream( g_Preferences.m_global_rc_path, PREFS_GLOBAL_FILENAME ) );
+	const QString statePath = game_install_state_file_path();
+	if ( !statePath.isEmpty() ) {
+		const QByteArray statePathUtf8 = statePath.toUtf8();
+		file_remove( statePathUtf8.constData() );
+	}
 }
 
 void CGameDialog::Init(){
@@ -374,23 +2143,161 @@ void CGameDialog::Init(){
 		} );
 	}
 
-	CGameDescription* currentGameDescription = 0;
-
-	if ( !m_bGamePrompt ) {
-		// search by .game name
-		if( auto found = std::ranges::find( mGames, m_sGameFile.m_value, &CGameDescription::mGameFile ); found != mGames.end() )
-			currentGameDescription = *found;
+	QVector<const CGameDescription*> games;
+	games.reserve( static_cast<int>( mGames.size() ) );
+	for ( const CGameDescription* game : mGames )
+	{
+		games.push_back( game );
 	}
-	if ( !currentGameDescription ) {
-		Create( nullptr );
-		DoGameDialog();
-		Destroy(); // destroy the window immediately, doing so in destructor of static object is too late
-		// use m_nComboSelect to identify the game to run as and set the globals
-		currentGameDescription = GameDescriptionForComboItem();
-		ASSERT_NOTNULL( currentGameDescription );
-	}
-	g_pGameDescription = currentGameDescription;
 
+	QString stateError;
+	GameInstallationState installState = load_game_installation_state( &stateError );
+	if ( !stateError.isEmpty() ) {
+		globalWarningStream() << stateError.toUtf8().constData() << '\n';
+	}
+
+	const auto gameExists = [&games]( const QString& gameFile ){
+		return find_game_by_file( games, gameFile ) != nullptr;
+	};
+
+	// Drop stale installation entries whose game no longer exists or whose path vanished.
+	for ( int i = installState.installations.size() - 1; i >= 0; --i )
+	{
+		const GameInstallationEntry& entry = installState.installations[i];
+		if ( !gameExists( entry.gameFile ) ) {
+			installState.installations.removeAt( i );
+			continue;
+		}
+		const QFileInfo pathInfo( entry.path );
+		if ( !pathInfo.exists() || !pathInfo.isDir() ) {
+			installState.installations.removeAt( i );
+		}
+	}
+	for ( auto it = installState.selectedInstallByGame.begin(); it != installState.selectedInstallByGame.end(); )
+	{
+		const GameInstallationEntry* selected = find_installation_by_id( installState, it.value() );
+		if ( selected == nullptr || selected->gameFile != it.key() ) {
+			it = installState.selectedInstallByGame.erase( it );
+			continue;
+		}
+		++it;
+	}
+
+	const QString prefGameFile = QString::fromUtf8( m_sGameFile.m_value.c_str() );
+	const auto resolveSelection =
+		[&]( const QString& preferredGameFile,
+		     const QString& preferredInstallId,
+		     QString* outGameFile,
+		     QString* outInstallId ) -> bool {
+			const auto tryGame = [&]( const QString& gameFile, const QString& installId )->bool {
+				if ( gameFile.isEmpty() || !gameExists( gameFile ) ) {
+					return false;
+				}
+				const QVector<int> indexes = installation_indexes_for_game( installState, gameFile );
+				if ( indexes.isEmpty() ) {
+					return false;
+				}
+
+				QString selectedId = installId;
+				if ( selectedId.isEmpty() ) {
+					selectedId = installState.selectedInstallByGame.value( gameFile );
+				}
+				const GameInstallationEntry* selected = find_installation_by_id( installState, selectedId );
+				if ( selected == nullptr || selected->gameFile != gameFile ) {
+					selected = &installState.installations[indexes.first()];
+				}
+
+				if ( outGameFile != nullptr ) {
+					*outGameFile = gameFile;
+				}
+				if ( outInstallId != nullptr ) {
+					*outInstallId = selected->id;
+				}
+				return true;
+			};
+
+			if ( tryGame( preferredGameFile, preferredInstallId ) ) {
+				return true;
+			}
+			if ( tryGame( installState.selectedGameFile, installState.selectedInstallByGame.value( installState.selectedGameFile ) ) ) {
+				return true;
+			}
+			if ( tryGame( prefGameFile, installState.selectedInstallByGame.value( prefGameFile ) ) ) {
+				return true;
+			}
+			for ( const GameInstallationEntry& entry : installState.installations )
+			{
+				if ( tryGame( entry.gameFile, entry.id ) ) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+	QString selectedGameFile = prefGameFile;
+	QString selectedInstallId = installState.selectedInstallByGame.value( selectedGameFile );
+	bool hasSelection = resolveSelection( selectedGameFile, selectedInstallId, &selectedGameFile, &selectedInstallId );
+	bool userCancelledSetup = false;
+
+	if ( m_bGamePrompt || !hasSelection ) {
+		while ( true )
+		{
+			GameSetupManagerDialog dialog( games, installState, selectedGameFile );
+			const int code = dialog.exec();
+			if ( code == QDialog::Accepted ) {
+				installState = dialog.state();
+				selectedGameFile = dialog.selectedGameFile();
+				selectedInstallId = dialog.selectedInstallationId();
+				hasSelection = resolveSelection( selectedGameFile, selectedInstallId, &selectedGameFile, &selectedInstallId );
+				if ( hasSelection ) {
+					break;
+				}
+			}
+			else{
+				userCancelledSetup = true;
+				break;
+			}
+		}
+	}
+
+	if ( userCancelledSetup ) {
+		std::exit( EXIT_SUCCESS );
+	}
+
+	if ( !hasSelection ) {
+		Error( "No game installation configured. Configure at least one installation to continue.\n" );
+	}
+
+	const CGameDescription* selectedGame = find_game_by_file( games, selectedGameFile );
+	if ( selectedGame == nullptr ) {
+		Error( "Selected game profile '%s' is no longer available.\n", selectedGameFile.toUtf8().constData() );
+	}
+	const GameInstallationEntry* selectedInstall = find_installation_by_id( installState, selectedInstallId );
+	if ( selectedInstall == nullptr || selectedInstall->gameFile != selectedGameFile ) {
+		const QVector<int> indexes = installation_indexes_for_game( installState, selectedGameFile );
+		if ( indexes.isEmpty() ) {
+			Error( "No installation configured for selected game profile '%s'.\n", selectedGameFile.toUtf8().constData() );
+		}
+		selectedInstall = &installState.installations[indexes.first()];
+		selectedInstallId = selectedInstall->id;
+	}
+
+	installState.selectedGameFile = selectedGameFile;
+	installState.selectedInstallByGame[selectedGameFile] = selectedInstallId;
+
+	QString saveStateError;
+	if ( !save_game_installation_state( installState, &saveStateError ) && !saveStateError.isEmpty() ) {
+		globalWarningStream() << saveStateError.toUtf8().constData() << '\n';
+	}
+
+	m_sGameFile.assign( selectedGameFile.toUtf8().constData() );
+	SavePrefs();
+
+	g_startupGameInstallationPath = selectedInstall->path.toUtf8().constData();
+	g_startupGameInstallationEngineExecutable = selectedInstall->engineExecutable.toUtf8().constData();
+	g_startupGameInstallationId = selectedInstall->id.toUtf8().constData();
+
+	g_pGameDescription = const_cast<CGameDescription*>( selectedGame );
 	g_pGameDescription->Dump();
 }
 
@@ -538,6 +2445,15 @@ void PreferencesDialog_addSettingsPage( const PreferenceGroupCallback& callback 
 	PreferenceGroupCallbacks_pushBack( g_settingsCallbacks, callback );
 }
 
+PreferencesPageCallbacks g_genAIPreferences;
+void PreferencesDialog_addGenAIPreferences( const PreferencesPageCallback& callback ){
+	PreferencesPageCallbacks_pushBack( g_genAIPreferences, callback );
+}
+PreferenceGroupCallbacks g_genAICallbacks;
+void PreferencesDialog_addGenAIPage( const PreferenceGroupCallback& callback ){
+	PreferenceGroupCallbacks_pushBack( g_genAICallbacks, callback );
+}
+
 void Widget_connectToggleDependency( QWidget* self, QCheckBox* toggleButton ){
 	class EnabledTracker : public QObject
 	{
@@ -580,12 +2496,21 @@ QStandardItem* PreferenceTree_appendPage( QStandardItemModel* model, QStandardIt
 }
 
 auto PreferencePages_addPage( QStackedWidget* notebook, const char* name ){
+	auto *scroll = new QScrollArea( notebook );
+	scroll->setWidgetResizable( true );
+	scroll->setFrameShape( QFrame::NoFrame );
+	scroll->setHorizontalScrollBarPolicy( Qt::ScrollBarAsNeeded );
+	scroll->setVerticalScrollBarPolicy( Qt::ScrollBarAsNeeded );
+
 	auto *frame = new QGroupBox( i18n::tr( name ) );
+	frame->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Preferred );
 	auto *grid = new QGridLayout( frame );
 	grid->setAlignment( Qt::AlignmentFlag::AlignTop );
 	grid->setColumnStretch( 0, 111 );
 	grid->setColumnStretch( 1, 333 );
-	return std::pair( notebook->addWidget( frame ), grid );
+
+	scroll->setWidget( frame );
+	return std::pair( notebook->addWidget( scroll ), grid );
 }
 
 struct PreferenceSearchEntry
@@ -731,7 +2656,12 @@ public:
 };
 
 void PrefsDlg::BuildDialog(){
-	PreferencesDialog_addInterfacePreferences( makeCallbackF( Interface_constructPreferences ) );
+	static bool preferencesCallbacksRegistered = false;
+	if ( !preferencesCallbacksRegistered ) {
+		preferencesCallbacksRegistered = true;
+		PreferencesDialog_addInterfacePreferences( makeCallbackF( Interface_constructPreferences ) );
+		PreferencesDialog_addInterfacePreferences( makeCallbackF( theme_construct_preferences ) );
+	}
 
 	GetWidget()->setWindowTitle( i18n::tr( "VibeRadiant Preferences" ) );
 
@@ -864,6 +2794,19 @@ void PrefsDlg::BuildDialog(){
 
 				PreferenceGroupCallbacks_constructGroup( g_settingsCallbacks, preferenceGroup );
 			}
+
+			{
+				const auto [ pageIndex, layout ] = PreferencePages_addPage( m_notebook, "GenAI Settings" );
+				{
+					PreferencesPage preferencesPage( *this, layout );
+					PreferencesPageCallbacks_constructPage( g_genAIPreferences, preferencesPage );
+				}
+
+				QStandardItem *group = PreferenceTree_appendPage( m_treeModel, m_treeModel->invisibleRootItem(), "GenAI", pageIndex );
+				PreferenceTreeGroup preferenceGroup( *this, m_notebook, m_treeModel, group );
+
+				PreferenceGroupCallbacks_constructGroup( g_genAICallbacks, preferenceGroup );
+			}
 		}
 
 		QObject::connect( m_treeview->selectionModel(), &QItemSelectionModel::currentChanged, [this]( const QModelIndex& current ){
@@ -941,8 +2884,25 @@ void PrefsDlg::BuildDialog(){
 		} );
 	}
 
-	GetWidget()->setMinimumSize( 720, 540 );
-	GetWidget()->resize( 900, 700 );
+	QScreen* screen = GetWidget()->screen();
+	if ( screen == nullptr ) {
+		screen = QGuiApplication::screenAt( QCursor::pos() );
+	}
+	if ( screen == nullptr ) {
+		screen = QGuiApplication::primaryScreen();
+	}
+
+	const QRect available = ( screen != nullptr )
+		? screen->availableGeometry()
+		: QRect( 0, 0, 1280, 800 );
+	const int maxWidth = std::max( 640, static_cast<int>( available.width() * 0.95 ) );
+	const int maxHeight = std::max( 480, static_cast<int>( available.height() * 0.95 ) );
+	const int minWidth = std::min( 720, maxWidth );
+	const int minHeight = std::min( 540, maxHeight );
+
+	GetWidget()->setMinimumSize( minWidth, minHeight );
+	GetWidget()->setMaximumSize( maxWidth, maxHeight );
+	GetWidget()->resize( std::min( 900, maxWidth ), std::min( 700, maxHeight ) );
 }
 
 preferences_globals_t g_preferences_globals;
@@ -959,6 +2919,9 @@ void PreferencesDialog_destroyWindow(){
 
 
 PreferenceDictionary g_preferences;
+static bool g_startupWelcomeShowOnStartup = true;
+static bool g_startupModernJourneyEnabled = true;
+static bool g_startupShowLoadingScreen = true;
 
 PreferenceSystem& GetPreferenceSystem(){
 	return g_preferences;
@@ -1029,7 +2992,15 @@ void PreferencesDialog_restartRequired( const char* staticName ){
 
 void PreferencesDialog_showDialog(){
 	//if ( ConfirmModified( "Edit Preferences" ) && g_Preferences.DoModal() == eIDOK ) {
-	g_Preferences.m_searchEdit->setFocus();
+	if ( g_Preferences.m_searchEdit != nullptr ) {
+		g_Preferences.m_searchEdit->setFocus();
+	}
+	if ( g_Preferences.m_treeview != nullptr && g_Preferences.m_treeview->model() != nullptr ) {
+		g_Preferences.m_treeview->setCurrentIndex( g_Preferences.m_treeview->model()->index( 0, 0 ) );
+	}
+	if ( g_Preferences.m_searchEdit != nullptr ) {
+		g_Preferences.m_searchEdit->clear();
+	}
 	if ( g_Preferences.DoModal() == QDialog::DialogCode::Accepted ) {
 		if ( !g_restart_required.empty() ) {
 			auto message = StringStream( "Preference changes require a restart:\n\n" );
@@ -1041,6 +3012,30 @@ void PreferencesDialog_showDialog(){
 			if( qt_MessageBox( MainFrame_getWindow(), message, "Restart is required", EMessageBoxType::Question ) == eIDYES )
 				Radiant_Restart();
 		}
+	}
+}
+
+void PreferencesDialog_showDialogForQuery( const char* query ){
+	if ( g_Preferences.m_searchEdit != nullptr && query != nullptr && !string_empty( query ) ) {
+		g_Preferences.m_searchEdit->setText( query );
+	}
+	if ( g_Preferences.m_searchEdit != nullptr ) {
+		g_Preferences.m_searchEdit->setFocus();
+	}
+	if ( g_Preferences.DoModal() == QDialog::DialogCode::Accepted ) {
+		if ( !g_restart_required.empty() ) {
+			auto message = StringStream( "Preference changes require a restart:\n\n" );
+			for ( const auto *i : g_restart_required )
+				message << i << '\n';
+			g_restart_required.clear();
+			message << "\nRestart now?";
+
+			if( qt_MessageBox( MainFrame_getWindow(), message, "Restart is required", EMessageBoxType::Question ) == eIDYES )
+				Radiant_Restart();
+		}
+	}
+	if ( g_Preferences.m_searchEdit != nullptr ) {
+		g_Preferences.m_searchEdit->clear();
 	}
 }
 
@@ -1066,14 +3061,41 @@ void GameMode_exportString( const StringImportCallback& importer ){
 }
 typedef FreeCaller<void(const StringImportCallback&), GameMode_exportString> GameModeExportStringCaller;
 
+void StartupWelcome_constructPreferences( PreferencesPage& page ){
+	page.appendCheckBox( "Startup", i18n::tr( "Show welcome screen on startup" ).toUtf8().constData(), g_startupWelcomeShowOnStartup );
+	page.appendCheckBox( "", i18n::tr( "Use modern startup journey" ).toUtf8().constData(), g_startupModernJourneyEnabled );
+	page.appendCheckBox( "", i18n::tr( "Show loading screen during startup" ).toUtf8().constData(), g_startupShowLoadingScreen );
+}
+
 
 void RegisterPreferences( PreferenceSystem& preferences ){
 	preferences.registerPreference( "CustomShaderEditorCommand", CopiedStringImportStringCaller( g_TextEditor_editorCommand ), CopiedStringExportStringCaller( g_TextEditor_editorCommand ) );
 
 	preferences.registerPreference( "GameName", GameNameImportStringCaller(), GameNameExportStringCaller() );
 	preferences.registerPreference( "GameMode", GameModeImportStringCaller(), GameModeExportStringCaller() );
+	preferences.registerPreference( "StartupShowWelcome", BoolImportStringCaller( g_startupWelcomeShowOnStartup ), BoolExportStringCaller( g_startupWelcomeShowOnStartup ) );
+	preferences.registerPreference( "ShowStartupWelcome", BoolImportStringCaller( g_startupWelcomeShowOnStartup ), BoolExportStringCaller( g_startupWelcomeShowOnStartup ) ); // legacy compatibility
+	preferences.registerPreference( "StartupModernJourney", BoolImportStringCaller( g_startupModernJourneyEnabled ), BoolExportStringCaller( g_startupModernJourneyEnabled ) );
+	preferences.registerPreference( "StartupShowLoadingScreen", BoolImportStringCaller( g_startupShowLoadingScreen ), BoolExportStringCaller( g_startupShowLoadingScreen ) );
 }
 
 void Preferences_Init(){
+	PreferencesDialog_addSettingsPreferences( makeCallbackF( StartupWelcome_constructPreferences ) );
 	RegisterPreferences( GetPreferenceSystem() );
+}
+
+bool StartupWelcome_ShowOnStartup(){
+	return g_startupWelcomeShowOnStartup;
+}
+
+void StartupWelcome_SetShowOnStartup( bool show ){
+	g_startupWelcomeShowOnStartup = show;
+}
+
+bool StartupJourney_ModernEnabled(){
+	return g_startupModernJourneyEnabled;
+}
+
+bool StartupJourney_ShowLoadingScreen(){
+	return g_startupShowLoadingScreen;
 }

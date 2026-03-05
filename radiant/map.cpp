@@ -910,10 +910,11 @@ void Scene_CountStuff( int& ents_ingame, int& groupents, int& groupents_ingame )
 #include <QLabel>
 #include <QTreeWidget>
 #include <QHeaderView>
+#include "gtkutil/i18n.h"
 
 void DoMapInfo(){
 	QDialog dialog( MainFrame_getWindow(), Qt::Dialog | Qt::WindowCloseButtonHint );
-	dialog.setWindowTitle( "Map Info" );
+	dialog.setWindowTitle( i18n::tr( "Map Info" ) );
 
 	auto *w_brushes = new QLabel;
 	auto *w_patches = new QLabel;
@@ -932,25 +933,25 @@ void DoMapInfo(){
 	tree->header()->setStretchLastSection( false ); // non greedy column sizing
 	tree->header()->setSectionResizeMode( QHeaderView::ResizeMode::ResizeToContents ); // no text elision
 	tree->setRootIsDecorated( false );
-	tree->setHeaderLabels( { "Entity", "Count" } );
+	tree->setHeaderLabels( { i18n::tr( "Entity" ), i18n::tr( "Count" ) } );
 
 	{
 		auto *grid = new QGridLayout( &dialog );
 
-		grid->addWidget( new QLabel( "Total Brushes:" ), 0, 0 );
+		grid->addWidget( new QLabel( i18n::tr( "Total Brushes:" ) ), 0, 0 );
 		grid->addWidget( w_brushes, 0, 1 );
-		grid->addWidget( new QLabel( "Total Patches:" ), 1, 0 );
+		grid->addWidget( new QLabel( i18n::tr( "Total Patches:" ) ), 1, 0 );
 		grid->addWidget( w_patches, 1, 1 );
-		grid->addWidget( new QLabel( "Total Entities:" ), 2, 0 );
+		grid->addWidget( new QLabel( i18n::tr( "Total Entities:" ) ), 2, 0 );
 		grid->addWidget( w_ents, 2, 1 );
-		grid->addWidget( new QLabel( "Ingame Entities:" ), 0, 2 );
+		grid->addWidget( new QLabel( i18n::tr( "Ingame Entities:" ) ), 0, 2 );
 		grid->addWidget( w_ents_ingame, 0, 3 );
-		grid->addWidget( new QLabel( "Group Entities:" ), 1, 2 );
+		grid->addWidget( new QLabel( i18n::tr( "Group Entities:" ) ), 1, 2 );
 		grid->addWidget( w_groupents, 1, 3 );
-		grid->addWidget( new QLabel( "Ingame Group Entities:" ), 2, 2 );
+		grid->addWidget( new QLabel( i18n::tr( "Ingame Group Entities:" ) ), 2, 2 );
 		grid->addWidget( w_groupents_ingame, 2, 3 );
 
-		grid->addWidget( new QLabel( "*** Entity breakdown ***" ), 3, 0, 1, 4, Qt::AlignmentFlag::AlignCenter );
+		grid->addWidget( new QLabel( i18n::tr( "*** Entity breakdown ***" ) ), 3, 0, 1, 4, Qt::AlignmentFlag::AlignCenter );
 
 		grid->addWidget( tree, 4, 0, 1, 4 );
 	}
@@ -2531,7 +2532,7 @@ static void GetSelectionIndex( int *ent, int *brush ){
 
 void DoFind(){
 	QDialog dialog( MainFrame_getWindow(), Qt::Dialog | Qt::WindowCloseButtonHint );
-	dialog.setWindowTitle( "Find Brush" );
+	dialog.setWindowTitle( i18n::tr( "Find Brush" ) );
 
 	auto *entity = new SpinBox( 0, 999999 );
 	entity->setButtonSymbols( QAbstractSpinBox::ButtonSymbols::NoButtons );
@@ -2541,11 +2542,11 @@ void DoFind(){
 		auto *form = new QFormLayout( &dialog );
 		form->setSizeConstraint( QLayout::SizeConstraint::SetFixedSize );
 
-		form->addRow( new SpinBoxLabel( "Entity number", entity ), entity );
-		form->addRow( new SpinBoxLabel( "Brush number", brush ), brush );
+		form->addRow( new SpinBoxLabel( i18n::tr( "Entity number" ), entity ), entity );
+		form->addRow( new SpinBoxLabel( i18n::tr( "Brush number" ), brush ), brush );
 		{
 			auto *buttons = new QDialogButtonBox( QDialogButtonBox::StandardButton::Close );
-			buttons->addButton( "Find", QDialogButtonBox::ButtonRole::AcceptRole );
+			buttons->addButton( i18n::tr( "Find" ), QDialogButtonBox::ButtonRole::AcceptRole );
 			form->addWidget( buttons );
 			QObject::connect( buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept );
 			QObject::connect( buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject );

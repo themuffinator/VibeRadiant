@@ -122,6 +122,8 @@ void PreferencesDialog_addDisplayPreferences( const PreferencesPageCallback& cal
 void PreferencesDialog_addDisplayPage( const PreferenceGroupCallback& callback );
 void PreferencesDialog_addSettingsPreferences( const PreferencesPageCallback& callback );
 void PreferencesDialog_addSettingsPage( const PreferenceGroupCallback& callback );
+void PreferencesDialog_addGenAIPreferences( const PreferencesPageCallback& callback );
+void PreferencesDialog_addGenAIPage( const PreferenceGroupCallback& callback );
 
 void PreferencesDialog_restartRequired( const char* staticName );
 
@@ -178,29 +180,20 @@ class CGameDescription
 public:
 	CopiedString mGameFile;   ///< the .game file that describes this game
 	GameDescription m_gameDescription;
+	GameDescription m_gameDescriptionNormalised;
 
 	CopiedString mGameToolsPath;   ///< the explicit path to the game-dependent modules
 	CopiedString mGameType;   ///< the type of the engine
 
-	const char* getKeyValue( const char* key ) const {
-		GameDescription::const_iterator i = m_gameDescription.find( key );
-		if ( i != m_gameDescription.end() ) {
-			return ( *i ).second.c_str();
-		}
-		return "";
-	}
-	const char* getRequiredKeyValue( const char* key ) const {
-		GameDescription::const_iterator i = m_gameDescription.find( key );
-		if ( i != m_gameDescription.end() ) {
-			return ( *i ).second.c_str();
-		}
-		ERROR_MESSAGE( "game attribute " << Quoted( key ) << " not found in " << Quoted( mGameFile ) );
-		return "";
-	}
+	const char* getKeyValue( const char* key ) const;
+	const char* getRequiredKeyValue( const char* key ) const;
 
 	CGameDescription( xmlDocPtr pDoc, const CopiedString &GameFile );
 
 	void Dump();
+
+private:
+	static CopiedString normaliseKey( const char* key );
 };
 
 extern CGameDescription *g_pGameDescription;
@@ -319,6 +312,11 @@ private:
  */
 extern CGameDialog g_GamesDialog;
 
+const char* StartupGameInstallationPath_get();
+const char* StartupGameInstallationEngineExecutable_get();
+const char* StartupGameInstallationId_get();
+bool StartupGameInstallationConfigured();
+
 
 class PrefsDlg : public Dialog
 {
@@ -377,6 +375,7 @@ void PreferencesDialog_constructWindow( QWidget* main_window );
 void PreferencesDialog_destroyWindow();
 
 void PreferencesDialog_showDialog();
+void PreferencesDialog_showDialogForQuery( const char* query );
 
 void GlobalPreferences_Init();
 void Preferences_Init();
@@ -385,3 +384,9 @@ void Preferences_Load();
 void Preferences_Save();
 
 void Preferences_Reset();
+
+bool StartupWelcome_ShowOnStartup();
+void StartupWelcome_SetShowOnStartup( bool show );
+
+bool StartupJourney_ModernEnabled();
+bool StartupJourney_ShowLoadingScreen();

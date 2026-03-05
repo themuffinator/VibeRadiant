@@ -125,10 +125,23 @@ DOWNLOAD_GAMEPACKS is set:
 - all: include proprietary packs
 - no: skip downloads
 
+Install source selection is controlled by GAMEPACK_SOURCE:
+- VibePack (default): canonical VibeRadiant source pack
+- NRCPack: legacy source pack
+- auto: prefer VibePack, then NRCPack
+
+The installer now stages from exactly one source and cleans stale gamepack
+entries first, so each game resolves to a single installed pack. During
+install, legacy `.def` entity definitions are converted to `.fgd`,
+`entityclasstype` is rewritten to use `fgd`, and remaining legacy `.def`
+files fail the install. Existing/generated `.fgd` files are also retyped
+with key-metadata heuristics (including safe numeric-option folding into
+`choices` controls) to improve typed editor controls.
+
 If you skip downloads, you can fetch and install later:
 
   ./download-gamepacks.sh
-  ./install-gamepacks.sh ./install/gamepacks
+  GAMEPACK_SOURCE=VibePack ./install-gamepacks.sh ./install/gamepacks
 
 Clean/rebuild
 -------------

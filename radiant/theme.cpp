@@ -27,6 +27,7 @@
 #include <QFont>
 #include <QGuiApplication>
 #include <QMenu>
+#include <QSettings>
 #include <QStyleHints>
 #include <array>
 #include <algorithm>
@@ -173,6 +174,21 @@ bool os_prefers_dark_theme(){
 		return false;
 	}
 #endif
+
+#if defined( WIN32 )
+	const QSettings personalize(
+		"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+		QSettings::NativeFormat );
+	const QVariant appsUseLightTheme = personalize.value( "AppsUseLightTheme" );
+	if ( appsUseLightTheme.isValid() ) {
+		return appsUseLightTheme.toInt() == 0;
+	}
+	const QVariant systemUsesLightTheme = personalize.value( "SystemUsesLightTheme" );
+	if ( systemUsesLightTheme.isValid() ) {
+		return systemUsesLightTheme.toInt() == 0;
+	}
+#endif
+
 	return qApp->palette().color( QPalette::Window ).lightnessF() < 0.5f;
 }
 

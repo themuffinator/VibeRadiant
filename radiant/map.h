@@ -103,6 +103,8 @@ bool Map_SaveFile( const char* filename );
 
 void Map_New();
 void Map_Free();
+void NewMap();
+void OpenMap();
 
 void Map_RegionOff();
 

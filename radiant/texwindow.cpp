@@ -606,7 +606,7 @@ inline const char *TextureBrowser_getCommonShadersDir() {
 }
 
 inline int TextureBrowser_fontHeight() {
-  return GlobalOpenGL().m_font->getPixelHeight();
+  return OpenGLFont_getPixelHeightSafe();
 }
 
 const char *TextureBrowser_GetSelectedShader() {
@@ -1391,7 +1391,7 @@ void TextureBrowser_OpenShaderEditor() {
 void TextureBrowser::draw() {
   evaluateHeight();
   const int fontHeight = TextureBrowser_fontHeight();
-  const int fontDescent = GlobalOpenGL().m_font->getPixelDescent();
+  const int fontDescent = OpenGLFont_getPixelDescentSafe();
   const int originy = getOriginY();
   updateHoverAnimation();
   const bool hoverActive = !m_hoverShader.empty();
@@ -1571,20 +1571,20 @@ void TextureBrowser::draw() {
       // draw black shadow/outline
       gl().glColor3f(0, 0, 0);
       gl().glRasterPos2i(x + 1, y - fontHeight - fontDescent + 3 - 1);
-      GlobalOpenGL().drawString(path_get_filename_start(shader->getName()));
+      OpenGLFont_drawStringSafe(path_get_filename_start(shader->getName()));
       gl().glRasterPos2i(x + 1, y - fontHeight - fontDescent + 3 + 1);
-      GlobalOpenGL().drawString(path_get_filename_start(shader->getName()));
+      OpenGLFont_drawStringSafe(path_get_filename_start(shader->getName()));
       gl().glRasterPos2i(x - 1, y - fontHeight - fontDescent + 3 - 1);
-      GlobalOpenGL().drawString(path_get_filename_start(shader->getName()));
+      OpenGLFont_drawStringSafe(path_get_filename_start(shader->getName()));
       gl().glRasterPos2i(x - 1, y - fontHeight - fontDescent + 3 + 1);
-      GlobalOpenGL().drawString(path_get_filename_start(shader->getName()));
+      OpenGLFont_drawStringSafe(path_get_filename_start(shader->getName()));
 
       // draw white text
       gl().glColor3f(1, 1, 1);
       gl().glRasterPos2i(x, y - fontHeight - fontDescent + 3); //+5
 
       // don't draw the directory name
-      GlobalOpenGL().drawString(path_get_filename_start(shader->getName()));
+      OpenGLFont_drawStringSafe(path_get_filename_start(shader->getName()));
     }
   }
 
@@ -2559,32 +2559,32 @@ void TextureBrowser_ContextMenu(TextureBrowser &texBro, qreal deviceScale) {
 
   menu->addSeparator();
 
-  menu->addAction("Open Shader",
+  menu->addAction(i18n::tr("Open Shader"),
                   [&]() {
                     DoShaderView(shader->getShaderFileName(), shader->getName(),
                                  false);
                   })
       ->setDisabled(shader->IsDefault());
 
-  menu->addAction("Open Shader Externally",
+  menu->addAction(i18n::tr("Open Shader Externally"),
                   [&]() {
                     DoShaderView(shader->getShaderFileName(), shader->getName(),
                                  true);
                   })
       ->setDisabled(shader->IsDefault());
 
-  menu->addAction("Shader Info",
+  menu->addAction(i18n::tr("Shader Info"),
                   [&]() {
                     DoShaderInfoDlg(shader->getName(),
-                                    shader->getShaderFileName(), "Shader Info");
+                                    shader->getShaderFileName(), i18n::tr("Shader Info").toUtf8().constData());
                   })
       ->setDisabled(shader->IsDefault());
 
   menu->addSeparator();
 
-  menu->addAction("Select Textured Objects",
+  menu->addAction(i18n::tr("Select Textured Objects"),
                   [&]() { Scene_BrushPatchSelectByShader(shader->getName()); });
-  menu->addAction("Select Textured Surfaces",
+  menu->addAction(i18n::tr("Select Textured Surfaces"),
                   [&]() { Select_FacesAndPatchesByShader(shader->getName()); });
 
   menu->addSeparator();
@@ -2602,7 +2602,7 @@ void TextureBrowser_ContextMenu(TextureBrowser &texBro, qreal deviceScale) {
       texBro.m_recent_folders
           .empty()); // click empty submenu, then normal = qt warning
 
-  menu->addAction("-> Shader's Folder",
+  menu->addAction(i18n::tr("-> Shader's Folder"),
                   [&]() {
                     TextureBrowser_ShowDirectoryOfShader(texBro,
                                                          shader->getName());
@@ -2611,7 +2611,7 @@ void TextureBrowser_ContextMenu(TextureBrowser &texBro, qreal deviceScale) {
   // -> common/
   menu->addAction(QString("-> ") + TextureBrowser_getCommonShadersDir(), [&]() {
     ScopeDisableScreenUpdates disableScreenUpdates(
-        TextureBrowser_getCommonShadersDir(), "Loading Textures");
+        TextureBrowser_getCommonShadersDir(), i18n::tr("Loading Textures").toUtf8().constData());
     TextureBrowser_ShowDirectory(TextureBrowser_getCommonShadersDir());
     texBro.queueDraw();
   });
@@ -2713,12 +2713,12 @@ TextureBrowser_updateFlagFilterButton(TextureBrowser &textureBrowser,
   const char *mode = matchAll ? "All" : "Any";
 
   if (count == 0) {
-    button->setText(QString::fromLatin1(label));
+    button->setText(i18n::tr(label));
   } else {
-    button->setText(QString::fromLatin1("%1: %2 (%3)")
-                        .arg(QString::fromLatin1(label))
+    button->setText(i18n::tr("%1: %2 (%3)")
+                        .arg(i18n::tr(label))
                         .arg(count)
-                        .arg(QString::fromLatin1(mode)));
+                        .arg(i18n::tr(mode)));
   }
 
   const auto nameFunc = surface ? TextureBrowser_getSurfaceFlagName
@@ -2756,8 +2756,8 @@ static QMenu *TextureBrowser_buildFlagMenu(TextureBrowser &textureBrowser,
 
   auto *modeGroup = new QActionGroup(menu);
   modeGroup->setExclusive(true);
-  auto *matchAny = menu->addAction("Match any");
-  auto *matchAll = menu->addAction("Match all");
+  auto *matchAny = menu->addAction(i18n::tr("Match any"));
+  auto *matchAll = menu->addAction(i18n::tr("Match all"));
   matchAny->setCheckable(true);
   matchAll->setCheckable(true);
   modeGroup->addAction(matchAny);
@@ -2774,7 +2774,7 @@ static QMenu *TextureBrowser_buildFlagMenu(TextureBrowser &textureBrowser,
   });
 
   menu->addSeparator();
-  auto *clearAction = menu->addAction("Clear filter");
+  auto *clearAction = menu->addAction(i18n::tr("Clear filter"));
   QObject::connect(clearAction, &QAction::triggered, [surface]() {
     TextureBrowser_clearFlagMenu(surface ? g_TexBro.m_surfaceFilterMenu
                                          : g_TexBro.m_contentFilterMenu);
@@ -2987,18 +2987,18 @@ QWidget *TextureBrowser_constructWindow(QWidget *toplevel) {
                          menu_view->windowFlags()); // don't reset windowFlags
 
     // view menu button
-    toolbar_append_button(toolbar, "View", "texbro_view.png",
+    toolbar_append_button(toolbar, i18n::tr("View").toUtf8().constData(), "texbro_view.png",
                           PointerCaller<QMenu, void(), +[](QMenu *menu) {
                             menu->popup(QCursor::pos());
                           }>(menu_view));
 
-    toolbar_append_button(toolbar, "Find / Replace...",
+    toolbar_append_button(toolbar, i18n::tr("Find / Replace...").toUtf8().constData(),
                           "texbro_find-replace.png", "FindReplaceTextures");
 
-    toolbar_append_button(toolbar, "Flush & Reload Shaders",
+    toolbar_append_button(toolbar, i18n::tr("Flush & Reload Shaders").toUtf8().constData(),
                           "texbro_refresh.png", "RefreshShaders");
 
-    toolbar_append_button(toolbar, "Shader Editor", "shadernotex.png",
+    toolbar_append_button(toolbar, i18n::tr("Shader Editor").toUtf8().constData(), "shadernotex.png",
                           "TextureBrowserShaderEditor");
   }
   { // filter bar
@@ -3011,12 +3011,12 @@ QWidget *TextureBrowser_constructWindow(QWidget *toplevel) {
     filterLayout->addWidget(entry, 1);
     entry->setClearButtonEnabled(true);
     entry->setFocusPolicy(Qt::FocusPolicy::ClickFocus);
-    entry->setPlaceholderText("Filter textures");
+    entry->setPlaceholderText(i18n::tr("Filter textures"));
 
     QAction *action = g_TexBro.m_filter_action =
         entry->addAction(QIcon(), QLineEdit::LeadingPosition);
     TextureBrowser_filterSetModeIcon(action);
-    action->setToolTip("Toggle match mode (start / any position)");
+    action->setToolTip(i18n::tr("Toggle match mode (start / any position)"));
 
     QObject::connect(entry, &QLineEdit::textChanged, [](const QString &text) {
       g_TexBro.m_filter_string = text.toLatin1().constData();
@@ -3055,7 +3055,7 @@ QWidget *TextureBrowser_constructWindow(QWidget *toplevel) {
     clearButton->setAutoRaise(true);
     clearButton->setFocusPolicy(Qt::NoFocus);
     clearButton->setIcon(new_local_icon("f-reset.png"));
-    clearButton->setToolTip("Clear filters");
+    clearButton->setToolTip(i18n::tr("Clear filters"));
     filterLayout->addWidget(clearButton);
     QObject::connect(clearButton, &QToolButton::clicked, []() {
       if (g_TexBro.m_filter_entry != nullptr) {
@@ -3078,7 +3078,7 @@ QWidget *TextureBrowser_constructWindow(QWidget *toplevel) {
     if (disableOpenGL) {
       g_TexBro.m_gl_widget = nullptr;
       hbox->addWidget(glwidget_createDisabledPlaceholder(
-          "OpenGL disabled (Textures)", nullptr));
+          i18n::tr("OpenGL disabled (Textures)").toUtf8().constData(), nullptr));
     } else {
       g_TexBro.m_gl_widget = new TexWndGLWidget(g_TexBro);
       hbox->addWidget(g_TexBro.m_gl_widget);

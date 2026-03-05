@@ -76,6 +76,7 @@
 
 #include "gtkutil/messagebox.h"
 #include "gtkutil/image.h"
+#include "gtkutil/i18n.h"
 #include "console.h"
 #include "texwindow.h"
 #include "map.h"
@@ -89,10 +90,37 @@
 #include "stacktrace.h"
 #include "error.h"
 #include "update.h"
+#include "url.h"
+#include "mru.h"
+#include "qe3.h"
 
 #include <QApplication>
+#include <QDate>
+#include <QDialog>
+#include <QElapsedTimer>
+#include <QFrame>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QCheckBox>
+#include <QLabel>
+#include <QProgressBar>
+#include <QPushButton>
+#include <QResizeEvent>
+#include <QScreen>
 #include <QTimer>
+#include <QVBoxLayout>
+#include <algorithm>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
 #include "gtkutil/glwidget.h"
+
+#ifdef WIN32
+#include <windows.h>
+#include <dbghelp.h>
+#endif
 
 void show_splash();
 void set_splash_status( const char* status );
@@ -131,6 +159,240 @@ void qute_messageHandler( QtMsgType type, const QMessageLogContext &context, con
 	case QtFatalMsg:    globalErrorStream() << buf; break;
 	}
 }
+
+#ifdef WIN32
+namespace
+{
+using MiniDumpWriteDumpFn = BOOL( WINAPI* )( HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
+                                             PMINIDUMP_EXCEPTION_INFORMATION,
+                                             PMINIDUMP_USER_STREAM_INFORMATION,
+                                             PMINIDUMP_CALLBACK_INFORMATION );
+
+LONG g_crashReportInProgress = 0;
+bool g_crashReportHandlersInstalled = false;
+char g_crashReportDir[MAX_PATH] = {};
+
+class CrashLogTextOutputStream : public TextOutputStream
+{
+	FILE* m_file = nullptr;
+public:
+	explicit CrashLogTextOutputStream( FILE* file ) : m_file( file ){
+	}
+	std::size_t write( const char* buffer, std::size_t length ) override {
+		return m_file != nullptr ? fwrite( buffer, 1, length, m_file ) : 0;
+	}
+};
+
+void CrashReport_selectDirectory(){
+	const char* envOverride = std::getenv( "VIBERADIANT_CRASH_DIR" );
+	if ( envOverride != nullptr && envOverride[0] != '\0' ) {
+		std::snprintf( g_crashReportDir, sizeof( g_crashReportDir ), "%s", envOverride );
+	}
+	else
+	{
+		const char* base = SettingsPath_get();
+		if ( base == nullptr || base[0] == '\0' ) {
+			base = environment_get_home_path();
+		}
+		if ( base == nullptr || base[0] == '\0' ) {
+			base = ".";
+		}
+		std::snprintf( g_crashReportDir, sizeof( g_crashReportDir ), "%s%s", base, "crashes/" );
+	}
+
+	const std::size_t length = std::strlen( g_crashReportDir );
+	if ( length > 0 && g_crashReportDir[length - 1] != '/' && g_crashReportDir[length - 1] != '\\' ) {
+		if ( length + 1 < sizeof( g_crashReportDir ) ) {
+			g_crashReportDir[length] = '/';
+			g_crashReportDir[length + 1] = '\0';
+		}
+	}
+}
+
+void CrashReport_ensureDirectory(){
+	if ( g_crashReportDir[0] == '\0' ) {
+		CrashReport_selectDirectory();
+	}
+	Q_mkdir( g_crashReportDir );
+}
+
+void CrashReport_buildFilePaths( char* logPath, std::size_t logPathSize, char* dumpPath, std::size_t dumpPathSize ){
+	SYSTEMTIME st;
+	GetLocalTime( &st );
+	const DWORD pid = GetCurrentProcessId();
+	const DWORD tid = GetCurrentThreadId();
+	std::snprintf( logPath, logPathSize,
+	               "%sviberadiant-crash-%04u%02u%02u-%02u%02u%02u-p%lu-t%lu.log",
+	               g_crashReportDir,
+	               static_cast<unsigned>( st.wYear ), static_cast<unsigned>( st.wMonth ),
+	               static_cast<unsigned>( st.wDay ), static_cast<unsigned>( st.wHour ),
+	               static_cast<unsigned>( st.wMinute ), static_cast<unsigned>( st.wSecond ),
+	               static_cast<unsigned long>( pid ), static_cast<unsigned long>( tid ) );
+	std::snprintf( dumpPath, dumpPathSize,
+	               "%sviberadiant-crash-%04u%02u%02u-%02u%02u%02u-p%lu-t%lu.dmp",
+	               g_crashReportDir,
+	               static_cast<unsigned>( st.wYear ), static_cast<unsigned>( st.wMonth ),
+	               static_cast<unsigned>( st.wDay ), static_cast<unsigned>( st.wHour ),
+	               static_cast<unsigned>( st.wMinute ), static_cast<unsigned>( st.wSecond ),
+	               static_cast<unsigned long>( pid ), static_cast<unsigned long>( tid ) );
+}
+
+bool CrashReport_writeMinidump( const char* dumpPath, EXCEPTION_POINTERS* exceptionPointers, FILE* log ){
+	HMODULE dbghelp = LoadLibraryA( "DbgHelp.dll" );
+	if ( dbghelp == nullptr ) {
+		if ( log != nullptr ) {
+			std::fprintf( log, "MiniDump: failed to load DbgHelp.dll (error=%lu)\n",
+			              static_cast<unsigned long>( GetLastError() ) );
+		}
+		return false;
+	}
+
+	const MiniDumpWriteDumpFn writeDump = reinterpret_cast<MiniDumpWriteDumpFn>(
+	    GetProcAddress( dbghelp, "MiniDumpWriteDump" ) );
+	if ( writeDump == nullptr ) {
+		if ( log != nullptr ) {
+			std::fprintf( log, "MiniDump: failed to resolve MiniDumpWriteDump (error=%lu)\n",
+			              static_cast<unsigned long>( GetLastError() ) );
+		}
+		FreeLibrary( dbghelp );
+		return false;
+	}
+
+	HANDLE dumpFile = CreateFileA( dumpPath, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr );
+	if ( dumpFile == INVALID_HANDLE_VALUE ) {
+		if ( log != nullptr ) {
+			std::fprintf( log, "MiniDump: failed to create dump file '%s' (error=%lu)\n",
+			              dumpPath, static_cast<unsigned long>( GetLastError() ) );
+		}
+		FreeLibrary( dbghelp );
+		return false;
+	}
+
+	MINIDUMP_EXCEPTION_INFORMATION dumpExceptionInfo = {};
+	dumpExceptionInfo.ThreadId = GetCurrentThreadId();
+	dumpExceptionInfo.ExceptionPointers = exceptionPointers;
+	dumpExceptionInfo.ClientPointers = FALSE;
+
+	const MINIDUMP_TYPE dumpType = static_cast<MINIDUMP_TYPE>(
+	    MiniDumpWithDataSegs
+	  | MiniDumpWithHandleData
+	  | MiniDumpWithThreadInfo
+	  | MiniDumpWithUnloadedModules
+	  | MiniDumpWithProcessThreadData
+	  | MiniDumpScanMemory );
+
+	const BOOL ok = writeDump(
+	    GetCurrentProcess(),
+	    GetCurrentProcessId(),
+	    dumpFile,
+	    dumpType,
+	    exceptionPointers != nullptr ? &dumpExceptionInfo : nullptr,
+	    nullptr,
+	    nullptr );
+	const DWORD writeError = ok ? ERROR_SUCCESS : GetLastError();
+
+	CloseHandle( dumpFile );
+	FreeLibrary( dbghelp );
+
+	if ( log != nullptr ) {
+		if ( ok ) {
+			std::fprintf( log, "MiniDump: wrote '%s'\n", dumpPath );
+		}
+		else{
+			std::fprintf( log, "MiniDump: failed to write '%s' (error=%lu)\n",
+			              dumpPath, static_cast<unsigned long>( writeError ) );
+		}
+	}
+
+	return ok == TRUE;
+}
+
+void CrashReport_write( const char* reason, EXCEPTION_POINTERS* exceptionPointers ){
+	if ( InterlockedCompareExchange( &g_crashReportInProgress, 1, 0 ) != 0 ) {
+		return;
+	}
+
+	CrashReport_ensureDirectory();
+
+	char logPath[MAX_PATH] = {};
+	char dumpPath[MAX_PATH] = {};
+	CrashReport_buildFilePaths( logPath, sizeof( logPath ), dumpPath, sizeof( dumpPath ) );
+
+	FILE* log = std::fopen( logPath, "wt" );
+	if ( log != nullptr ) {
+		const DWORD pid = GetCurrentProcessId();
+		const DWORD tid = GetCurrentThreadId();
+		std::fprintf( log, "VibeRadiant crash report\n" );
+		std::fprintf( log, "reason: %s\n", reason != nullptr ? reason : "unknown" );
+		std::fprintf( log, "pid: %lu\n", static_cast<unsigned long>( pid ) );
+		std::fprintf( log, "tid: %lu\n", static_cast<unsigned long>( tid ) );
+		std::fprintf( log, "version: %s\n", RADIANT_VERSION_NUMBER );
+		if ( exceptionPointers != nullptr && exceptionPointers->ExceptionRecord != nullptr ) {
+			const EXCEPTION_RECORD* record = exceptionPointers->ExceptionRecord;
+			std::fprintf( log, "exceptionCode: 0x%08lX\n", static_cast<unsigned long>( record->ExceptionCode ) );
+			std::fprintf( log, "exceptionAddress: %p\n", record->ExceptionAddress );
+			std::fprintf( log, "exceptionFlags: 0x%08lX\n", static_cast<unsigned long>( record->ExceptionFlags ) );
+		}
+		else{
+			std::fprintf( log, "exceptionCode: n/a\n" );
+			std::fprintf( log, "exceptionAddress: n/a\n" );
+		}
+
+		CrashLogTextOutputStream stream( log );
+		stream << "stacktrace:\n";
+		write_stack_trace( stream );
+		stream << "end stacktrace\n";
+
+		std::fflush( log );
+	}
+
+	CrashReport_writeMinidump( dumpPath, exceptionPointers, log );
+
+	if ( log != nullptr ) {
+		std::fprintf( log, "logFile: %s\n", logPath );
+		std::fclose( log );
+	}
+}
+
+LONG WINAPI CrashReport_unhandledExceptionFilter( EXCEPTION_POINTERS* exceptionPointers ){
+	CrashReport_write( "UnhandledExceptionFilter", exceptionPointers );
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void CrashReport_signalHandler( int signum ){
+	CrashReport_write( "signal", nullptr );
+	std::_Exit( signum );
+}
+
+void CrashReport_terminateHandler(){
+	CrashReport_write( "std::terminate", nullptr );
+	std::_Exit( EXIT_FAILURE );
+}
+
+void CrashReport_InstallHandlers(){
+	const char* disable = std::getenv( "VIBERADIANT_DISABLE_CRASH_REPORTING" );
+	if ( disable != nullptr && disable[0] != '\0' && std::strcmp( disable, "0" ) != 0 ) {
+		return;
+	}
+
+	CrashReport_selectDirectory();
+	CrashReport_ensureDirectory();
+
+	if ( g_crashReportHandlersInstalled ) {
+		return;
+	}
+	g_crashReportHandlersInstalled = true;
+
+	SetUnhandledExceptionFilter( CrashReport_unhandledExceptionFilter );
+	std::signal( SIGABRT, CrashReport_signalHandler );
+	std::signal( SIGSEGV, CrashReport_signalHandler );
+	std::signal( SIGFPE, CrashReport_signalHandler );
+	std::signal( SIGILL, CrashReport_signalHandler );
+	std::set_terminate( CrashReport_terminateHandler );
+}
+} // namespace
+#endif
+
 class Lock
 {
 	bool m_locked;
@@ -349,6 +611,9 @@ void create_global_pid(){
 
 void remove_global_pid(){
 	const auto g_pidFile = StringStream( SettingsPath_get(), "viberadiant.pid" );
+	if ( !file_exists( g_pidFile ) ) {
+		return;
+	}
 	// close the primary
 	if ( remove( g_pidFile ) == -1 ) {
 		qt_MessageBox( 0, StringStream( "WARNING: Could not delete ", g_pidFile ), "VibeRadiant", EMessageBoxType::Error );
@@ -400,8 +665,551 @@ void create_local_pid(){
    http://zerowing.idsoftware.com/bugzilla/show_bug.cgi?id=297
  */
 void remove_local_pid(){
-	remove( StringStream( SettingsPath_get(), g_pGameDescription->mGameFile, "/viberadiant-game.pid" ) );
+	if ( g_pGameDescription == nullptr ) {
+		return;
+	}
+	const auto g_pidGameFile = StringStream( SettingsPath_get(), g_pGameDescription->mGameFile, "/viberadiant-game.pid" );
+	if ( !file_exists( g_pidGameFile ) ) {
+		return;
+	}
+	if ( remove( g_pidGameFile ) == -1 ) {
+		qt_MessageBox( 0, StringStream( "WARNING: Could not delete ", g_pidGameFile ), "VibeRadiant", EMessageBoxType::Error );
+	}
 }
+
+namespace
+{
+class StartupJourneyMetrics
+{
+	struct Entry
+	{
+		CopiedString label;
+		qint64 durationMs = 0;
+	};
+
+	QElapsedTimer m_timer;
+	qint64 m_lastElapsed = 0;
+	std::vector<Entry> m_entries;
+public:
+	StartupJourneyMetrics(){
+		m_timer.start();
+	}
+
+	void mark( const char* label ){
+		const qint64 elapsed = m_timer.elapsed();
+		Entry e;
+		e.label = label ? label : "unknown";
+		e.durationMs = elapsed - m_lastElapsed;
+		m_entries.push_back( e );
+		m_lastElapsed = elapsed;
+	}
+
+	void flushToLog() const {
+		globalOutputStream() << "Startup journey timings:\n";
+		for ( const auto& e : m_entries )
+		{
+			globalOutputStream() << "  - " << e.label.c_str() << ": " << static_cast<int>( e.durationMs ) << " ms\n";
+		}
+	}
+};
+
+struct StartupCliOptions
+{
+	bool legacyFlow = false;
+	bool noLoadingScreen = false;
+	bool noWelcome = false;
+	bool diagnostics = false;
+	bool debugSkipToLoading = false;
+	bool debugMainWindowOnly = false;
+	bool debugFastForward() const {
+		return debugSkipToLoading || debugMainWindowOnly;
+	}
+};
+
+StartupCliOptions startup_parse_cli_options( int argc, char* argv[] ){
+	StartupCliOptions options;
+	for ( int i = 1; i < argc; ++i )
+	{
+		const char* const arg = argv[i];
+		if ( string_equal( arg, "-startup-legacy-flow" ) ) {
+			options.legacyFlow = true;
+		}
+		else if ( string_equal( arg, "-startup-no-loading-screen" ) ) {
+			options.noLoadingScreen = true;
+		}
+		else if ( string_equal( arg, "-startup-no-welcome" ) ) {
+			options.noWelcome = true;
+		}
+		else if ( string_equal( arg, "-startup-diagnostics" ) ) {
+			options.diagnostics = true;
+		}
+		else if ( string_equal( arg, "-startup-debug-skip-to-loading" ) ) {
+			options.debugSkipToLoading = true;
+		}
+		else if ( string_equal( arg, "-startup-debug-mainwindow-only" ) ) {
+			options.debugMainWindowOnly = true;
+		}
+	}
+	return options;
+}
+
+class StartupLoadingDialog : public QDialog
+{
+	QLabel *m_title = nullptr;
+	QLabel *m_status = nullptr;
+	QProgressBar *m_progress = nullptr;
+public:
+	explicit StartupLoadingDialog() : QDialog( nullptr, Qt::FramelessWindowHint | Qt::Dialog ){
+		setModal( false );
+		setWindowTitle( i18n::tr( "VibeRadiant Loading" ) );
+		setAttribute( Qt::WA_DeleteOnClose, false );
+		setMinimumSize( 560, 220 );
+
+		auto *root = new QVBoxLayout( this );
+		root->setContentsMargins( 24, 24, 24, 24 );
+		root->setSpacing( 12 );
+
+		auto *card = new QFrame( this );
+		card->setFrameShape( QFrame::StyledPanel );
+		card->setObjectName( "startupLoadingCard" );
+		root->addWidget( card );
+
+		auto *layout = new QVBoxLayout( card );
+		layout->setContentsMargins( 16, 16, 16, 16 );
+		layout->setSpacing( 10 );
+
+		m_title = new QLabel( i18n::tr( "Loading VibeRadiant" ), card );
+		auto titleFont = m_title->font();
+		titleFont.setPointSize( titleFont.pointSize() + 2 );
+		titleFont.setBold( true );
+		m_title->setFont( titleFont );
+		layout->addWidget( m_title );
+
+		m_status = new QLabel( i18n::tr( "Preparing startup..." ), card );
+		m_status->setWordWrap( true );
+		layout->addWidget( m_status );
+
+		m_progress = new QProgressBar( card );
+		m_progress->setRange( 0, 100 );
+		m_progress->setValue( 0 );
+		layout->addWidget( m_progress );
+	}
+
+	void setProgress( int value, const char* text ){
+		m_progress->setValue( value < 0 ? 0 : ( value > 100 ? 100 : value ) );
+		m_status->setText( text ? QString::fromLatin1( text ) : i18n::tr( "Preparing startup..." ) );
+	}
+};
+
+void loading_show( StartupLoadingDialog*& dialog ){
+	if ( dialog == nullptr ) {
+		dialog = new StartupLoadingDialog();
+	}
+	dialog->show();
+	dialog->raise();
+	dialog->activateWindow();
+}
+
+void loading_hide( StartupLoadingDialog*& dialog ){
+	if ( dialog != nullptr ) {
+		dialog->hide();
+		delete dialog;
+		dialog = nullptr;
+	}
+}
+
+class StartupRuntimeGuard
+{
+	bool m_messageHandlerInstalled = false;
+	bool m_logOpen = false;
+	bool m_radiantInitialised = false;
+	bool m_globalPidActive = false;
+	bool m_localPidActive = false;
+	bool m_splashVisible = false;
+	StartupLoadingDialog* m_loadingDialog = nullptr;
+public:
+	~StartupRuntimeGuard(){
+		cleanup();
+	}
+
+	void markMessageHandlerInstalled(){
+		m_messageHandlerInstalled = true;
+	}
+
+	void openLog(){
+		if ( !m_logOpen ) {
+			Sys_LogFile( true );
+			m_logOpen = true;
+		}
+	}
+
+	void closeLog(){
+		if ( m_logOpen ) {
+			Sys_LogFile( false );
+			m_logOpen = false;
+		}
+	}
+
+	void createGlobalPid(){
+		create_global_pid();
+		m_globalPidActive = true;
+	}
+
+	void removeGlobalPid(){
+		if ( m_globalPidActive ) {
+			remove_global_pid();
+			m_globalPidActive = false;
+		}
+	}
+
+	void createLocalPid(){
+		create_local_pid();
+		m_localPidActive = true;
+	}
+
+	void removeLocalPid(){
+		if ( m_localPidActive ) {
+			remove_local_pid();
+			m_localPidActive = false;
+		}
+	}
+
+	void showSplash(){
+		if ( !m_splashVisible ) {
+			::show_splash();
+			m_splashVisible = true;
+		}
+	}
+
+	void hideSplash(){
+		if ( m_splashVisible ) {
+			::hide_splash();
+			m_splashVisible = false;
+		}
+	}
+
+	void showLoading(){
+		loading_show( m_loadingDialog );
+	}
+
+	void hideLoading(){
+		loading_hide( m_loadingDialog );
+	}
+
+	StartupLoadingDialog* loadingDialog() const {
+		return m_loadingDialog;
+	}
+
+	void markRadiantInitialised(){
+		m_radiantInitialised = true;
+	}
+
+	void markRadiantShutdown(){
+		m_radiantInitialised = false;
+	}
+
+	void cleanup(){
+		hideLoading();
+		hideSplash();
+		removeLocalPid();
+		removeGlobalPid();
+
+		if ( g_pParentWnd != nullptr ) {
+			delete g_pParentWnd;
+			g_pParentWnd = nullptr;
+		}
+
+		if ( m_radiantInitialised ) {
+			Radiant_Shutdown();
+			m_radiantInitialised = false;
+		}
+
+		if ( m_messageHandlerInstalled ) {
+			qInstallMessageHandler( nullptr );
+			m_messageHandlerInstalled = false;
+		}
+
+		closeLog();
+	}
+};
+
+void startup_load_initial_map(){
+	if( !g_openMapByCmd.empty() ){
+		if ( file_readable( g_openMapByCmd.c_str() ) ) {
+			Map_LoadFile( g_openMapByCmd.c_str() );
+			return;
+		}
+		const QString msg = i18n::tr( "Could not open map from command line:\n%1\n\nCreating a new map instead." )
+			.arg( g_openMapByCmd.c_str() );
+		const QByteArray msgUtf8 = msg.toUtf8();
+		const QByteArray titleUtf8 = i18n::tr( "Startup" ).toUtf8();
+		globalWarningStream() << msgUtf8.constData() << '\n';
+		qt_MessageBox( MainFrame_getWindow(), msgUtf8.constData(), titleUtf8.constData(), EMessageBoxType::Warning );
+	}
+	else if ( g_bLoadLastMap && !g_strLastMap.empty() ) {
+		if ( file_readable( g_strLastMap.c_str() ) ) {
+			Map_LoadFile( g_strLastMap.c_str() );
+			return;
+		}
+		const QString msg = i18n::tr( "The previous map could not be found:\n%1\n\nCreating a new map instead." )
+			.arg( g_strLastMap.c_str() );
+		const QByteArray msgUtf8 = msg.toUtf8();
+		const QByteArray titleUtf8 = i18n::tr( "Startup" ).toUtf8();
+		globalWarningStream() << msgUtf8.constData() << '\n';
+		qt_MessageBox( MainFrame_getWindow(), msgUtf8.constData(), titleUtf8.constData(), EMessageBoxType::Warning );
+	}
+
+	Map_New();
+}
+
+class StartupWelcomeDialog : public QDialog
+{
+	class AspectPixmapLabel : public QLabel
+	{
+		QPixmap m_source;
+	public:
+		explicit AspectPixmapLabel( QWidget* parent = nullptr ) : QLabel( parent ){
+			setAlignment( Qt::AlignCenter );
+		}
+
+		void setSourcePixmap( const QPixmap& pixmap ){
+			m_source = pixmap;
+			updateScaledPixmap();
+			updateGeometry();
+		}
+
+		bool hasHeightForWidth() const override {
+			return !m_source.isNull();
+		}
+
+		int heightForWidth( int width ) const override {
+			if ( m_source.isNull() || width <= 0 ) {
+				return QLabel::heightForWidth( width );
+			}
+			return std::max( 1, ( width * m_source.height() ) / std::max( 1, m_source.width() ) );
+		}
+
+	protected:
+		void resizeEvent( QResizeEvent* event ) override {
+			QLabel::resizeEvent( event );
+			updateScaledPixmap();
+		}
+
+	private:
+		void updateScaledPixmap(){
+			if ( m_source.isNull() ) {
+				clear();
+				return;
+			}
+			const QSize target = size().isValid() ? size() : m_source.size();
+			QLabel::setPixmap( m_source.scaled( target, Qt::KeepAspectRatio, Qt::SmoothTransformation ) );
+		}
+	};
+
+public:
+	enum class Action
+	{
+		None,
+		NewMap,
+		OpenMap,
+		ReopenPrevious,
+		GettingStarted,
+		Donate,
+	};
+
+private:
+	Action m_action = Action::None;
+	QCheckBox* m_showOnStartup = nullptr;
+
+	QPushButton* createActionButton( const QString& text ){
+		auto *button = new QPushButton( text, this );
+		button->setMinimumHeight( 36 );
+		button->setMinimumWidth( 220 );
+		button->setStyleSheet( "QPushButton { text-align: left; padding: 8px 12px; }" );
+		button->setCursor( Qt::PointingHandCursor );
+		return button;
+	}
+
+public:
+		explicit StartupWelcomeDialog( QWidget* parent ) : QDialog( parent ){
+			setWindowTitle( i18n::tr( "Welcome to VibeRadiant" ) );
+			setModal( true );
+
+			auto *root = new QVBoxLayout( this );
+			root->setContentsMargins( 14, 14, 14, 14 );
+			root->setSpacing( 12 );
+
+			auto *topPanel = new QFrame( this );
+			topPanel->setFrameShape( QFrame::StyledPanel );
+			topPanel->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Expanding );
+			root->addWidget( topPanel, 1 );
+
+			auto *topGrid = new QGridLayout( topPanel );
+			topGrid->setContentsMargins( 0, 0, 0, 0 );
+			topGrid->setColumnStretch( 0, 1 );
+			topGrid->setRowStretch( 0, 1 );
+
+			const QPixmap heroSource = new_local_image( "splash.png" );
+			auto *hero = new AspectPixmapLabel( topPanel );
+			hero->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Expanding );
+			hero->setSourcePixmap( heroSource );
+			topGrid->addWidget( hero, 0, 0 );
+
+		auto *title = new QLabel( i18n::tr( "VibeRadiant" ), topPanel );
+		auto titleFont = title->font();
+		titleFont.setBold( true );
+		titleFont.setPointSize( titleFont.pointSize() + 6 );
+		title->setFont( titleFont );
+		title->setStyleSheet( "QLabel { color: white; background-color: rgba(0,0,0,110); padding: 8px 10px; }" );
+		topGrid->addWidget( title, 0, 0, Qt::AlignLeft | Qt::AlignTop );
+
+		const QString badge = QStringLiteral( "v%1\n%2" )
+			.arg( QString::fromLatin1( RADIANT_VERSION_NUMBER ),
+			      QDate::currentDate().toString( QStringLiteral( "yyyy-MM-dd" ) ) );
+		auto *versionBadge = new QLabel( badge, topPanel );
+		versionBadge->setAlignment( Qt::AlignRight | Qt::AlignTop );
+		versionBadge->setStyleSheet( "QLabel { color: white; background-color: rgba(0,0,0,120); padding: 6px; }" );
+		topGrid->addWidget( versionBadge, 0, 0, Qt::AlignRight | Qt::AlignTop );
+
+			auto *bottom = new QFrame( this );
+			bottom->setFrameShape( QFrame::StyledPanel );
+			bottom->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Minimum );
+			root->addWidget( bottom, 0 );
+
+		auto *bottomLayout = new QGridLayout( bottom );
+		bottomLayout->setContentsMargins( 16, 16, 16, 16 );
+		bottomLayout->setHorizontalSpacing( 24 );
+		bottomLayout->setVerticalSpacing( 10 );
+
+		auto *newFileHeader = new QLabel( i18n::tr( "New File" ), bottom );
+		auto *helpHeader = new QLabel( i18n::tr( "Getting Started" ), bottom );
+		auto headerFont = newFileHeader->font();
+		headerFont.setBold( true );
+		headerFont.setPointSize( headerFont.pointSize() + 1 );
+		newFileHeader->setFont( headerFont );
+		helpHeader->setFont( headerFont );
+
+		auto *newMap = createActionButton( i18n::tr( "Create New Map" ) );
+		auto *openMap = createActionButton( i18n::tr( "Open Existing Map" ) );
+		auto *reopen = createActionButton( i18n::tr( "Reopen Previous Map" ) );
+		auto *gettingStarted = createActionButton( i18n::tr( "Getting Started" ) );
+		auto *donate = createActionButton( i18n::tr( "Donate" ) );
+		auto *continueButton = createActionButton( i18n::tr( "Continue to Editor" ) );
+		if ( g_strLastMap.empty() || !file_exists( g_strLastMap.c_str() ) ) {
+			reopen->setEnabled( false );
+		}
+
+		bottomLayout->addWidget( newFileHeader, 0, 0 );
+		bottomLayout->addWidget( helpHeader, 0, 1 );
+		bottomLayout->addWidget( newMap, 1, 0 );
+		bottomLayout->addWidget( openMap, 2, 0 );
+		bottomLayout->addWidget( reopen, 3, 0 );
+		bottomLayout->addWidget( gettingStarted, 1, 1 );
+		bottomLayout->addWidget( donate, 2, 1 );
+		bottomLayout->addWidget( continueButton, 3, 1 );
+
+		m_showOnStartup = new QCheckBox( i18n::tr( "Show this welcome screen on startup" ), bottom );
+		m_showOnStartup->setChecked( StartupWelcome_ShowOnStartup() );
+		bottomLayout->addWidget( m_showOnStartup, 4, 0, 1, 2, Qt::AlignLeft );
+
+		connect( newMap, &QPushButton::clicked, this, [this](){ m_action = Action::NewMap; accept(); } );
+		connect( openMap, &QPushButton::clicked, this, [this](){ m_action = Action::OpenMap; accept(); } );
+		connect( reopen, &QPushButton::clicked, this, [this](){ m_action = Action::ReopenPrevious; accept(); } );
+		connect( gettingStarted, &QPushButton::clicked, this, [this](){ m_action = Action::GettingStarted; accept(); } );
+		connect( donate, &QPushButton::clicked, this, [this](){ m_action = Action::Donate; accept(); } );
+		connect( continueButton, &QPushButton::clicked, this, [this](){ m_action = Action::None; accept(); } );
+
+			QScreen* screen = nullptr;
+			if ( parentWidget() != nullptr ) {
+				screen = parentWidget()->screen();
+			}
+			if ( screen == nullptr ) {
+				screen = this->screen();
+			}
+			if ( screen == nullptr ) {
+				screen = QGuiApplication::primaryScreen();
+			}
+		const QRect available = ( screen != nullptr )
+			? screen->availableGeometry()
+			: QRect( 0, 0, 1280, 800 );
+
+		const int availableWidth = std::max( 620, available.width() - 40 );
+		const int availableHeight = std::max( 560, available.height() - 40 );
+		const int preferredHeroWidth = std::clamp( 720, 560, availableWidth - 28 );
+		const int heroHeight = heroSource.isNull()
+			? 320
+			: std::max( 220, ( preferredHeroWidth * heroSource.height() ) / std::max( 1, heroSource.width() ) );
+		const int preferredWidth = std::min( availableWidth, preferredHeroWidth + 28 );
+		const int preferredHeight = std::min( availableHeight, heroHeight + 310 );
+
+			setFixedSize( preferredWidth, preferredHeight );
+
+			const QPoint centered(
+				available.x() + ( available.width() - width() ) / 2,
+				available.y() + ( available.height() - height() ) / 2
+			);
+			move( centered );
+		}
+
+	Action action() const {
+		return m_action;
+	}
+
+	bool showOnStartup() const {
+		return m_showOnStartup != nullptr ? m_showOnStartup->isChecked() : true;
+	}
+};
+
+void show_startup_welcome_dialog(){
+	if ( !StartupWelcome_ShowOnStartup() ) {
+		return;
+	}
+
+	QWidget* parent = MainFrame_getWindow();
+	StartupWelcomeDialog welcome( parent );
+	if ( welcome.exec() != QDialog::DialogCode::Accepted ) {
+		StartupWelcome_SetShowOnStartup( welcome.showOnStartup() );
+		return;
+	}
+	StartupWelcome_SetShowOnStartup( welcome.showOnStartup() );
+
+	switch ( welcome.action() )
+	{
+	case StartupWelcomeDialog::Action::NewMap:
+		NewMap();
+		break;
+	case StartupWelcomeDialog::Action::OpenMap:
+		OpenMap();
+		break;
+	case StartupWelcomeDialog::Action::ReopenPrevious:
+	{
+		if ( g_strLastMap.empty() || !file_readable( g_strLastMap.c_str() ) ) {
+			const QByteArray msgUtf8 = i18n::tr( "No previous map could be reopened." ).toUtf8();
+			const QByteArray titleUtf8 = i18n::tr( "Welcome" ).toUtf8();
+			qt_MessageBox( parent, msgUtf8.constData(), titleUtf8.constData(), EMessageBoxType::Info );
+			break;
+		}
+		const QByteArray openMapUtf8 = i18n::tr( "Open Map" ).toUtf8();
+		if ( !ConfirmModified( openMapUtf8.constData() ) ) {
+			break;
+		}
+		MRU_AddFile( g_strLastMap.c_str() );
+		Map_Free();
+		Map_LoadFile( g_strLastMap.c_str() );
+		break;
+	}
+	case StartupWelcomeDialog::Action::GettingStarted:
+		OpenURL( StringStream( AppPath_get(), "docs/index.html" ) );
+		break;
+	case StartupWelcomeDialog::Action::Donate:
+		OpenURL( "https://github.com/sponsors/themuffinator" );
+		break;
+	case StartupWelcomeDialog::Action::None:
+	default:
+		break;
+	}
+}
+} // namespace
 
 
 int main( int argc, char* argv[] ){
@@ -429,8 +1237,18 @@ int main( int argc, char* argv[] ){
 #endif
 
 	QApplication qapplication( argc, argv );
+	const StartupCliOptions cliOptions = startup_parse_cli_options( argc, argv );
+	StartupRuntimeGuard startupGuard;
+	StartupJourneyMetrics startupMetrics;
+	const bool startupVerboseLog = cliOptions.diagnostics || cliOptions.debugFastForward();
+	auto startup_log_phase = [startupVerboseLog]( const char* phase ){
+		if ( startupVerboseLog && phase != nullptr ) {
+			globalOutputStream() << "[startup] " << phase << '\n';
+		}
+	};
 	setlocale( LC_NUMERIC, "C" );
 	qInstallMessageHandler( qute_messageHandler );
+	startupGuard.markMessageHandlerInstalled();
 	QCoreApplication::setOrganizationName( "VibeRadiant" );
 	QCoreApplication::setApplicationName( "VibeRadiant" );
 	QCoreApplication::setApplicationVersion( QT_VERSION_STR );
@@ -438,85 +1256,193 @@ int main( int argc, char* argv[] ){
 	GlobalDebugMessageHandler::instance().setHandler( GlobalPopupDebugMessageHandler::instance() );
 
 	environment_init( argc, argv );
+#ifdef WIN32
+	CrashReport_InstallHandlers();
+#endif
+	startupMetrics.mark( "Environment initialized" );
 
 	paths_init();
+#ifdef WIN32
+	CrashReport_InstallHandlers();
+#endif
 	Localization_init();
+	startupMetrics.mark( "Paths and localization initialized" );
 
 	if ( !check_version() ) {
 		return EXIT_FAILURE;
 	}
 
-	Sys_LogFile( true );
+	startupGuard.openLog();
+	startupMetrics.mark( "Log file opened" );
 
 	QApplication::setWindowIcon( new_local_icon( "radiant.ico" ) ); // before any windows, after paths_init()
 
-	show_splash();
-	set_splash_status( "Loading settings..." );
-
-	create_global_pid();
-
-	GlobalPreferences_Init();
-
-	set_splash_status( "Selecting game profile..." );
-	g_GamesDialog.Init();
-
-	g_strGameToolsPath = g_pGameDescription->mGameToolsPath;
-
-	remove_global_pid();
-
-	set_splash_status( "Loading user preferences..." );
-	g_Preferences.Init(); // must occur before create_local_pid() to allow preferences to be reset
-
-	create_local_pid();
-
-	set_splash_status( "Initializing editor modules..." );
-	Radiant_Initialise();
-
-//	user_shortcuts_init();
-
-	set_splash_status( "Preparing main window..." );
-	g_pParentWnd = new MainFrame();
-	if ( MainFrame_getWindow() ) {
-		MainFrame_getWindow()->hide();
-	}
-
-	set_splash_status( "Loading map..." );
-	if( !g_openMapByCmd.empty() ){
-		Map_LoadFile( g_openMapByCmd.c_str() );
-	}
-	else if ( g_bLoadLastMap && !g_strLastMap.empty() ) {
-		Map_LoadFile( g_strLastMap.c_str() );
+	if ( !cliOptions.debugFastForward() ) {
+		startupGuard.showSplash();
+		set_splash_status( "Loading settings..." );
+		startupMetrics.mark( "Splash shown" );
 	}
 	else
 	{
-		Map_New();
+		globalWarningStream() << "Startup debug fast-forward active: skipping splash/update/setup-preflight phases\n";
+		if ( cliOptions.debugMainWindowOnly ) {
+			globalWarningStream() << "Startup debug mode: mainwindow-only path enabled\n";
+		}
+		startupMetrics.mark( "Splash skipped by debug flag" );
 	}
 
-	set_splash_status( "Checking for updates..." );
-	UpdateManager_CheckForUpdatesBlocking( UpdateCheckMode::Automatic, splash_window() );
+	startupGuard.createGlobalPid();
 
-	if ( UpdateManager_QuitRequested() ) {
-		remove_local_pid();
-		hide_splash();
-		Map_Free();
-		delete g_pParentWnd;
-		g_pParentWnd = nullptr;
-		Radiant_Shutdown();
-		qInstallMessageHandler( nullptr );
-		Sys_LogFile( false );
-		return EXIT_SUCCESS;
+	GlobalPreferences_Init();
+	startupMetrics.mark( "Global preferences initialized" );
+
+	if ( !cliOptions.debugFastForward() ) {
+		set_splash_status( "Selecting game profile..." );
+	}
+	g_GamesDialog.Init();
+	startupMetrics.mark( "Game profile selected" );
+
+	g_strGameToolsPath = g_pGameDescription->mGameToolsPath;
+
+	startupGuard.removeGlobalPid();
+
+	if ( !cliOptions.debugFastForward() ) {
+		set_splash_status( "Loading user preferences..." );
+	}
+	g_Preferences.Init(); // must occur before create_local_pid() to allow preferences to be reset
+	startupMetrics.mark( "Local preference paths initialized" );
+
+	startupMetrics.mark( cliOptions.debugFastForward()
+		? "Startup setup preflight skipped by debug flag"
+		: "Startup setup preflight deferred" );
+
+	startupGuard.createLocalPid();
+
+	if ( !cliOptions.debugFastForward() ) {
+		set_splash_status( "Initializing editor modules..." );
+	}
+	Radiant_Initialise();
+	startupGuard.markRadiantInitialised();
+	startupMetrics.mark( "Editor modules initialized" );
+
+	if ( !cliOptions.debugFastForward() ) {
+		set_splash_status( "Checking for updates from GitHub releases..." );
+		UpdateManager_CheckForUpdatesBlocking( UpdateCheckMode::Automatic, splash_window() );
+		startupMetrics.mark( "Startup update check completed" );
+
+		if ( UpdateManager_QuitRequested() ) {
+			startupGuard.removeLocalPid();
+			startupGuard.hideSplash();
+			startupMetrics.mark( "Startup aborted for updater quit" );
+			startupMetrics.flushToLog();
+			return EXIT_SUCCESS;
+		}
+	}
+	else
+	{
+		startupMetrics.mark( "Startup update check skipped by debug flag" );
 	}
 
-	remove_local_pid();
+	const bool useModernStartup = cliOptions.debugFastForward()
+		|| ( StartupJourney_ModernEnabled() && !cliOptions.legacyFlow );
+	const bool useLoadingScreen = cliOptions.debugFastForward()
+		|| ( useModernStartup && StartupJourney_ShowLoadingScreen() && !cliOptions.noLoadingScreen );
+	const bool showWelcomeScreen = !cliOptions.debugFastForward()
+		&& useModernStartup
+		&& !cliOptions.noWelcome
+		&& StartupWelcome_ShowOnStartup();
+
+	startupGuard.hideSplash();
+	startup_log_phase( "construct main frame begin" );
+	g_pParentWnd = new MainFrame();
+	startup_log_phase( "construct main frame end" );
+	if ( g_pParentWnd == nullptr || MainFrame_getWindow() == nullptr ) {
+		globalErrorStream() << "Failed to construct main window: null main frame/window\n";
+		startupMetrics.mark( "Main window creation failed (null frame/window)" );
+		startupMetrics.flushToLog();
+		return EXIT_FAILURE;
+	}
 	if ( MainFrame_getWindow() ) {
+		startup_log_phase( "hide main window after construction" );
+		MainFrame_getWindow()->hide();
+	}
+	startupMetrics.mark( "Main window created" );
+
+	if ( useLoadingScreen ) {
+		startup_log_phase( "show loading dialog" );
+		startupGuard.showLoading();
+		if ( startupGuard.loadingDialog() != nullptr ) {
+			startupGuard.loadingDialog()->setProgress( 35, "Preparing main window..." );
+		}
+	}
+
+	if ( useLoadingScreen ) {
+		startup_log_phase( "loading dialog progress: map load" );
+		if ( startupGuard.loadingDialog() != nullptr ) {
+			startupGuard.loadingDialog()->setProgress( 55, "Loading map..." );
+		}
+	}
+	if ( !cliOptions.debugMainWindowOnly ) {
+		startup_log_phase( "initial map load begin" );
+		startup_load_initial_map();
+		startup_log_phase( "initial map load end" );
+	}
+	else
+	{
+		startup_log_phase( "initial map load skipped by mainwindow-only debug mode" );
+	}
+	startupMetrics.mark( "Initial map loaded" );
+
+	if ( useLoadingScreen ) {
+		startup_log_phase( "loading dialog progress: theme apply" );
+		if ( startupGuard.loadingDialog() != nullptr ) {
+			startupGuard.loadingDialog()->setProgress( 85, "Applying startup theme..." );
+		}
+	}
+	if ( !cliOptions.debugMainWindowOnly ) {
+		startup_log_phase( "theme apply begin" );
+		theme_apply_startup();
+		startup_log_phase( "theme apply end" );
+	}
+	else
+	{
+		startup_log_phase( "theme apply skipped by mainwindow-only debug mode" );
+	}
+	startupMetrics.mark( "Startup theme applied" );
+
+	if ( useLoadingScreen ) {
+		startup_log_phase( "loading dialog progress: startup complete" );
+		if ( startupGuard.loadingDialog() != nullptr ) {
+			startupGuard.loadingDialog()->setProgress( 100, "Startup complete." );
+		}
+		startup_log_phase( "hide loading dialog" );
+		startupGuard.hideLoading();
+	}
+
+	startupGuard.removeLocalPid();
+	if ( MainFrame_getWindow() ) {
+		startup_log_phase( "show main window begin" );
 		MainFrame_getWindow()->show();
 		MainFrame_getWindow()->raise();
 		MainFrame_getWindow()->activateWindow();
+		startup_log_phase( "show main window end" );
 	}
-	QTimer::singleShot( 0, [](){
-		theme_apply_startup();
-	} );
-	hide_splash();
+	startupMetrics.mark( "Main window shown" );
+
+	if ( !cliOptions.debugFastForward() || showWelcomeScreen ) {
+		QTimer::singleShot( 0, [fastForward = cliOptions.debugFastForward(), showWelcomeScreen](){
+			if ( !fastForward ) {
+				Startup_PreMainWindowSetup();
+			}
+			if ( showWelcomeScreen ) {
+				show_startup_welcome_dialog();
+			}
+		} );
+	}
+
+	if ( cliOptions.diagnostics || useModernStartup ) {
+		startupMetrics.flushToLog();
+	}
 
 	QApplication::exec();
 
@@ -526,15 +1452,7 @@ int main( int argc, char* argv[] ){
 		g_strLastMap = Map_Name( g_map );
 	}
 
-	delete g_pParentWnd;
-
 //	user_shortcuts_save();
-
-	Radiant_Shutdown();
-
-	qInstallMessageHandler( nullptr );
-	// close the log file if any
-	Sys_LogFile( false );
 
 	return EXIT_SUCCESS;
 }

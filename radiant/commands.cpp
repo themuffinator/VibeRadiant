@@ -30,6 +30,7 @@
 #include "stream/stringstream.h"
 #include "versionlib.h"
 #include "gtkutil/accelerator.h"
+#include "gtkutil/i18n.h"
 #include "gtkutil/messagebox.h"
 #include "gtkmisc.h"
 
@@ -494,7 +495,7 @@ void accelerator_edit( QTreeWidgetItem *item ){
 
 void DoCommandListDlg(){
 	QDialog dialog( MainFrame_getWindow(), Qt::Dialog | Qt::WindowCloseButtonHint );
-	dialog.setWindowTitle( "Mapped Commands" );
+	dialog.setWindowTitle( i18n::tr( "Mapped Commands" ) );
 
 	auto *grid = new QGridLayout( &dialog );
 
@@ -509,7 +510,7 @@ void DoCommandListDlg(){
 	tree->header()->setStretchLastSection( false ); // non greedy column sizing
 	tree->header()->setSectionResizeMode( QHeaderView::ResizeMode::ResizeToContents ); // no text elision
 	tree->setRootIsDecorated( false );
-	tree->setHeaderLabels( { "Command", "Key" } );
+	tree->setHeaderLabels( { i18n::tr( "Command" ), i18n::tr( "Key" ) } );
 
 	QObject::connect( tree, &QTreeWidget::itemActivated, []( QTreeWidgetItem *item, int column ){
 		if( item != nullptr )
@@ -542,12 +543,12 @@ void DoCommandListDlg(){
 		auto *commandLine = new QLineEdit;
 		grid->addWidget( commandLine, 0, 0 );
 		commandLine->setClearButtonEnabled( true );
-		commandLine->setPlaceholderText( QString::fromUtf8( "🔍 by command name" ) );
+		commandLine->setPlaceholderText( i18n::tr( "🔍 by command name" ) );
 
 		auto *keyLine = new QLineEdit;
 		grid->addWidget( keyLine, 0, 1 );
 		keyLine->setClearButtonEnabled( true );
-		keyLine->setPlaceholderText( QString::fromUtf8( "🔍 by keys" ) );
+		keyLine->setPlaceholderText( i18n::tr( "🔍 by keys" ) );
 
 		const auto filter = [tree]( const int column, const QString& text ){
 			for( QTreeWidgetItemIterator it( tree ); *it; ++it )
@@ -563,27 +564,29 @@ void DoCommandListDlg(){
 		auto *buttons = new QDialogButtonBox( Qt::Orientation::Vertical );
 		grid->addWidget( buttons, 1, 2, 1, 1 );
 
-		QPushButton *editbutton = buttons->addButton( "Edit", QDialogButtonBox::ButtonRole::ActionRole );
+		QPushButton *editbutton = buttons->addButton( i18n::tr( "Edit" ), QDialogButtonBox::ButtonRole::ActionRole );
 		QObject::connect( editbutton, &QPushButton::clicked, [tree](){
 			if( const auto items = tree->selectedItems(); !items.isEmpty() )
 				accelerator_edit( items.first() );
 		} );
 
-		QPushButton *clearbutton = buttons->addButton( "Clear", QDialogButtonBox::ButtonRole::ActionRole );
+		QPushButton *clearbutton = buttons->addButton( i18n::tr( "Clear" ), QDialogButtonBox::ButtonRole::ActionRole );
 		QObject::connect( clearbutton, &QPushButton::clicked, [tree](){
 			if( const auto items = tree->selectedItems(); !items.isEmpty() )
 				accelerator_clear_button_clicked( items.first() );
 		} );
 
-		QPushButton *resetbutton = buttons->addButton( "Reset", QDialogButtonBox::ButtonRole::ResetRole );
+		QPushButton *resetbutton = buttons->addButton( i18n::tr( "Reset" ), QDialogButtonBox::ButtonRole::ResetRole );
 		QObject::connect( resetbutton, &QPushButton::clicked, [tree](){
 			if( const auto items = tree->selectedItems(); !items.isEmpty() )
 				accelerator_alter( items.first(), {} );
 		} );
 
-		QPushButton *resetallbutton = buttons->addButton( "Reset All", QDialogButtonBox::ButtonRole::ResetRole );
+		QPushButton *resetallbutton = buttons->addButton( i18n::tr( "Reset All" ), QDialogButtonBox::ButtonRole::ResetRole );
 		QObject::connect( resetallbutton, &QPushButton::clicked, [tree](){
-			if( eIDYES == qt_MessageBox( tree, "Surely reset all shortcuts now?", "Boo!", EMessageBoxType::Question ) )
+			const QByteArray textUtf8 = i18n::tr( "Surely reset all shortcuts now?" ).toUtf8();
+			const QByteArray titleUtf8 = i18n::tr( "Confirm" ).toUtf8();
+			if( eIDYES == qt_MessageBox( tree, textUtf8.constData(), titleUtf8.constData(), EMessageBoxType::Question ) )
 				accelerator_reset_all_button_clicked( tree );
 		} );
 	}

@@ -25,10 +25,12 @@
 #include "string/string.h"
 
 #include "qerplugin.h"
+#include <vector>
 
 class XYWnd;
 class CamWnd;
 class ZWnd;
+class CGameDescription;
 
 class QMainWindow;
 class QSplitter;
@@ -87,7 +89,7 @@ private:
 	QLabel *m_statusLabel[c_status__count]{};
 
 
-	EViewStyle m_nCurrentStyle;
+	EViewStyle m_nCurrentStyle{ eRegular };
 
 	IdleDraw m_idleRedrawStatusText;
 
@@ -179,7 +181,16 @@ void Radiant_attachGameToolsPathObserver( ModuleObserver& observer );
 void Radiant_detachGameToolsPathObserver( ModuleObserver& observer );
 
 void EnginePath_verify();
+void Startup_PreMainWindowSetup();
 const char* EnginePath_get();
+
+struct DetectedGameInstallPath
+{
+	CopiedString path;
+	CopiedString source;
+};
+
+std::vector<DetectedGameInstallPath> EnginePath_detectInstallationsForGame( const CGameDescription& gameDescription, const char* currentPath );
 
 const std::array<CopiedString, 5>& ExtraResourcePaths_get();
 
@@ -251,3 +262,8 @@ extern QWidget* g_page_entity;
 
 void FocusAllViews();
 void OpenGLFont_select();
+int OpenGLFont_getPixelHeightSafe();
+int OpenGLFont_getPixelDescentSafe();
+bool OpenGLFont_canDrawSafe();
+void OpenGLFont_drawStringSafe( const char* string );
+void OpenGLFont_drawCharSafe( char character );

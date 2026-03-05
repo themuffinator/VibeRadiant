@@ -46,7 +46,9 @@ See [COMPILING](COMPILING) for platform-by-platform build instructions. 🔧🧪
 - 📓🧨 [docs/changelog-custom.txt](docs/changelog-custom.txt) - detailed editor/compiler change notes.
 - 🧪🔄 [docs/auto-updater.md](docs/auto-updater.md) - update flow details.
 - 🧱🎮 [docs/idtech4-support.md](docs/idtech4-support.md) - idTech4 parity notes and The Dark Mod support details.
+- 🗂️🎮 [docs/gamepacks-architecture.md](docs/gamepacks-architecture.md) - pack source/runtime layout and unification policy.
 - 🌐🗣️ [docs/language-packs.md](docs/language-packs.md) - language pack format and supported languages.
+- 🤖🧱 [docs/ai-level-design-tools.md](docs/ai-level-design-tools.md) - OpenAI-powered level-design tool suite and rollout plan.
 - 🏗️🔧 [COMPILING](COMPILING) - build instructions.
 - 📦🧬 [RELEASING.md](RELEASING.md) - versioning and release pipeline.
 - 🧱🎛️ [docs/Additional_map_editor_features.htm](docs/Additional_map_editor_features.htm) - editor feature catalog.

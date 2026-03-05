@@ -43,7 +43,15 @@ struct OpenGLBinding
 
 	QOpenGLFunctions_2_0 *funcs;
 
-	OpenGLBinding() : contextValid( false ), funcs( nullptr ){
+	OpenGLBinding() :
+		major_version( 0 ),
+		minor_version( 0 ),
+		contextValid( false ),
+		funcs( nullptr ),
+		assertNoErrors( nullptr ),
+		m_font( nullptr ),
+		support_ARB_texture_compression( false ),
+		support_EXT_texture_compression_s3tc( false ){
 	}
 
 	/// \brief Asserts that there no OpenGL errors have occurred since the last call to glGetError.
@@ -53,7 +61,9 @@ struct OpenGLBinding
 
 	/// \brief Renders \p string at the current raster-position of the current context.
 	void drawString( const char* string ) const {
-		m_font->printString( string );
+		if ( m_font != nullptr ) {
+			m_font->printString( string );
+		}
 	}
 
 	/// \brief Renders \p character at the current raster-position of the current context.

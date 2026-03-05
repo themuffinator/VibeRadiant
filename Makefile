@@ -125,6 +125,8 @@ LIBS_JPEG          ?= -ljpeg
 DEPEND_ON_MAKEFILE ?= yes
 # yes = download; all = even download undistributable gamepacks; no = disable; allinone = dl all-in-one compact fixed archive
 DOWNLOAD_GAMEPACKS ?= allinone
+# Gamepack source used by install-gamepacks.sh: VibePack (default), NRCPack, or auto.
+GAMEPACK_SOURCE   ?= VibePack
 INSTALL_DLLS       ?= yes
 INSTALL_DATA       ?= yes
 
@@ -954,6 +956,7 @@ $(INSTALLDIR)/radiant.$(EXE): \
 	radiant/filterbar.o \
 	radiant/filters.o \
 	radiant/findtexturedialog.o \
+	radiant/genai.o \
 	radiant/glwidget.o \
 	radiant/grid.o \
 	radiant/groupdialog.o \
@@ -1437,7 +1440,7 @@ install-data: binaries
 ifeq ($(INSTALL_DATA),yes)
 	$(MKDIR) $(INSTALLDIR)/gamepacks/games
 	$(FIND) $(INSTALLDIR_BASE)/ -name .svn -exec $(RM_R) {} \; -prune
-	DOWNLOAD_GAMEPACKS="$(DOWNLOAD_GAMEPACKS)" GIT="$(GIT)" SVN="$(SVN)" WGET="$(WGET)" RM_R="$(RM_R)" MV="$(MV)" UNZIPPER="$(UNZIPPER)" ECHO="$(ECHO)" SH="$(SH)" CP="$(CP)" CP_R="$(CP_R)" $(SH) install-gamepacks.sh "$(INSTALLDIR)/gamepacks"
+	DOWNLOAD_GAMEPACKS="$(DOWNLOAD_GAMEPACKS)" GAMEPACK_SOURCE="$(GAMEPACK_SOURCE)" GIT="$(GIT)" SVN="$(SVN)" WGET="$(WGET)" RM_R="$(RM_R)" MV="$(MV)" UNZIPPER="$(UNZIPPER)" ECHO="$(ECHO)" SH="$(SH)" CP="$(CP)" CP_R="$(CP_R)" $(SH) install-gamepacks.sh "$(INSTALLDIR)/gamepacks"
 	$(ECHO) $(RADIANT_MINOR_VERSION) > $(INSTALLDIR)/RADIANT_MINOR
 	$(ECHO) $(RADIANT_MAJOR_VERSION) > $(INSTALLDIR)/RADIANT_MAJOR
 	$(CP_R) setup/data/tools/* $(INSTALLDIR)/

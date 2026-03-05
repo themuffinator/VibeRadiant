@@ -63,6 +63,7 @@
 #include "gtkutil/accelerator.h"
 #include "gtkutil/dialog.h"
 #include "gtkutil/filechooser.h"
+#include "gtkutil/i18n.h"
 #include "gtkutil/nonmodal.h"
 #include "gtkutil/entry.h"
 #include "gtkutil/image.h"
@@ -118,7 +119,7 @@ public:
 		} );
 		if( it != input.end() ){
 			input.chop( std::distance( it, input.end() ) );
-			QToolTip::showText( m_parent->mapToGlobal( m_parent->rect().bottomLeft() ), "No newlines & quotes are allowed in entity key values.", m_parent );
+			QToolTip::showText( m_parent->mapToGlobal( m_parent->rect().bottomLeft() ), i18n::tr( "No newlines & quotes are allowed in entity key values." ), m_parent );
 		}
 		return QValidator::State::Acceptable;
 	}
@@ -136,7 +137,7 @@ public:
 		} );
 		if( it != input.end() ){
 			input.chop( std::distance( it, input.end() ) );
-			QToolTip::showText( m_parent->mapToGlobal( m_parent->rect().bottomLeft() ), "No spaces, newlines, tabs, quotes are allowed in entity key names.", m_parent );
+			QToolTip::showText( m_parent->mapToGlobal( m_parent->rect().bottomLeft() ), i18n::tr( "No spaces, newlines, tabs, quotes are allowed in entity key names." ), m_parent );
 		}
 		return QValidator::State::Acceptable;
 	}
@@ -1098,13 +1099,13 @@ void EntityInspector_updateTypedValueControls(){
 	}
 
 	g_typedValueState.type = attribute != nullptr ? attribute->m_type : "spawnflags";
-	g_entityTypedValueLabel->setText( StringStream( "Typed (", g_typedValueState.type.c_str(), ")" ).c_str() );
+	g_entityTypedValueLabel->setText( i18n::tr( "Typed (%1)" ).arg( g_typedValueState.type.c_str() ) );
 
 	g_entityTypedValueUpdating = true;
 
 	if ( string_equal( key.constData(), "spawnflags" ) ) {
 		g_typedValueState.kind = TypedValueKind::Spawnflags;
-		g_entityTypedValueHint->setText( "Use the spawnflags checkboxes above." );
+		g_entityTypedValueHint->setText( i18n::tr( "Use the spawnflags checkboxes above." ) );
 		g_entityTypedValueHint->show();
 	}
 	else if ( string_equal( attribute->m_type.c_str(), "boolean" ) ) {
@@ -1126,17 +1127,17 @@ void EntityInspector_updateTypedValueControls(){
 	}
 	else if ( string_equal( attribute->m_type.c_str(), "color" ) ) {
 		g_typedValueState.kind = TypedValueKind::Color;
-		g_entityTypedValueBrowse->setToolTip( "Pick color" );
+		g_entityTypedValueBrowse->setToolTip( i18n::tr( "Pick color" ) );
 		g_entityTypedValueBrowse->show();
 	}
 	else if ( string_equal( attribute->m_type.c_str(), "model" ) ) {
 		g_typedValueState.kind = TypedValueKind::Model;
-		g_entityTypedValueBrowse->setToolTip( "Browse model" );
+		g_entityTypedValueBrowse->setToolTip( i18n::tr( "Browse model" ) );
 		g_entityTypedValueBrowse->show();
 	}
 	else if ( string_equal( attribute->m_type.c_str(), "sound" ) ) {
 		g_typedValueState.kind = TypedValueKind::Sound;
-		g_entityTypedValueBrowse->setToolTip( "Browse sound" );
+		g_entityTypedValueBrowse->setToolTip( i18n::tr( "Browse sound" ) );
 		g_entityTypedValueBrowse->show();
 	}
 	else{
@@ -1430,8 +1431,8 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 			grid->setContentsMargins( 4, 0, 4, 0 );
 			vbox->addLayout( grid );
 			{
-				grid->addWidget( new QLabel( "Key" ), 0, 0 );
-				grid->addWidget( new QLabel( "Value" ), 1, 0 );
+				grid->addWidget( new QLabel( i18n::tr( "Key" ) ), 0, 0 );
+				grid->addWidget( new QLabel( i18n::tr( "Value" ) ), 1, 0 );
 			}
 			{
 				auto *line = g_entityKeyEntry = new LineEdit;
@@ -1449,7 +1450,7 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 				line->setValidator( new KeyValueValidator( line ) );
 			}
 			{
-				grid->addWidget( new QLabel( "Typed" ), 2, 0 );
+				grid->addWidget( new QLabel( i18n::tr( "Typed" ) ), 2, 0 );
 
 				auto *typedWidget = g_entityTypedValueWidget = new QWidget;
 				auto *typedLayout = new QHBoxLayout( typedWidget );
@@ -1459,7 +1460,7 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 				auto *typeLabel = g_entityTypedValueLabel = new QLabel;
 				typedLayout->addWidget( typeLabel );
 
-				auto *check = g_entityTypedValueBoolean = new QCheckBox( "Enabled" );
+				auto *check = g_entityTypedValueBoolean = new QCheckBox( i18n::tr( "Enabled" ) );
 				typedLayout->addWidget( check );
 				QObject::connect( check, &QAbstractButton::clicked, EntityInspector_applyTypedBoolean );
 
@@ -1484,7 +1485,7 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 			{
 				auto *b = new QToolButton;
 				b->setIcon( new_local_icon( "select.png" ) );
-				b->setToolTip( "Select by key" );
+				b->setToolTip( i18n::tr( "Select by key" ) );
 				grid->addWidget( b, 0, 2 );
 				QObject::connect( b, &QAbstractButton::clicked, [](){
 					Select_EntitiesByKeyValue( g_entityKeyEntry->text().toLatin1().constData(), nullptr );
@@ -1493,7 +1494,7 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 			{
 				auto *b = new QToolButton;
 				b->setIcon( new_local_icon( "select.png" ) );
-				b->setToolTip( "Select by value" );
+				b->setToolTip( i18n::tr( "Select by value" ) );
 				grid->addWidget( b, 1, 2 );
 				QObject::connect( b, &QAbstractButton::clicked, [](){
 					Select_EntitiesByKeyValue( nullptr, g_entityValueEntry->text().toLatin1().constData() );
@@ -1502,7 +1503,7 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 			{
 				auto *b = new QToolButton;
 				b->setIcon( new_local_icon( "select.png" ) );
-				b->setToolTip( "Select by key + value" );
+				b->setToolTip( i18n::tr( "Select by key + value" ) );
 				grid->addWidget( b, 0, 3, 2, 1 );
 				QObject::connect( b, &QAbstractButton::clicked, [](){
 					Select_EntitiesByKeyValue( g_entityKeyEntry->text().toLatin1().constData(), g_entityValueEntry->text().toLatin1().constData() );
@@ -1514,12 +1515,12 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 			hbox->setContentsMargins( 4, 0, 4, 0 );
 			vbox->addLayout( hbox );
 			{
-				auto *b = new QPushButton( "Clear All" );
+				auto *b = new QPushButton( i18n::tr( "Clear All" ) );
 				hbox->addWidget( b );
 				QObject::connect( b, &QAbstractButton::clicked, EntityInspector_clearAllKeyValues );
 			}
 			{
-				auto *b = new QPushButton( "Delete Key" );
+				auto *b = new QPushButton( i18n::tr( "Delete Key" ) );
 				hbox->addWidget( b );
 				QObject::connect( b, &QAbstractButton::clicked, EntityInspector_clearKeyValue );
 			}
@@ -1527,7 +1528,7 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 				auto *b = new QToolButton;
 				hbox->addWidget( b );
 				b->setIcon( new_local_icon( "arrow_left.png" ) );
-				b->setToolTip( "Select targeting entities" );
+				b->setToolTip( i18n::tr( "Select targeting entities" ) );
 				QObject::connect( b, &QAbstractButton::clicked, [](){ Select_ConnectedEntities( true, false, g_focusToggleButton->isChecked() ); } );
 			}
 			{
@@ -1535,21 +1536,21 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 				hbox->addWidget( b );
 				b->setIconSize( QSize( b->iconSize().width() * 2, b->iconSize().height() ) );
 				b->setIcon( new_local_icon( "arrow_left_right.png" ) );
-				b->setToolTip( "Select connected entities" );
+				b->setToolTip( i18n::tr( "Select connected entities" ) );
 				QObject::connect( b, &QAbstractButton::clicked, [](){ Select_ConnectedEntities( true, true, g_focusToggleButton->isChecked() ); } );
 			}
 			{
 				auto *b = new QToolButton;
 				hbox->addWidget( b );
 				b->setIcon( new_local_icon( "arrow_right.png" ) );
-				b->setToolTip( "Select targets" );
+				b->setToolTip( i18n::tr( "Select targets" ) );
 				QObject::connect( b, &QAbstractButton::clicked, [](){ Select_ConnectedEntities( false, true, g_focusToggleButton->isChecked() ); } );
 			}
 			{
 				auto *b = g_focusToggleButton = new QToolButton;
 				hbox->addWidget( b );
 				b->setText( "👀" );
-				b->setToolTip( "AutoFocus on Selection" );
+				b->setToolTip( i18n::tr( "AutoFocus on Selection" ) );
 				b->setCheckable( true );
 				QObject::connect( b, &QAbstractButton::clicked, []( bool checked ){ if( checked ) FocusAllViews(); } );
 			}

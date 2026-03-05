@@ -6,6 +6,7 @@
 
 #include "debugging/debugging.h"
 #include "environment.h"
+#include "gtkutil/i18n.h"
 #include "gtkutil/messagebox.h"
 #include "mainframe.h"
 #include "preferences.h"
@@ -17,6 +18,7 @@
 #include "stream/stringstream.h"
 
 #include <QAbstractButton>
+#include <QCheckBox>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -54,9 +56,17 @@ namespace
 constexpr int k_update_check_interval_seconds = 60 * 60 * 24;
 constexpr int k_update_check_timeout_ms = 20000;
 
+EMessageBoxReturn qt_MessageBox_qstring( QWidget* parent, const QString& text, const QString& title, EMessageBoxType type, int buttons = 0 ){
+	const QByteArray textUtf8 = text.toUtf8();
+	const QByteArray titleUtf8 = title.toUtf8();
+	return qt_MessageBox( parent, textUtf8.constData(), titleUtf8.constData(), type, buttons );
+}
+
 bool g_update_auto_check = true;
 bool g_update_allow_prerelease = false;
+bool g_update_auto_install = false;
 int g_update_last_check = 0;
+CopiedString g_update_ignored_version;
 
 struct UpdateAsset
 {
@@ -321,8 +331,9 @@ void configure_update_request( QNetworkRequest& request ){
 }
 
 void Update_constructPreferences( PreferencesPage& page ){
-	page.appendCheckBox( "Updates", "Check for updates at startup", g_update_auto_check );
-	page.appendCheckBox( "", "Include prerelease builds", g_update_allow_prerelease );
+	page.appendCheckBox( "Updates", i18n::tr( "Check for updates at startup" ).toUtf8().constData(), g_update_auto_check );
+	page.appendCheckBox( "", i18n::tr( "Include prerelease builds" ).toUtf8().constData(), g_update_allow_prerelease );
+	page.appendCheckBox( "", i18n::tr( "Automatically install available updates" ).toUtf8().constData(), g_update_auto_install );
 }
 
 class UpdateManager final : public QObject
@@ -341,6 +352,10 @@ public:
 		PreferencesDialog_addSettingsPreferences( makeCallbackF( Update_constructPreferences ) );
 		GlobalPreferenceSystem().registerPreference( "UpdateAutoCheck", BoolImportStringCaller( g_update_auto_check ), BoolExportStringCaller( g_update_auto_check ) );
 		GlobalPreferenceSystem().registerPreference( "UpdateAllowPrerelease", BoolImportStringCaller( g_update_allow_prerelease ), BoolExportStringCaller( g_update_allow_prerelease ) );
+		GlobalPreferenceSystem().registerPreference( "UpdateAutoInstall", BoolImportStringCaller( g_update_auto_install ), BoolExportStringCaller( g_update_auto_install ) );
+		GlobalPreferenceSystem().registerPreference( "UpdateAutoInstallEnabled", BoolImportStringCaller( g_update_auto_install ), BoolExportStringCaller( g_update_auto_install ) ); // legacy compatibility
+		GlobalPreferenceSystem().registerPreference( "UpdateIgnoredVersion", CopiedStringImportStringCaller( g_update_ignored_version ), CopiedStringExportStringCaller( g_update_ignored_version ) );
+		GlobalPreferenceSystem().registerPreference( "UpdateSkipVersion", CopiedStringImportStringCaller( g_update_ignored_version ), CopiedStringExportStringCaller( g_update_ignored_version ) ); // legacy compatibility
 		GlobalPreferenceSystem().registerPreference( "UpdateLastCheck", IntImportStringCaller( g_update_last_check ), IntExportStringCaller( g_update_last_check ) );
 	}
 
@@ -454,7 +469,7 @@ private:
 		m_check_in_progress = true;
 
 		if ( m_mode == UpdateCheckMode::Manual ) {
-			m_check_dialog = new QProgressDialog( "Checking for updates...", "Cancel", 0, 0, parentWindow() );
+			m_check_dialog = new QProgressDialog( i18n::tr( "Checking for updates..." ), i18n::tr( "Cancel" ), 0, 0, parentWindow() );
 			m_check_dialog->setWindowModality( Qt::WindowModal );
 			m_check_dialog->setMinimumDuration( 0 );
 			connect( m_check_dialog, &QProgressDialog::canceled, this, [this](){
@@ -489,7 +504,7 @@ private:
 	void start_manifest_request( const QString& manifest_url ){
 		if ( manifest_url.isEmpty() ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				qt_MessageBox( parentWindow(), "Release metadata is missing update.json.", "Update", EMessageBoxType::Error );
+				qt_MessageBox_qstring( parentWindow(), i18n::tr( "Release metadata is missing update.json." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			}
 			finish_check();
 			return;
@@ -532,8 +547,8 @@ private:
 				return;
 			}
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				const auto msg = QString( "Update check failed: " ) + error_string;
-				qt_MessageBox( parentWindow(), msg.toLatin1().constData(), "Update", EMessageBoxType::Error );
+				const auto msg = i18n::tr( "Update check failed: %1" ).arg( error_string );
+				qt_MessageBox_qstring( parentWindow(), msg, i18n::tr( "Update" ), EMessageBoxType::Error );
 			}
 			finish_check();
 			return;
@@ -548,7 +563,7 @@ private:
 				return;
 			}
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Info );
+				qt_MessageBox_qstring( parentWindow(), error, i18n::tr( "Update" ), EMessageBoxType::Info );
 			}
 			finish_check();
 			return;
@@ -580,8 +595,8 @@ private:
 		}
 		if ( net_error != QNetworkReply::NoError ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				const auto msg = QString( "Update check failed: " ) + error_string;
-				qt_MessageBox( parentWindow(), msg.toLatin1().constData(), "Update", EMessageBoxType::Error );
+				const auto msg = i18n::tr( "Update check failed: %1" ).arg( error_string );
+				qt_MessageBox_qstring( parentWindow(), msg, i18n::tr( "Update" ), EMessageBoxType::Error );
 			}
 			finish_check();
 			return;
@@ -591,7 +606,7 @@ private:
 		UpdateManifest manifest;
 		if ( !parse_manifest( payload, manifest, error ) ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
+				qt_MessageBox_qstring( parentWindow(), error, i18n::tr( "Update" ), EMessageBoxType::Error );
 			}
 			finish_check();
 			return;
@@ -602,8 +617,8 @@ private:
 
 		if ( !g_update_allow_prerelease && is_prerelease_version( manifest.version ) ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				const auto msg = StringStream( "Prerelease ", manifest.version.toLatin1().constData(), " is available.\nEnable prerelease updates to download it." );
-				qt_MessageBox( parentWindow(), msg, "Update", EMessageBoxType::Info );
+				const auto msg = i18n::tr( "Prerelease %1 is available.\nEnable prerelease updates to download it." ).arg( manifest.version );
+				qt_MessageBox_qstring( parentWindow(), msg, i18n::tr( "Update" ), EMessageBoxType::Info );
 			}
 			finish_check();
 			return;
@@ -622,8 +637,8 @@ private:
 
 		if ( matched_platform.isEmpty() ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				const auto msg = QString( "No update package found for platform %1." ).arg( platforms.join( ", " ) );
-				qt_MessageBox( parentWindow(), msg.toLatin1().constData(), "Update", EMessageBoxType::Info );
+				const auto msg = i18n::tr( "No update package found for platform %1." ).arg( platforms.join( ", " ) );
+				qt_MessageBox_qstring( parentWindow(), msg, i18n::tr( "Update" ), EMessageBoxType::Info );
 			}
 			finish_check();
 			return;
@@ -632,9 +647,20 @@ private:
 		const int cmp = compare_versions( current_version(), manifest.version );
 		if ( cmp >= 0 ) {
 			if ( m_mode == UpdateCheckMode::Manual ) {
-				const auto msg = StringStream( "You are up to date (", current_version().toLatin1().constData(), ")." );
-				qt_MessageBox( parentWindow(), msg, "Update", EMessageBoxType::Info );
+				const auto msg = i18n::tr( "You are up to date (%1)." ).arg( current_version() );
+				qt_MessageBox_qstring( parentWindow(), msg, i18n::tr( "Update" ), EMessageBoxType::Info );
 			}
+			finish_check();
+			return;
+		}
+		if ( m_mode == UpdateCheckMode::Automatic
+			&& !g_update_ignored_version.empty()
+			&& QString::compare( QString::fromLatin1( g_update_ignored_version.c_str() ), manifest.version, Qt::CaseInsensitive ) == 0 ) {
+			finish_check();
+			return;
+		}
+		if ( m_mode == UpdateCheckMode::Automatic && g_update_auto_install ) {
+			start_download( manifest, asset );
 			finish_check();
 			return;
 		}
@@ -647,20 +673,34 @@ private:
 		QWidget* parent = parentWindow();
 		const bool splash_parent = parent && parent->windowFlags().testFlag( Qt::SplashScreen );
 		QMessageBox dialog( splash_parent ? nullptr : parent );
-		dialog.setWindowTitle( "VibeRadiant Update" );
-		dialog.setText( QStringLiteral( "VibeRadiant %1 is available." ).arg( manifest.version ) );
-		dialog.setInformativeText( QStringLiteral( "Current version: %1\nLatest version: %2" ).arg( current_version(), manifest.version ) );
+		dialog.setWindowTitle( i18n::tr( "VibeRadiant Update" ) );
+		dialog.setText( i18n::tr( "VibeRadiant %1 is available." ).arg( manifest.version ) );
+		const QString sizeText = asset.size > 0
+			? i18n::tr( "%1 MB" ).arg( QString::number( static_cast<double>( asset.size ) / ( 1024.0 * 1024.0 ), 'f', 1 ) )
+			: i18n::tr( "Unknown" );
+		dialog.setInformativeText(
+			i18n::tr( "Current version: %1\nLatest version: %2\nPublished: %3\nPackage: %4 (%5)" )
+				.arg( current_version(), manifest.version, manifest.published_at.isEmpty() ? i18n::tr( "Unknown" ) : manifest.published_at, asset.name, sizeText ) );
 		if ( splash_parent ) {
 			dialog.setWindowFlag( Qt::WindowStaysOnTopHint, true );
 		}
+		auto *autoInstall = new QCheckBox( i18n::tr( "Automatically install future updates" ), &dialog );
+		autoInstall->setChecked( g_update_auto_install );
+		dialog.setCheckBox( autoInstall );
 
-		QAbstractButton* download_button = dialog.addButton( "Download and Install", QMessageBox::AcceptRole );
-		QAbstractButton* release_button = dialog.addButton( "View Release", QMessageBox::ActionRole );
-		dialog.addButton( "Later", QMessageBox::RejectRole );
+		QAbstractButton* download_button = dialog.addButton( i18n::tr( "Install" ), QMessageBox::AcceptRole );
+		QAbstractButton* ignore_button = dialog.addButton( i18n::tr( "Ignore This Version" ), QMessageBox::DestructiveRole );
+		QAbstractButton* release_button = dialog.addButton( i18n::tr( "View Release" ), QMessageBox::ActionRole );
+		dialog.addButton( i18n::tr( "Later" ), QMessageBox::RejectRole );
 		dialog.exec();
+		g_update_auto_install = autoInstall->isChecked();
 
 		if ( dialog.clickedButton() == download_button ) {
+			g_update_ignored_version = "";
 			start_download( manifest, asset );
+		}
+		else if ( dialog.clickedButton() == ignore_button ) {
+			g_update_ignored_version = manifest.version.toLatin1().constData();
 		}
 		else if ( dialog.clickedButton() == release_button ) {
 			if ( !manifest.notes.isEmpty() ) {
@@ -677,7 +717,7 @@ private:
 
 		const QString temp_root = QStandardPaths::writableLocation( QStandardPaths::TempLocation );
 		if ( temp_root.isEmpty() ) {
-			qt_MessageBox( parentWindow(), "No writable temp directory available.", "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "No writable temp directory available." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			return;
 		}
 
@@ -688,7 +728,7 @@ private:
 		m_download_path = QDir( m_download_dir ).filePath( asset.name.isEmpty() ? "update.bin" : asset.name );
 		m_download_file.setFileName( m_download_path );
 		if ( !m_download_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
-			qt_MessageBox( parentWindow(), "Failed to open download file.", "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "Failed to open download file." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			return;
 		}
 
@@ -697,7 +737,7 @@ private:
 
 		m_download_in_progress = true;
 
-		m_download_dialog = new QProgressDialog( "Downloading update...", "Cancel", 0, 100, parentWindow() );
+		m_download_dialog = new QProgressDialog( i18n::tr( "Downloading update..." ), i18n::tr( "Cancel" ), 0, 100, parentWindow() );
 		m_download_dialog->setWindowModality( Qt::WindowModal );
 		m_download_dialog->setMinimumDuration( 0 );
 		m_download_dialog->setValue( 0 );
@@ -751,7 +791,7 @@ private:
 		}
 		if ( net_error != QNetworkReply::NoError ) {
 			QFile::remove( m_download_path );
-			qt_MessageBox( parentWindow(), "Update download failed.", "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "Update download failed." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			return;
 		}
 
@@ -760,7 +800,7 @@ private:
 			const QString hash = sha256_file( m_download_path, error );
 			if ( hash.isEmpty() || QString::compare( hash, asset.sha256, Qt::CaseInsensitive ) != 0 ) {
 				QFile::remove( m_download_path );
-				qt_MessageBox( parentWindow(), "Update verification failed.", "Update", EMessageBoxType::Error );
+				qt_MessageBox_qstring( parentWindow(), i18n::tr( "Update verification failed." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 				return;
 			}
 		}
@@ -771,7 +811,8 @@ private:
 	}
 
 	bool install_update( const UpdateAsset& asset, const QString& path ){
-		if ( !ConfirmModified( "Install Update" ) ) {
+		const QByteArray installUpdateUtf8 = i18n::tr( "Install Update" ).toUtf8();
+		if ( !ConfirmModified( installUpdateUtf8.constData() ) ) {
 			return false;
 		}
 
@@ -786,7 +827,7 @@ private:
 #else
 		Q_UNUSED( asset );
 		Q_UNUSED( path );
-		qt_MessageBox( parentWindow(), "Auto-update is not supported on this platform.", "Update", EMessageBoxType::Info );
+		qt_MessageBox_qstring( parentWindow(), i18n::tr( "Auto-update is not supported on this platform." ), i18n::tr( "Update" ), EMessageBoxType::Info );
 		return false;
 #endif
 	}
@@ -797,7 +838,7 @@ private:
 
 		QString error;
 		if ( !ensure_writable_directory( install_dir, error ) ) {
-			qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), error, i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 
@@ -816,14 +857,14 @@ private:
 
 		QFile script_file( script_path );
 		if ( !script_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
-			qt_MessageBox( parentWindow(), "Failed to write update script.", "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "Failed to write update script." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 		script_file.write( script.toLatin1() );
 		script_file.close();
 
 		if ( !QProcess::startDetached( "powershell", { "-ExecutionPolicy", "Bypass", "-File", script_path } ) ) {
-			qt_MessageBox( parentWindow(), "Failed to launch updater.", "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "Failed to launch updater." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 
@@ -835,14 +876,14 @@ private:
 	bool install_update_linux( const QString& path ){
 		const QByteArray appimage_env = qgetenv( "APPIMAGE" );
 		if ( appimage_env.isEmpty() ) {
-			qt_MessageBox( parentWindow(), "Auto-update requires the AppImage build.", "Update", EMessageBoxType::Info );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "Auto-update requires the AppImage build." ), i18n::tr( "Update" ), EMessageBoxType::Info );
 			return false;
 		}
 
 		const QString appimage_path = QString::fromUtf8( appimage_env );
 		QString error;
 		if ( !ensure_writable_directory( QFileInfo( appimage_path ).absolutePath(), error ) ) {
-			qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), error, i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 
@@ -862,7 +903,7 @@ private:
 
 		QFile script_file( script_path );
 		if ( !script_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
-			qt_MessageBox( parentWindow(), "Failed to write update script.", "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "Failed to write update script." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 		script_file.write( script.toLatin1() );
@@ -871,7 +912,7 @@ private:
 		QFile::setPermissions( script_path, QFile::permissions( script_path ) | QFileDevice::ExeUser );
 
 		if ( !QProcess::startDetached( "/bin/sh", { script_path } ) ) {
-			qt_MessageBox( parentWindow(), "Failed to launch updater.", "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "Failed to launch updater." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 
@@ -886,7 +927,7 @@ private:
 
 		QString error;
 		if ( !ensure_writable_directory( install_dir, error ) ) {
-			qt_MessageBox( parentWindow(), error.toLatin1().constData(), "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), error, i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 
@@ -896,8 +937,8 @@ private:
 			|| path.endsWith( ".tgz", Qt::CaseInsensitive );
 		const bool is_zip = lower_type == "zip" || path.endsWith( ".zip", Qt::CaseInsensitive );
 		if ( !is_targz && !is_zip ) {
-			const auto msg = QString( "Unsupported macOS update package format: %1" ).arg( asset.type.isEmpty() ? "unknown" : asset.type );
-			qt_MessageBox( parentWindow(), msg.toLatin1().constData(), "Update", EMessageBoxType::Error );
+			const auto msg = i18n::tr( "Unsupported macOS update package format: %1" ).arg( asset.type.isEmpty() ? i18n::tr( "unknown" ) : asset.type );
+			qt_MessageBox_qstring( parentWindow(), msg, i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 
@@ -932,7 +973,7 @@ private:
 
 		QFile script_file( script_path );
 		if ( !script_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
-			qt_MessageBox( parentWindow(), "Failed to write update script.", "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "Failed to write update script." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 		script_file.write( script.toLatin1() );
@@ -941,7 +982,7 @@ private:
 		QFile::setPermissions( script_path, QFile::permissions( script_path ) | QFileDevice::ExeUser );
 
 		if ( !QProcess::startDetached( "/bin/sh", { script_path } ) ) {
-			qt_MessageBox( parentWindow(), "Failed to launch updater.", "Update", EMessageBoxType::Error );
+			qt_MessageBox_qstring( parentWindow(), i18n::tr( "Failed to launch updater." ), i18n::tr( "Update" ), EMessageBoxType::Error );
 			return false;
 		}
 
@@ -953,14 +994,14 @@ private:
 	bool ensure_writable_directory( const QString& dir, QString& error ) const {
 		QDir target( dir );
 		if ( !target.exists() ) {
-			error = StringStream( "Update directory does not exist: ", dir.toLatin1().constData() ).c_str();
+			error = i18n::tr( "Update directory does not exist: %1" ).arg( dir );
 			return false;
 		}
 
 		const QString test_path = target.filePath( ".update_write_test" );
 		QFile test_file( test_path );
 		if ( !test_file.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
-			error = StringStream( "Update directory is not writable: ", dir.toLatin1().constData() ).c_str();
+			error = i18n::tr( "Update directory is not writable: %1" ).arg( dir );
 			return false;
 		}
 		test_file.close();

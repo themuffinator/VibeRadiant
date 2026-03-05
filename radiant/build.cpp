@@ -29,6 +29,7 @@
 
 #include "qe3.h"
 #include "mainframe.h"
+#include "gtkutil/i18n.h"
 
 typedef std::map<CopiedString, CopiedString> Variables;
 Variables g_build_variables;
@@ -1036,7 +1037,7 @@ public:
 EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 	static auto [dialog, rootLayout] = [](){
 		auto *dialog = new QDialog( MainFrame_getWindow(), Qt::Dialog | Qt::WindowCloseButtonHint );
-		dialog->setWindowTitle( "Build & Launch Tasks" );
+		dialog->setWindowTitle( i18n::tr( "Build & Launch Tasks" ) );
 		g_guiSettings.addWindow( dialog, "BuildMenu/geometry", 700, 500 );
 		auto *rootLayout = new QHBoxLayout( dialog );
 		rootLayout->setContentsMargins( 0, 0, 0, 0 );
@@ -1058,12 +1059,12 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 								&QAbstractButton::clicked, dialog, &QDialog::reject );
 			QObject::connect( buttons->addButton( QDialogButtonBox::StandardButton::Reset ),
 								&QAbstractButton::clicked, [dialog = dialog](){ dialog->done( eIDNO ); } );
-			buttons->button( QDialogButtonBox::StandardButton::Reset )->setToolTip( "Reset to editor start state" );
+			buttons->button( QDialogButtonBox::StandardButton::Reset )->setToolTip( i18n::tr( "Reset to editor start state" ) );
 			grid->addWidget( buttons, 0, 1 );
 		}
 		QTreeWidget* buildView = nullptr;
 		{
-			auto *frame = new QGroupBox( "Build Tasks" );
+			auto *frame = new QGroupBox( i18n::tr( "Build Tasks" ) );
 			grid->addWidget( frame, 0, 0 );
 			grid->setRowStretch( 0, 1 );
 			{
@@ -1077,7 +1078,7 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 			}
 		}
 		{
-			auto *frame = new QGroupBox( "Task Commands" );
+			auto *frame = new QGroupBox( i18n::tr( "Task Commands" ) );
 			grid->addWidget( frame, 1, 0 );
 			{
 				auto *tree = new QTreeWidget_commands;
@@ -1093,7 +1094,7 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 			}
 		}
 		{
-			auto *expander = new QGroupBox( "Task Variables" );
+			auto *expander = new QGroupBox( i18n::tr( "Task Variables" ) );
 			expander->setFlat( true );
 			expander->setCheckable( true );
 			expander->setChecked( false );
@@ -1108,7 +1109,7 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 
 			build_init_variables();
 			{ // immutable variables
-				vbox->addWidget( new QLabel( "Constants:" ) );
+				vbox->addWidget( new QLabel( i18n::tr( "Constants:" ) ) );
 				QIcon icon = new_local_icon( "copy.png" );
 				auto *table = new QTableWidget( 0, 2 );
 				vbox->addWidget( table );
@@ -1126,7 +1127,7 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 					if( item->column() == 0 ){
 						QApplication::clipboard()->setText( item->text() );
 						QTableWidget *table = item->tableWidget();
-						QToolTip::showText( table->mapToGlobal( table->visualItemRect( item ).bottomLeft() ), "Copied to clipboard.", table, QRect(), 666 );
+						QToolTip::showText( table->mapToGlobal( table->visualItemRect( item ).bottomLeft() ), i18n::tr( "Copied to clipboard." ), table, QRect(), 666 );
 					}
 				} );
 
@@ -1138,7 +1139,7 @@ EMessageBoxReturn BuildMenuDialog_construct( ProjectList& projectList ){
 			}
 			build_init_tools();
 			{ // mutable 'Tool' variables
-				vbox->addWidget( new QLabel( "Editables:" ) );
+				vbox->addWidget( new QLabel( i18n::tr( "Editables:" ) ) );
 				auto *table = new QTableWidget( 0, 2 );
 				vbox->addWidget( table );
 				table->horizontalHeader()->hide();

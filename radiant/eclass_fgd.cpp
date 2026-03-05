@@ -109,6 +109,82 @@ do{\
 }while( false )
 
 
+const char* EntityClassFGD_mapAttributeType( const char* type ){
+	if ( string_equal_nocase( type, "string" ) ) {
+		return "string";
+	}
+	if ( string_equal_nocase( type, "integer" ) ) {
+		return "integer";
+	}
+	if ( string_equal_nocase( type, "float" ) || string_equal_nocase( type, "real" ) ) {
+		return "real";
+	}
+	if ( string_equal_nocase( type, "boolean" ) ) {
+		return "boolean";
+	}
+	if ( string_equal_nocase( type, "array" ) ) {
+		return "array";
+	}
+	if ( string_equal_nocase( type, "studio" ) || string_equal_nocase( type, "model" ) ) {
+		return "model";
+	}
+	if ( string_equal_nocase( type, "sprite" ) ) {
+		return "texture";
+	}
+	if ( string_equal_nocase( type, "sound" ) ) {
+		return "sound";
+	}
+	if ( string_equal_nocase( type, "material" ) || string_equal_nocase( type, "texture" ) ) {
+		return "texture";
+	}
+	if ( string_equal_nocase( type, "shader" ) ) {
+		return "shader";
+	}
+	if ( string_equal_nocase( type, "skin" ) ) {
+		return "skin";
+	}
+	if ( string_equal_nocase( type, "color" )
+	  || string_equal_nocase( type, "color1" )
+	  || string_equal_nocase( type, "color255" ) ) {
+		return "color";
+	}
+	if ( string_equal_nocase( type, "angle" ) ) {
+		return "angle";
+	}
+	if ( string_equal_nocase( type, "direction" ) || string_equal_nocase( type, "node_dest" ) ) {
+		return "direction";
+	}
+	if ( string_equal_nocase( type, "angles" ) ) {
+		return "angles";
+	}
+	if ( string_equal_nocase( type, "real3" )
+	  || string_equal_nocase( type, "origin" )
+	  || string_equal_nocase( type, "vector" )
+	  || string_equal_nocase( type, "vecline" )
+	  || string_equal_nocase( type, "axis" ) ) {
+		return "vector3";
+	}
+	if ( string_equal_nocase( type, "target" )
+	  || string_equal_nocase( type, "target_destination" )
+	  || string_equal_nocase( type, "target_name_or_class" )
+	  || string_equal_nocase( type, "pointentityclass" ) ) {
+		return "target";
+	}
+	if ( string_equal_nocase( type, "targetname" )
+	  || string_equal_nocase( type, "target_source" ) ) {
+		return "targetname";
+	}
+	if ( string_equal_nocase( type, "scene" )
+	  || string_equal_nocase( type, "filterclass" )
+	  || string_equal_nocase( type, "sidelist" )
+	  || string_equal_nocase( type, "npcclass" ) ) {
+		return "string";
+	}
+
+	return nullptr;
+}
+
+
 void EntityClassFGD_parseSplitString( Tokeniser& tokeniser, CopiedString& string ){
 	StringOutputStream buffer( 256 );
 	for (;; )
@@ -453,42 +529,12 @@ void EntityClassFGD_parseClass( Tokeniser& tokeniser, bool fixedsize, bool isBas
 		}
 		else if ( string_equal_nocase( type.c_str(), "decal" ) ) {
 		}
-		else if ( string_equal_nocase( type.c_str(), "string" )
-		       || string_equal_nocase( type.c_str(), "integer" )
-		       || string_equal_nocase( type.c_str(), "studio" )
-		       || string_equal_nocase( type.c_str(), "sprite" )
-		       || string_equal_nocase( type.c_str(), "color255" )
-		       || string_equal_nocase( type.c_str(), "color1" )
-		       || string_equal_nocase( type.c_str(), "target_source" )
-		       || string_equal_nocase( type.c_str(), "target_destination" )
-		       || string_equal_nocase( type.c_str(), "sound" )
-		       // hl2 below
-		       || string_equal_nocase( type.c_str(), "angle" )
-		       || string_equal_nocase( type.c_str(), "origin" )
-		       || string_equal_nocase( type.c_str(), "float" )
-		       || string_equal_nocase( type.c_str(), "node_dest" )
-		       || string_equal_nocase( type.c_str(), "filterclass" )
-		       || string_equal_nocase( type.c_str(), "vector" )
-		       || string_equal_nocase( type.c_str(), "sidelist" )
-		       || string_equal_nocase( type.c_str(), "material" )
-		       || string_equal_nocase( type.c_str(), "vecline" )
-		       || string_equal_nocase( type.c_str(), "axis" )
-		       || string_equal_nocase( type.c_str(), "npcclass" )
-		       || string_equal_nocase( type.c_str(), "target_name_or_class" )
-		       || string_equal_nocase( type.c_str(), "pointentityclass" )
-		       || string_equal_nocase( type.c_str(), "scene" ) ) {
+		else if ( const char* attributeType = EntityClassFGD_mapAttributeType( type.c_str() ); attributeType != nullptr ) {
 			if ( !string_equal( tokeniser.getToken(), "readonly" ) ) {
 				tokeniser.ungetToken();
 			}
 
 			ASSERT_MESSAGE( EntityClassFGD_parseToken( tokeniser, ":" ), PARSE_ERROR );
-			const char* attributeType = "string";
-			if ( string_equal_nocase( type.c_str(), "studio" ) ) {
-				attributeType = "model";
-			}
-			else if ( string_equal_nocase( type.c_str(), "color1" ) ) {
-				attributeType = "color";
-			}
 
 			EntityClassAttribute attribute;
 			attribute.m_type = attributeType;

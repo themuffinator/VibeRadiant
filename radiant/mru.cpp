@@ -29,6 +29,7 @@
 #include "stream/stringstream.h"
 
 #include "gtkutil/menu.h"
+#include "gtkutil/i18n.h"
 #include "map.h"
 #include "qe3.h"
 
@@ -155,7 +156,7 @@ void MRU_Activate( std::size_t index ){
 			MRU_SetText( i, MRU_GetText( i + 1 ) );
 
 		if ( MRU_used == 0 ) {
-			MRU_items[0]->setText( "Recent Files" );
+			MRU_items[0]->setText( i18n::tr( "Recent Files" ) );
 			MRU_items[0]->setEnabled( false );
 		}
 		else
@@ -174,7 +175,8 @@ public:
 		: m_number( number ){
 	}
 	void load(){
-		if ( ConfirmModified( "Open Map" ) ) {
+		const QByteArray openMapUtf8 = i18n::tr( "Open Map" ).toUtf8();
+		if ( ConfirmModified( openMapUtf8.constData() ) ) {
 			MRU_Activate( m_number - 1 );
 		}
 	}

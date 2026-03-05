@@ -52,6 +52,7 @@
 #include <cctype>
 
 #include <QWidget>
+#include <QAbstractButton>
 #include <QSplashScreen>
 #include <QCoreApplication>
 #include <QMainWindow>
@@ -67,6 +68,7 @@
 #include <QGroupBox>
 #include <QDialogButtonBox>
 #include <QDialog>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QToolButton>
 #include <QPushButton>
@@ -87,6 +89,7 @@
 #include "gtkutil/glwidget.h"
 #include "gtkutil/image.h"
 #include "gtkutil/i18n.h"
+#include "gtkutil/messagebox.h"
 #include "gtkutil/menu.h"
 #include "gtkutil/guisettings.h"
 #include "gtkutil/widget.h"
@@ -110,6 +113,7 @@
 #include "help.h"
 #include "map.h"
 #include "mru.h"
+#include "error.h"
 #include "patchmanip.h"
 #include "plugin.h"
 #include "pluginmanager.h"
@@ -143,6 +147,7 @@
 #include "colors.h"
 #include "tools.h"
 #include "filterbar.h"
+#include "genai.h"
 
 
 // VFS
@@ -563,6 +568,14 @@ void EnginePath_applyLegacyHints( GameInstallRule& rule ){
 	else if ( gameFileLower == "nexuiz.game" ) {
 		addRequired( "data/common-spog.pk3" );
 		addAlias( "Nexuiz" );
+	}
+	else if ( gameFileLower == "doom3-demo.game" ) {
+		addAlias( "Doom 3 Demo" );
+		addAlias( "Doom3 Demo" );
+	}
+	else if ( gameFileLower == "xreal.game" ) {
+		addAlias( "XreaL" );
+		addAlias( "Xreal" );
 	}
 	else if ( gameFileLower == "warsow.game" ) {
 		addRequired( "basewsw/dedicated_autoexec.cfg" );
@@ -1072,6 +1085,55 @@ void EnginePath_refreshDetectedInstalls(){
 }
 } // namespace
 
+std::vector<DetectedGameInstallPath> EnginePath_detectInstallationsForGame( const CGameDescription& gameDescription, const char* currentPath ){
+	CGameDescription* const previousGameDescription = g_pGameDescription;
+	const CopiedString previousEnginePath = g_strEnginePath;
+
+	g_pGameDescription = const_cast<CGameDescription*>( &gameDescription );
+	g_strEnginePath = ( currentPath != nullptr && !string_empty( currentPath ) )
+		? StringStream( DirectoryCleaned( currentPath ) )
+		: "";
+
+	EnginePath_refreshDetectedInstalls();
+
+	const auto rule = EnginePath_buildInstallRule();
+	auto effectiveRule = rule;
+	EnginePath_applyLegacyHints( effectiveRule );
+
+	std::vector<DetectedGameInstallPath> installs;
+	installs.reserve( g_detectedEngineInstalls.size() );
+	for ( const auto& install : g_detectedEngineInstalls )
+	{
+		if ( !EnginePath_hasGameDataAt( install.path.c_str(), effectiveRule ) ) {
+			continue;
+		}
+		bool duplicate = false;
+		for ( const auto& existing : installs )
+		{
+			if ( path_equal( existing.path.c_str(), install.path.c_str() ) ) {
+				duplicate = true;
+				break;
+			}
+		}
+		if ( duplicate ) {
+			continue;
+		}
+		installs.push_back( { install.path, install.source } );
+	}
+
+	g_strEnginePath = previousEnginePath;
+	g_pGameDescription = previousGameDescription;
+	if ( g_pGameDescription != nullptr ) {
+		EnginePath_refreshDetectedInstalls();
+	}
+	else{
+		g_detectedEngineInstalls.clear();
+		g_detectedEngineInstallInitialSelection = -1;
+	}
+
+	return installs;
+}
+
 void setEnginePath( CopiedString& self, const char* value ){
 	const auto buffer = StringStream( DirectoryCleaned( value ) );
 	if ( !path_equal( buffer, self.c_str() ) ) {
@@ -1261,6 +1323,96 @@ public:
 PathsDialog g_PathsDialog;
 
 static bool g_strEnginePath_was_empty_1st_start = false;
+static bool g_startup_onboarding_completed = false;
+static int g_editor_style_preference = 0; // 0 = NetRadiant
+static bool g_startup_setup_wizard_has_run = false;
+static bool g_startup_setup_wizard_in_progress = false;
+
+namespace
+{
+const char* k_global_pref_filename = "global.pref";
+constexpr int k_editor_style_netradiant = 0;
+
+bool Startup_hasSavedPreferences(){
+	const auto globalPrefPath = StringStream( g_Preferences.m_global_rc_path, k_global_pref_filename );
+	return file_exists( globalPrefPath.c_str() ) && file_exists( g_Preferences.m_inipath.c_str() );
+}
+
+bool Startup_hasValidGameInstallation(){
+	return file_is_directory( g_strEnginePath.c_str() );
+}
+
+bool Startup_tryAutoDetectGameInstallation(){
+	EnginePath_refreshDetectedInstalls();
+
+	const auto rule = EnginePath_buildInstallRule();
+	auto effectiveRule = rule;
+	EnginePath_applyLegacyHints( effectiveRule );
+
+	for ( const auto& install : g_detectedEngineInstalls )
+	{
+		if ( !EnginePath_hasGameDataAt( install.path.c_str(), effectiveRule ) ) {
+			continue;
+		}
+		g_strEnginePath = install.path;
+		g_strEnginePath_was_empty_1st_start = false;
+		globalOutputStream() << "Startup setup auto-detected game installation (" << install.source
+		                     << "): " << Quoted( g_strEnginePath ) << '\n';
+		return true;
+	}
+	return false;
+}
+
+void Startup_promptEditorStyle(){
+	QMessageBox dialog;
+	dialog.setWindowTitle( i18n::tr( "VibeRadiant Setup" ) );
+	dialog.setText( i18n::tr( "Choose your preferred editor style." ) );
+	dialog.setInformativeText( i18n::tr( "Currently available: NetRadiant." ) );
+	QAbstractButton* netRadiantButton = dialog.addButton( i18n::tr( "Use NetRadiant" ), QMessageBox::AcceptRole );
+	dialog.addButton( i18n::tr( "Decide Later" ), QMessageBox::RejectRole );
+	dialog.exec();
+
+	if ( dialog.clickedButton() == netRadiantButton ) {
+		g_editor_style_preference = k_editor_style_netradiant;
+		g_startup_onboarding_completed = true;
+	}
+}
+
+void Startup_runSetupWizardIfNeeded(){
+	if ( g_startup_setup_wizard_has_run || g_startup_setup_wizard_in_progress ) {
+		return;
+	}
+
+	g_startup_setup_wizard_in_progress = true;
+	g_startup_setup_wizard_has_run = true;
+
+	const bool prefsMissing = !Startup_hasSavedPreferences();
+	const bool installMissing = !Startup_hasValidGameInstallation();
+	const bool onboardingMissing = !g_startup_onboarding_completed;
+	if ( !prefsMissing && !installMissing && !onboardingMissing ) {
+		g_startup_setup_wizard_in_progress = false;
+		return;
+	}
+
+	globalOutputStream() << "Running startup setup wizard (prefsMissing=" << ( prefsMissing ? 1 : 0 )
+	                     << ", installMissing=" << ( installMissing ? 1 : 0 )
+	                     << ", onboardingMissing=" << ( onboardingMissing ? 1 : 0 ) << ")\n";
+
+	if ( installMissing ) {
+		Startup_tryAutoDetectGameInstallation();
+	}
+
+	if ( !g_startup_onboarding_completed && Startup_hasValidGameInstallation() ) {
+		Startup_promptEditorStyle();
+	}
+
+	g_startup_setup_wizard_in_progress = false;
+}
+} // namespace
+
+void Startup_PreMainWindowSetup(){
+	Startup_runSetupWizardIfNeeded();
+}
 
 void EnginePath_verify(){
 	bool needsPrompt = !file_exists( g_strEnginePath.c_str() ) || g_strEnginePath_was_empty_1st_start;
@@ -1287,10 +1439,19 @@ void EnginePath_verify(){
 		}
 	}
 	if ( needsPrompt ) {
-		g_installedDevFilesPath = ""; // trigger install for non existing engine path case
-		g_PathsDialog.Create( nullptr );
-		g_PathsDialog.DoModal();
-		g_PathsDialog.Destroy();
+		if ( Startup_tryAutoDetectGameInstallation() ) {
+			needsPrompt = false;
+		}
+	}
+	if ( needsPrompt ) {
+		qt_MessageBox(
+			MainFrame_getWindow(),
+			"Unable to continue: no valid game installation is configured for this game profile.\n"
+			"Please configure an installation in the game setup manager and restart VibeRadiant.",
+			"VibeRadiant Setup",
+			EMessageBoxType::Error
+		);
+		Error( "No valid game installation configured for %s", g_pGameDescription->mGameFile.c_str() );
 	}
 	installDevFiles(); // try this anytime, as engine path may be set via command line or -gamedetect
 }
@@ -2231,6 +2392,21 @@ void create_map_menu( QMenuBar *menubar ){
 	create_menu_item_with_mnemonic( menu, "Set 2D Background Image...", "Set2DBackgroundImage" );
 }
 
+void create_genai_menu( QMenuBar *menubar ){
+	QMenu *menu = menubar->addMenu( i18n::tr( "&GenAI" ) );
+
+	menu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
+
+	create_check_menu_item_with_mnemonic( menu, "Enable GenAI", "GenAIEnable" );
+	menu->addSeparator();
+	create_menu_item_with_mnemonic( menu, "Prompt-to-Blockout...", "GenAIPromptToBlockout" );
+	menu->addSeparator();
+	create_menu_item_with_mnemonic( menu, "GenAI Preferences...", "GenAIPreferences" );
+	create_menu_item_with_mnemonic( menu, "Show GenAI Status", "GenAIStatus" );
+	create_menu_item_with_mnemonic( menu, "Open OpenAI API Docs", "GenAIOpenAPIDocs" );
+	create_menu_item_with_mnemonic( menu, "Clear Stored API Key", "GenAIClearAPIKey" );
+}
+
 void create_entity_menu( QMenuBar *menubar ){
 	// Entity menu
 	QMenu *menu = menubar->addMenu( i18n::tr( "E&ntity" ) );
@@ -2287,6 +2463,7 @@ void create_main_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
   	create_edit_menu( menubar );
 	create_view_menu( menubar, style );
 	create_window_menu( menubar, style );
+	create_genai_menu( menubar );
 	create_selection_menu( menubar );
 	create_map_menu( menubar );
 	create_bsp_menu( menubar );
@@ -2519,7 +2696,7 @@ struct ConsoleSummaryStatusWidgets
 
 void ConsoleSummaryStatus_refresh();
 
-void ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory category, const char* title ){
+void ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory category, const QString& title ){
 	const auto lines = Console_getCategoryMessages( category );
 	Console_clearCategory( category );
 	ConsoleSummaryStatus_refresh();
@@ -2530,7 +2707,7 @@ void ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory category,
 
 	auto *dialog = new QDialog( MainFrame_getWindow(), Qt::Dialog | Qt::WindowCloseButtonHint );
 	dialog->setAttribute( Qt::WidgetAttribute::WA_DeleteOnClose );
-	dialog->setWindowTitle( i18n::tr( title ) );
+	dialog->setWindowTitle( title );
 	dialog->resize( 760, 420 );
 
 	auto *vbox = new QVBoxLayout( dialog );
@@ -2570,22 +2747,22 @@ void ConsoleSummaryStatus_refresh(){
 		switch ( state )
 		{
 		case BuildRuntimeState::Building:
-			button->setText( "Build" );
+			button->setText( i18n::tr( "Build" ) );
 			button->setStyleSheet( "QToolButton { border: 1px solid #3f6f8f; border-radius: 9px; padding: 1px 8px; background: #21465e; color: #d9f0ff; font-weight: 600; }" );
 			button->setVisible( true );
 			break;
 		case BuildRuntimeState::Launching:
-			button->setText( "Launch" );
+			button->setText( i18n::tr( "Launch" ) );
 			button->setStyleSheet( "QToolButton { border: 1px solid #4d6f45; border-radius: 9px; padding: 1px 8px; background: #2c4a28; color: #d8f5cf; font-weight: 600; }" );
 			button->setVisible( true );
 			break;
 		case BuildRuntimeState::Succeeded:
-			button->setText( "Done" );
+			button->setText( i18n::tr( "Done" ) );
 			button->setStyleSheet( "QToolButton { border: 1px solid #4d6f45; border-radius: 9px; padding: 1px 8px; background: #2f4f2a; color: #d9f5cf; font-weight: 600; }" );
 			button->setVisible( true );
 			break;
 		case BuildRuntimeState::Failed:
-			button->setText( "Failed" );
+			button->setText( i18n::tr( "Failed" ) );
 			button->setStyleSheet( "QToolButton { border: 1px solid #8d3942; border-radius: 9px; padding: 1px 8px; background: #4f2327; color: #f7c0c6; font-weight: 600; }" );
 			button->setVisible( true );
 			break;
@@ -2617,7 +2794,7 @@ void ConsoleSummaryStatus_refresh(){
 	g_consoleSummaryStatusWidgets.container->setVisible( anyVisible );
 }
 
-QToolButton* ConsoleSummaryStatus_createBadge( QWidget* parent, const char* tooltip, const char* stylesheet ){
+QToolButton* ConsoleSummaryStatus_createBadge( QWidget* parent, const QString& tooltip, const char* stylesheet ){
 	auto *button = new QToolButton( parent );
 	button->setAutoRaise( false );
 	button->setToolButtonStyle( Qt::ToolButtonStyle::ToolButtonTextOnly );
@@ -2682,11 +2859,11 @@ void create_main_statusbar( QStatusBar *statusbar, QLabel *pStatusLabel[c_status
 			if( i == c_status_brushsize ){
 				statusbar->addPermanentWidget( label, 0 );
 				label->setMinimumWidth( label->fontMetrics().horizontalAdvance( "9999x9999x9999" ) );
-				label->setToolTip( "Selection size (X x Y x Z)" );
+				label->setToolTip( i18n::tr( "Selection size (X x Y x Z)" ) );
 			}
 			else if( i == c_status_grid ){
 				statusbar->addPermanentWidget( label, 0 );
-				label->setToolTip( " <b>G</b>: <u>G</u>rid size<br> <b>F</b>: map <u>F</u>ormat<br> <b>C</b>: camera <u>C</u>lip distance <br> <b>L</b>: texture <u>L</u>ock" );
+				label->setToolTip( i18n::tr( " <b>G</b>: <u>G</u>rid size<br> <b>F</b>: map <u>F</u>ormat<br> <b>C</b>: camera <u>C</u>lip distance <br> <b>L</b>: texture <u>L</u>ock" ) );
 			}
 			else
 				statusbar->addPermanentWidget( label, 1 );
@@ -2702,32 +2879,32 @@ void create_main_statusbar( QStatusBar *statusbar, QLabel *pStatusLabel[c_status
 
 		g_consoleSummaryStatusWidgets.build = ConsoleSummaryStatus_createBadge(
 			widget,
-			"Build status",
+			i18n::tr( "Build status" ),
 			"QToolButton { border: 1px solid #3f6f8f; border-radius: 9px; padding: 1px 8px; background: #21465e; color: #d9f0ff; font-weight: 600; }"
 		);
 		g_consoleSummaryStatusWidgets.notifications = ConsoleSummaryStatus_createBadge(
 			widget,
-			"Notifications",
+			i18n::tr( "Notifications" ),
 			"QToolButton { border: 1px solid #4b6678; border-radius: 9px; padding: 1px 8px; background: #243746; color: #dcecf8; font-weight: 600; }"
 		);
 		g_consoleSummaryStatusWidgets.warnings = ConsoleSummaryStatus_createBadge(
 			widget,
-			"Warnings",
+			i18n::tr( "Warnings" ),
 			"QToolButton { border: 1px solid #8a6d2f; border-radius: 9px; padding: 1px 8px; background: #4a3b1f; color: #f6df95; font-weight: 600; }"
 		);
 		g_consoleSummaryStatusWidgets.errors = ConsoleSummaryStatus_createBadge(
 			widget,
-			"Errors",
+			i18n::tr( "Errors" ),
 			"QToolButton { border: 1px solid #8d3942; border-radius: 9px; padding: 1px 8px; background: #4f2327; color: #f7c0c6; font-weight: 600; }"
 		);
 		QObject::connect( g_consoleSummaryStatusWidgets.notifications, &QToolButton::clicked, [](){
-			ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory::Notifications, "Notifications" );
+			ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory::Notifications, i18n::tr( "Notifications" ) );
 		} );
 		QObject::connect( g_consoleSummaryStatusWidgets.warnings, &QToolButton::clicked, [](){
-			ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory::Warnings, "Warnings" );
+			ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory::Warnings, i18n::tr( "Warnings" ) );
 		} );
 		QObject::connect( g_consoleSummaryStatusWidgets.errors, &QToolButton::clicked, [](){
-			ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory::Errors, "Errors" );
+			ConsoleSummaryStatus_showCategoryMessages( ConsoleSummaryCategory::Errors, i18n::tr( "Errors" ) );
 		} );
 
 		hbox->addWidget( g_consoleSummaryStatusWidgets.build );
@@ -2771,13 +2948,14 @@ MainFrame::MainFrame() : m_idleRedrawStatusText( RedrawStatusTextCaller( *this )
 }
 
 MainFrame::~MainFrame(){
-	SaveGuiState();
-
-	m_window->hide(); // hide to avoid resize events during content deletion
+	if ( m_window != nullptr ) {
+		SaveGuiState();
+		m_window->hide(); // hide to avoid resize events during content deletion
+	}
 
 	Shutdown();
 
-	delete m_window;
+	delete std::exchange( m_window, nullptr );
 }
 
 void MainFrame::SetActiveXY( XYWnd* p ){
@@ -2882,11 +3060,24 @@ public:
 };
 
 
+QString splash_message_text( const QString& status ){
+	const QString version = QString::fromLatin1( RADIANT_VERSION_NUMBER );
+	const QString buildDate = QString::fromLatin1( __DATE__ );
+	const QString state = status.trimmed().isEmpty() ? QStringLiteral( "Preparing startup..." ) : status.trimmed();
+
+	return QStringLiteral(
+		"VibeRadiant\n"
+		"Version %1\n"
+		"Build %2\n\n"
+		"%3" )
+		.arg( version, buildDate, state );
+}
+
 QSplashScreen *create_splash(){
 	auto *splash = new QSplashScreen( new_local_image( "splash.png" ) );
 	splash->showMessage(
-		QStringLiteral( "Starting VibeRadiant...\nv%1" ).arg( QString::fromLatin1( RADIANT_VERSION_NUMBER ) ),
-		Qt::AlignHCenter | Qt::AlignBottom,
+		splash_message_text( QStringLiteral( "Starting up..." ) ),
+		Qt::AlignLeft | Qt::AlignBottom,
 		Qt::white );
 	splash->show();
 	return splash;
@@ -2905,14 +3096,8 @@ void set_splash_status( const char* status ){
 		return;
 	}
 
-	const QString text = QString::fromLatin1( status ? status : "" ).trimmed();
-	const QString version = QString::fromLatin1( RADIANT_VERSION_NUMBER );
-	if ( text.isEmpty() ) {
-		splash_screen->showMessage( QStringLiteral( "v%1" ).arg( version ), Qt::AlignHCenter | Qt::AlignBottom, Qt::white );
-	}
-	else{
-		splash_screen->showMessage( QStringLiteral( "%1\nv%2" ).arg( text, version ), Qt::AlignHCenter | Qt::AlignBottom, Qt::white );
-	}
+	const QString text = QString::fromLatin1( status ? status : "" );
+	splash_screen->showMessage( splash_message_text( text ), Qt::AlignLeft | Qt::AlignBottom, Qt::white );
 	process_gui();
 }
 
@@ -2953,7 +3138,16 @@ void MainFrame::Create(){
 	GlobalShortcuts_setWidget( window );
 	register_shortcuts();
 
-	m_nCurrentStyle = (EViewStyle)g_Layout_viewStyle.m_value;
+	const int configuredStyle = g_Layout_viewStyle.m_value;
+	if ( configuredStyle < static_cast<int>( eRegular ) || configuredStyle > static_cast<int>( eRegularLeft ) ) {
+		globalWarningStream() << "Invalid layout style in preferences (" << configuredStyle
+		                      << "), falling back to regular layout\n";
+		m_nCurrentStyle = eRegular;
+	}
+	else
+	{
+		m_nCurrentStyle = static_cast<EViewStyle>( configuredStyle );
+	}
 
 	create_main_menu( window->menuBar(), CurrentStyle() );
 
@@ -2994,8 +3188,6 @@ void MainFrame::Create(){
 	g_page_layers = GroupDialog_addPage( "Layers", LayersBrowser_constructWindow( GroupDialog_getWindow() ), RawStringExportCaller( "Layers" ) );
 	g_page_issues = GroupDialog_addPage( "Issues", IssueBrowser_constructWindow( GroupDialog_getWindow() ), RawStringExportCaller( "Issues" ) );
 	g_page_uvview = GroupDialog_addPage( "UV View", UVView_constructWindow( GroupDialog_getWindow() ), RawStringExportCaller( "UV View" ) );
-
-	window->show();
 
 	if ( CurrentStyle() == eRegular || CurrentStyle() == eRegularLeft ) {
 		window->setCentralWidget( m_hSplit = new QSplitter() );
@@ -3049,7 +3241,7 @@ void MainFrame::Create(){
 	else if ( CurrentStyle() == eFloating ) {
 		{
 			auto *window = new QWidget( m_window, Qt::Dialog | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint );
-			window->setWindowTitle( "Camera" );
+			window->setWindowTitle( i18n::tr( "Camera" ) );
 			g_guiSettings.addWindow( window, "floating/cam", 400, 300, 50, 100 );
 
 			m_pCamWnd = NewCamWnd();
@@ -3263,8 +3455,11 @@ void MainFrame::Shutdown(){
 }
 
 void MainFrame::RedrawStatusText(){
-	for( int i = 0; i < c_status__count; ++i )
-		m_statusLabel[i]->setText( m_status[i].c_str() );
+	for( int i = 0; i < c_status__count; ++i ) {
+		if ( m_statusLabel[i] != nullptr ) {
+			m_statusLabel[i]->setText( m_status[i].c_str() );
+		}
+	}
 }
 
 void MainFrame::UpdateStatusText(){
@@ -3317,6 +3512,52 @@ void GridStatus_changed(){
 
 CopiedString g_OpenGLFont( "Myriad Pro" );
 int g_OpenGLFontSize = 8;
+namespace
+{
+constexpr int kOpenGLFontFallbackPixelHeight = 12;
+constexpr int kOpenGLFontFallbackPixelDescent = 2;
+GLFont* g_openGLFont = nullptr;
+int g_openGLFontPixelHeight = kOpenGLFontFallbackPixelHeight;
+int g_openGLFontPixelDescent = kOpenGLFontFallbackPixelDescent;
+
+void OpenGLFont_syncGlobalState(){
+	GlobalOpenGL().m_font = g_openGLFont;
+	if ( g_openGLFont != nullptr ) {
+		g_openGLFontPixelHeight = g_openGLFont->getPixelHeight();
+		g_openGLFontPixelDescent = g_openGLFont->getPixelDescent();
+	}
+	else
+	{
+		g_openGLFontPixelHeight = kOpenGLFontFallbackPixelHeight;
+		g_openGLFontPixelDescent = kOpenGLFontFallbackPixelDescent;
+	}
+}
+}
+
+int OpenGLFont_getPixelHeightSafe(){
+	return g_openGLFontPixelHeight;
+}
+
+int OpenGLFont_getPixelDescentSafe(){
+	return g_openGLFontPixelDescent;
+}
+
+bool OpenGLFont_canDrawSafe(){
+	return g_openGLFont != nullptr;
+}
+
+void OpenGLFont_drawStringSafe( const char* string ){
+	if ( g_openGLFont != nullptr ) {
+		g_openGLFont->printString( string );
+	}
+}
+
+void OpenGLFont_drawCharSafe( char character ){
+	if ( g_openGLFont != nullptr ) {
+		char s[2] = { character, 0 };
+		g_openGLFont->printString( s );
+	}
+}
 
 void OpenGLFont_select(){
 	CopiedString newfont;
@@ -3324,10 +3565,12 @@ void OpenGLFont_select(){
 	if( OpenGLFont_dialog( MainFrame_getWindow(), g_OpenGLFont.c_str(), g_OpenGLFontSize, newfont, newsize ) ){
 		{
 			ScopeDisableScreenUpdates disableScreenUpdates( "Processing...", "Changing OpenGL Font" );
-			delete GlobalOpenGL().m_font;
+			delete g_openGLFont;
+			g_openGLFont = nullptr;
 			g_OpenGLFont = newfont;
 			g_OpenGLFontSize = newsize;
-			GlobalOpenGL().m_font = glfont_create( g_OpenGLFont.c_str(), g_OpenGLFontSize, g_strAppPath.c_str() );
+			g_openGLFont = glfont_create( g_OpenGLFont.c_str(), g_OpenGLFontSize, g_strAppPath.c_str() );
+			OpenGLFont_syncGlobalState();
 		}
 		UpdateAllWindows();
 	}
@@ -3348,10 +3591,13 @@ void GlobalGL_sharedContextCreated(){
 	GlobalShaderCache().realise();
 	Textures_Realise();
 
-	GlobalOpenGL().m_font = glfont_create( g_OpenGLFont.c_str(), g_OpenGLFontSize, g_strAppPath.c_str() );
+	g_openGLFont = glfont_create( g_OpenGLFont.c_str(), g_OpenGLFontSize, g_strAppPath.c_str() );
+	OpenGLFont_syncGlobalState();
 }
 
 void GlobalGL_sharedContextDestroyed(){
+	g_openGLFont = nullptr;
+	OpenGLFont_syncGlobalState();
 	Textures_Unrealise();
 	GlobalShaderCache().unrealise();
 
@@ -3442,6 +3688,7 @@ void MainFrame_Construct(){
 	GlobalCommands_insert( "OpenGLFont", makeCallbackF( OpenGLFont_select ) );
 
 	Colors_registerCommands();
+	GenAI_Construct();
 
 	GlobalCommands_insert( "Fullscreen", makeCallbackF( MainFrame_toggleFullscreen ), QKeySequence( "F11" ) );
 	GlobalCommands_insert( "MaximizeView", makeCallbackF( Maximize_View ), QKeySequence( "F12" ) );
@@ -3459,6 +3706,10 @@ void MainFrame_Construct(){
 	GlobalPreferenceSystem().registerPreference( "ToolbarHiddenButtons", CopiedStringImportStringCaller( g_toolbarHiddenButtons ), CopiedStringExportStringCaller( g_toolbarHiddenButtons ) );
 	GlobalPreferenceSystem().registerPreference( "OpenGLFont", CopiedStringImportStringCaller( g_OpenGLFont ), CopiedStringExportStringCaller( g_OpenGLFont ) );
 	GlobalPreferenceSystem().registerPreference( "OpenGLFontSize", IntImportStringCaller( g_OpenGLFontSize ), IntExportStringCaller( g_OpenGLFontSize ) );
+	GlobalPreferenceSystem().registerPreference( "StartupOnboardingCompleted", BoolImportStringCaller( g_startup_onboarding_completed ), BoolExportStringCaller( g_startup_onboarding_completed ) );
+	GlobalPreferenceSystem().registerPreference( "StartupOnboardingDone", BoolImportStringCaller( g_startup_onboarding_completed ), BoolExportStringCaller( g_startup_onboarding_completed ) ); // legacy compatibility
+	GlobalPreferenceSystem().registerPreference( "EditorStyle", IntImportStringCaller( g_editor_style_preference ), IntExportStringCaller( g_editor_style_preference ) );
+	GlobalPreferenceSystem().registerPreference( "EditorStylePreset", IntImportStringCaller( g_editor_style_preference ), IntExportStringCaller( g_editor_style_preference ) ); // legacy compatibility
 
 	for( size_t i = 0; i < g_strExtraResourcePaths.size(); ++i )
 		GlobalPreferenceSystem().registerPreference( StringStream<32>( "ExtraResourcePath", i ),
@@ -3466,7 +3717,12 @@ void MainFrame_Construct(){
 
 	GlobalPreferenceSystem().registerPreference( "EnginePath", CopiedStringImportStringCaller( g_strEnginePath ), CopiedStringExportStringCaller( g_strEnginePath ) );
 	GlobalPreferenceSystem().registerPreference( "InstalledDevFilesPath", CopiedStringImportStringCaller( g_installedDevFilesPath ), CopiedStringExportStringCaller( g_installedDevFilesPath ) );
-	if ( g_strEnginePath.empty() )
+	if ( const char* startupInstallationPath = StartupGameInstallationPath_get(); !string_empty( startupInstallationPath ) )
+	{
+		g_strEnginePath = StringStream( DirectoryCleaned( startupInstallationPath ) );
+		g_strEnginePath_was_empty_1st_start = false;
+	}
+	else if ( g_strEnginePath.empty() )
 	{
 		g_strEnginePath_was_empty_1st_start = true;
 		const char* ENGINEPATH_ATTRIBUTE =
@@ -3501,6 +3757,7 @@ void MainFrame_Construct(){
 }
 
 void MainFrame_Destroy(){
+	GenAI_Destroy();
 	GlobalEntityClassManager().detach( g_WorldspawnColourEntityClassObserver );
 
 	GlobalEntityCreator().setCounter( 0 );

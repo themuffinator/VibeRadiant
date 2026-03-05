@@ -139,6 +139,42 @@ std::string gamedetect_normaliseToken( const char* value ){
 	return token;
 }
 
+std::string gamedetect_normaliseKeyToken( const char* value ){
+	std::string token;
+	if ( value == nullptr ) {
+		return token;
+	}
+	for ( const unsigned char c : std::string_view( value ) )
+	{
+		if ( std::isalnum( c ) ) {
+			token.push_back( static_cast<char>( std::tolower( c ) ) );
+		}
+	}
+	return token;
+}
+
+const char* gamedetect_attrLookup( const std::map<std::string, std::string>& attrs, const char* key ){
+	if ( key == nullptr ) {
+		return "";
+	}
+	if ( const auto found = attrs.find( key ); found != attrs.end() ) {
+		return found->second.c_str();
+	}
+
+	const std::string wanted = gamedetect_normaliseKeyToken( key );
+	if ( wanted.empty() ) {
+		return "";
+	}
+
+	for ( const auto& [ attrKey, attrValue ] : attrs )
+	{
+		if ( gamedetect_normaliseKeyToken( attrKey.c_str() ) == wanted ) {
+			return attrValue.c_str();
+		}
+	}
+	return "";
+}
+
 std::vector<std::string> gamedetect_splitList( const char* value, const char* delimiters ){
 	std::vector<std::string> tokens;
 	if ( value == nullptr || string_empty( value ) ) {
@@ -280,10 +316,7 @@ bool gamedetect_loadRule( const std::filesystem::path& gamePath, GameDetectRule&
 	xmlFreeDoc( pDoc );
 
 	const auto attr = [&attrs]( const char* key )->const char* {
-		if ( const auto found = attrs.find( key ); found != attrs.end() ) {
-			return found->second.c_str();
-		}
-		return "";
+		return gamedetect_attrLookup( attrs, key );
 	};
 
 	outRule.gameFile = gamePath.filename().string();
@@ -376,6 +409,14 @@ void gamedetect_applyLegacyHints( GameDetectRule& rule ){
 	else if ( gameFileLower == "nexuiz.game" ) {
 		addRequired( "data/common-spog.pk3" );
 		addAlias( "Nexuiz" );
+	}
+	else if ( gameFileLower == "doom3-demo.game" ) {
+		addAlias( "Doom 3 Demo" );
+		addAlias( "Doom3 Demo" );
+	}
+	else if ( gameFileLower == "xreal.game" ) {
+		addAlias( "XreaL" );
+		addAlias( "Xreal" );
 	}
 	else if ( gameFileLower == "warsow.game" ) {
 		addRequired( "basewsw/dedicated_autoexec.cfg" );
