@@ -1,6 +1,7 @@
 project(
   'VibeRadiant',
   ['c', 'cpp'],
+  version: files('VERSION'),
   meson_version: '>=0.63.0',
   default_options: [
     'warning_level=2',
@@ -25,7 +26,7 @@ endif
 build_profile = get_option('build_profile')
 qt_major = get_option('qt_major')
 
-version_number = run_command(sh, '-c', 'cat VERSION', check: true).stdout().strip()
+version_number = meson.project_version()
 version_parts = version_number.split('.')
 radiant_major = version_parts.length() > 1 ? version_parts[1] : '0'
 radiant_minor = version_parts.length() > 2 ? version_parts[2] : '0'
@@ -79,8 +80,6 @@ if windows
 endif
 
 common_compile_args = [
-  '-W',
-  '-Wall',
   '-Wcast-align',
   '-Wcast-qual',
   '-Wno-unused-parameter',

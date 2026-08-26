@@ -1028,6 +1028,7 @@ public:
 };
 
 EntityBrowser g_EntityBrowser;
+static bool g_entityBrowserTreeConstructed = false;
 
 using EntityClassnameSet = std::set<CopiedString, StringLessNoCase>;
 
@@ -1775,6 +1776,10 @@ static void EntityBrowser_constructCategories(){
 }
 
 static void EntityBrowser_constructTree(){
+	if ( g_EntityBrowser.m_treeView == nullptr ) {
+		return;
+	}
+
 	EntityBrowser_constructCategories();
 
 	auto *model = new QStandardItemModel( g_EntityBrowser.m_treeView );
@@ -1789,6 +1794,8 @@ static void EntityBrowser_constructTree(){
 		g_EntityBrowser.m_treeView->setCurrentIndex( first );
 		EntityBrowser_selectCategory( first.data( Qt::ItemDataRole::DisplayRole ).toString() );
 	}
+
+	g_entityBrowserTreeConstructed = true;
 }
 
 class TexBro_QTreeView : public QTreeView
@@ -1805,6 +1812,7 @@ protected:
 
 QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 	g_EntityBrowser.m_parent = toplevel;
+	g_entityBrowserTreeConstructed = false;
 
 	const bool disableOpenGL = OpenGLWidgetsDisabled();
 
@@ -1969,8 +1977,6 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 			EntityBrowser_selectCategory( index.data( Qt::ItemDataRole::DisplayRole ).toString() );
 		} );
 
-		EntityBrowser_constructTree();
-
 		vbox->addWidget( g_EntityBrowser.m_treeView );
 	}
 	{
@@ -2028,11 +2034,19 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 	return splitter;
 }
 
+void EntityBrowser_EnsureTree(){
+	if ( !g_entityBrowserTreeConstructed ) {
+		EntityBrowser_constructTree();
+	}
+}
+
 void EntityBrowser_destroyWindow(){
+	g_entityBrowserTreeConstructed = false;
 	g_EntityBrowser.m_viewStack = nullptr;
 	g_EntityBrowser.m_gl_widget = nullptr;
 	g_EntityBrowser.m_gl_scroll = nullptr;
 	g_EntityBrowser.m_listWidget = nullptr;
+	g_EntityBrowser.m_treeView = nullptr;
 	g_EntityBrowser.m_listModeButton = nullptr;
 }
 

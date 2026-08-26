@@ -20,7 +20,7 @@ and release-only assets are also excluded from VibeRadiant's normal tool build.
 | Dependency | Imported version/revision | Licence |
 | --- | --- | --- |
 | [{fmt}](https://github.com/fmtlib/fmt) | 10.2.1, [`e69e5f977d458f2650bb346dadf2ad30c5320281`](https://github.com/fmtlib/fmt/commit/e69e5f977d458f2650bb346dadf2ad30c5320281) | MIT |
-| [JsonCpp](https://github.com/open-source-parsers/jsoncpp) | 1.9.7; recorded import revision `b511701a8` (the stripped vendor snapshot did not retain the full object ID) | Public domain/MIT |
+| [JsonCpp](https://github.com/open-source-parsers/jsoncpp) | 1.9.7, [`b511d9e64956db998b74909df112ac8c8f41d6ff`](https://github.com/open-source-parsers/jsoncpp/commit/b511d9e64956db998b74909df112ac8c8f41d6ff) | Public domain/MIT |
 | [ankerl::nanobench](https://github.com/martinus/nanobench) | 4.3.11, [`e4327893194f06928012eb81cabc606c4e4791ac`](https://github.com/martinus/nanobench/commit/e4327893194f06928012eb81cabc606c4e4791ac) | MIT |
 | [pareto](https://github.com/alandefreitas/pareto) | 1.2.0, [`47f491eeaead1b5a95e27ee3d6bc4c591b0e4462`](https://github.com/alandefreitas/pareto/commit/47f491eeaead1b5a95e27ee3d6bc4c591b0e4462) | MIT |
 | [stb_image / stb_image_write](https://github.com/nothings/stb) | v2.28 / v1.16; files are byte-identical to the recorded VibeyMapTools snapshot | Public domain or MIT |

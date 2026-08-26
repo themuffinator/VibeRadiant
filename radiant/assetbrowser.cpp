@@ -62,6 +62,7 @@
 #include "gtkutil/toolbar.h"
 
 static QTabWidget* g_assetBrowserTabs = nullptr;
+static int g_assetBrowserEntitiesTab = -1;
 static int g_assetBrowserModelsTab = -1;
 static int g_assetBrowserSoundsTab = -1;
 static QWidget* g_assetBrowserGlobalsTab = nullptr;
@@ -71,6 +72,7 @@ static QWidget* g_assetBrowserScriptTab = nullptr;
 
 namespace {
 constexpr bool kAssetBrowserEnabled = true;
+constexpr int kAssetFilterRebuildDelayMilliseconds = 150;
 Vector3 g_assetBrowserDefaultAngles( 0.0f, 40.0f, -60.0f );
 CopiedString g_assetSurfacesFilter;
 bool g_assetSurfacesFilterGlobal = false;
@@ -954,6 +956,7 @@ class AssetSurfacesPanel final : public QWidget
 	QToolButton* m_globalButton = nullptr;
 	QToolButton* m_usedButton = nullptr;
 	QToolButton* m_clearButton = nullptr;
+	QTimer* m_filterRebuildTimer = nullptr;
 
 	CopiedString m_filter = g_assetSurfacesFilter;
 	bool m_filterGlobal = g_assetSurfacesFilterGlobal;
@@ -1040,11 +1043,17 @@ public:
 		m_filterEntry->setText( m_filter.c_str() );
 		m_globalButton->setChecked( m_filterGlobal );
 		m_usedButton->setChecked( m_filterUsed );
+		m_filterRebuildTimer = new QTimer( this );
+		m_filterRebuildTimer->setSingleShot( true );
+		QObject::connect( m_filterRebuildTimer, &QTimer::timeout, this, [this](){
+			rebuild();
+		} );
 
 		QObject::connect( m_filterEntry, &QLineEdit::textChanged, this, [this]( const QString& text ){
 			m_filter = text.toLatin1().constData();
 			persistState();
-			rebuild();
+			updateClearButton();
+			m_filterRebuildTimer->start( kAssetFilterRebuildDelayMilliseconds );
 		} );
 		QObject::connect( m_globalButton, &QToolButton::toggled, this, [this]( bool checked ){
 			m_filterGlobal = checked;
@@ -1074,10 +1083,14 @@ public:
 			}
 		} );
 
-		rebuild();
+	}
+
+	void cancelScheduledRebuild(){
+		m_filterRebuildTimer->stop();
 	}
 
 	void rebuild(){
+		m_filterRebuildTimer->stop();
 		if ( m_tree == nullptr ) {
 			return;
 		}
@@ -1132,6 +1145,7 @@ class AssetAIListPanel final : public QWidget
 	QToolButton* m_globalButton = nullptr;
 	QToolButton* m_usedButton = nullptr;
 	QToolButton* m_clearButton = nullptr;
+	QTimer* m_filterRebuildTimer = nullptr;
 
 	CopiedString m_filter = g_assetAIFilter;
 	bool m_filterGlobal = g_assetAIFilterGlobal;
@@ -1216,11 +1230,17 @@ public:
 		m_filterEntry->setText( m_filter.c_str() );
 		m_globalButton->setChecked( m_filterGlobal );
 		m_usedButton->setChecked( m_filterUsed );
+		m_filterRebuildTimer = new QTimer( this );
+		m_filterRebuildTimer->setSingleShot( true );
+		QObject::connect( m_filterRebuildTimer, &QTimer::timeout, this, [this](){
+			rebuild();
+		} );
 
 		QObject::connect( m_filterEntry, &QLineEdit::textChanged, this, [this]( const QString& text ){
 			m_filter = text.toLatin1().constData();
 			persistState();
-			rebuild();
+			updateClearButton();
+			m_filterRebuildTimer->start( kAssetFilterRebuildDelayMilliseconds );
 		} );
 		QObject::connect( m_globalButton, &QToolButton::toggled, this, [this]( bool checked ){
 			m_filterGlobal = checked;
@@ -1243,10 +1263,14 @@ public:
 			rebuild();
 		} );
 
-		rebuild();
+	}
+
+	void cancelScheduledRebuild(){
+		m_filterRebuildTimer->stop();
 	}
 
 	void rebuild(){
+		m_filterRebuildTimer->stop();
 		m_tree->clear();
 
 		const StringSetNoCaseLocal allClasses = AssetBrowser_collectAIClasses( m_filterGlobal );
@@ -1279,6 +1303,7 @@ class AssetScriptListPanel final : public QWidget
 	QToolButton* m_globalButton = nullptr;
 	QToolButton* m_usedButton = nullptr;
 	QToolButton* m_clearButton = nullptr;
+	QTimer* m_filterRebuildTimer = nullptr;
 
 	CopiedString m_filter = g_assetScriptFilter;
 	bool m_filterGlobal = g_assetScriptFilterGlobal;
@@ -1363,11 +1388,17 @@ public:
 		m_filterEntry->setText( m_filter.c_str() );
 		m_globalButton->setChecked( m_filterGlobal );
 		m_usedButton->setChecked( m_filterUsed );
+		m_filterRebuildTimer = new QTimer( this );
+		m_filterRebuildTimer->setSingleShot( true );
+		QObject::connect( m_filterRebuildTimer, &QTimer::timeout, this, [this](){
+			rebuild();
+		} );
 
 		QObject::connect( m_filterEntry, &QLineEdit::textChanged, this, [this]( const QString& text ){
 			m_filter = text.toLatin1().constData();
 			persistState();
-			rebuild();
+			updateClearButton();
+			m_filterRebuildTimer->start( kAssetFilterRebuildDelayMilliseconds );
 		} );
 		QObject::connect( m_globalButton, &QToolButton::toggled, this, [this]( bool checked ){
 			m_filterGlobal = checked;
@@ -1390,10 +1421,14 @@ public:
 			rebuild();
 		} );
 
-		rebuild();
+	}
+
+	void cancelScheduledRebuild(){
+		m_filterRebuildTimer->stop();
 	}
 
 	void rebuild(){
+		m_filterRebuildTimer->stop();
 		m_tree->clear();
 
 		const StringSetNoCaseLocal allScripts = AssetBrowser_collectScriptFiles( m_filterGlobal );
@@ -1433,6 +1468,7 @@ Vector3& AssetBrowser_defaultAngles(){
 QWidget* AssetBrowser_constructWindow( QWidget* toplevel ){
 	if ( !AssetBrowser_isEnabled() ) {
 		g_assetBrowserTabs = nullptr;
+		g_assetBrowserEntitiesTab = -1;
 		g_assetBrowserModelsTab = -1;
 		g_assetBrowserSoundsTab = -1;
 		g_assetBrowserGlobalsTab = nullptr;
@@ -1444,6 +1480,7 @@ QWidget* AssetBrowser_constructWindow( QWidget* toplevel ){
 
 	auto* tabs = new QTabWidget;
 	g_assetBrowserTabs = tabs;
+	g_assetBrowserEntitiesTab = -1;
 	g_assetBrowserModelsTab = -1;
 	g_assetBrowserSoundsTab = -1;
 	g_assetBrowserGlobalsTab = nullptr;
@@ -1457,7 +1494,7 @@ QWidget* AssetBrowser_constructWindow( QWidget* toplevel ){
 	tabs->addTab( TextureBrowser_constructWindow( toplevel ), "Materials" );
 	g_assetBrowserSurfacesTab = new AssetSurfacesPanel( toplevel );
 	tabs->addTab( g_assetBrowserSurfacesTab, "Surfaces" );
-	tabs->addTab( EntityBrowser_constructWindow( toplevel ), "Entities" );
+	g_assetBrowserEntitiesTab = tabs->addTab( EntityBrowser_constructWindow( toplevel ), "Entities" );
 	g_assetBrowserSoundsTab = tabs->addTab( SoundBrowser_constructWindow( toplevel ), "Sounds" );
 	g_assetBrowserModelsTab = tabs->addTab( ModelBrowser_constructWindow( toplevel ), "Objects" );
 	if ( AssetBrowser_isIdTech4Game() ) {
@@ -1470,6 +1507,15 @@ QWidget* AssetBrowser_constructWindow( QWidget* toplevel ){
 	QObject::connect( tabs, &QTabWidget::currentChanged, [tabs]( int index ){
 		if ( index < 0 || tabs->widget( index ) == nullptr ) {
 			return;
+		}
+		if ( auto* surfaces = static_cast<AssetSurfacesPanel*>( g_assetBrowserSurfacesTab ) ) {
+			surfaces->cancelScheduledRebuild();
+		}
+		if ( auto* ai = static_cast<AssetAIListPanel*>( g_assetBrowserAITab ) ) {
+			ai->cancelScheduledRebuild();
+		}
+		if ( auto* script = static_cast<AssetScriptListPanel*>( g_assetBrowserScriptTab ) ) {
+			script->cancelScheduledRebuild();
 		}
 		if ( tabs->widget( index ) == g_assetBrowserGlobalsTab ) {
 			if ( auto* globals = static_cast<AssetGlobalsPanel*>( g_assetBrowserGlobalsTab ) ) {
@@ -1491,6 +1537,9 @@ QWidget* AssetBrowser_constructWindow( QWidget* toplevel ){
 				script->rebuild();
 			}
 		}
+		if ( index == g_assetBrowserEntitiesTab ) {
+			EntityBrowser_EnsureTree();
+		}
 		if ( index == g_assetBrowserSoundsTab ) {
 			SoundBrowser_EnsureTree();
 		}
@@ -1504,6 +1553,7 @@ QWidget* AssetBrowser_constructWindow( QWidget* toplevel ){
 
 void AssetBrowser_destroyWindow(){
 	g_assetBrowserTabs = nullptr;
+	g_assetBrowserEntitiesTab = -1;
 	g_assetBrowserModelsTab = -1;
 	g_assetBrowserSoundsTab = -1;
 	g_assetBrowserGlobalsTab = nullptr;
