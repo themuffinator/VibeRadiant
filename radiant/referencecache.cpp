@@ -36,6 +36,10 @@ ModelModules& ReferenceAPI_getModelModules();
 #include "qerplugin.h"
 
 #include <list>
+#include <utility>
+
+#include <QCoreApplication>
+#include <QTimer>
 
 #include "container/cache.h"
 #include "container/hashfunc.h"
@@ -51,6 +55,8 @@ ModelModules& ReferenceAPI_getModelModules();
 #include "mainframe.h"
 #include "map.h"
 #include "filetypes.h"
+#include "entitybrowser.h"
+#include "modelwindow.h"
 
 
 bool References_Saved();
@@ -653,8 +659,44 @@ bool References_Saved(){
 }
 
 void RefreshReferences(){
-	ScopeDisableScreenUpdates disableScreenUpdates( "Processing...", "Refreshing Models" );
-	g_referenceCache.refresh();
+	static bool refreshInProgress = false;
+	static bool refreshQueued = false;
+	if ( refreshInProgress ) {
+		return;
+	}
+	if ( !ModelBrowser_canRefreshReferences() || !EntityBrowser_canRefreshReferences() ) {
+		if ( !std::exchange( refreshQueued, true ) ) {
+			QTimer::singleShot( 0, QCoreApplication::instance(), [](){
+				if ( std::exchange( refreshQueued, false ) ) {
+					RefreshReferences();
+				}
+			} );
+		}
+		return;
+	}
+	refreshQueued = false;
+
+	class ScopedBrowserReferenceRefresh
+	{
+		bool& m_refreshInProgress;
+	public:
+		explicit ScopedBrowserReferenceRefresh( bool& refreshInProgress )
+			: m_refreshInProgress( refreshInProgress ) {
+			m_refreshInProgress = true;
+			ModelBrowser_beginReferenceRefresh();
+			EntityBrowser_beginReferenceRefresh();
+		}
+		~ScopedBrowserReferenceRefresh(){
+			EntityBrowser_endReferenceRefresh();
+			ModelBrowser_endReferenceRefresh();
+			m_refreshInProgress = false;
+		}
+	} browserRefresh( refreshInProgress );
+
+	{
+		ScopeDisableScreenUpdates disableScreenUpdates( "Processing...", "Refreshing Models" );
+		g_referenceCache.refresh();
+	}
 }
 
 

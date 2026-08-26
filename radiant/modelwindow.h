@@ -34,6 +34,9 @@ void ModelBrowser_pausePendingFilterApply();
 
 void ModelBrowser_flushReferences();
 void ModelBrowser_mapReady();
+void ModelBrowser_beginReferenceRefresh();
+void ModelBrowser_endReferenceRefresh();
+bool ModelBrowser_canRefreshReferences();
 
 #include "math/vectorfwd.h"
 
