@@ -360,20 +360,6 @@ public:
 		}
 		return CopiedString( StringStream<256>( kSoundBrowserRoot, m_visibleFiles[index].c_str() ) );
 	}
-	bool cacheSound( const char* soundPath ){
-		if ( string_empty( soundPath ) ) {
-			return false;
-		}
-		if ( m_soundCache.find( soundPath ) != m_soundCache.end() ) {
-			return true;
-		}
-		QByteArray data;
-		if ( !SoundBrowser_readSoundData( soundPath, data ) ) {
-			return false;
-		}
-		m_soundCache.emplace( CopiedString( soundPath ), data );
-		return true;
-	}
 	bool isPlayingIndex( int index ) const {
 		return index >= 0 && index == m_playingSoundId;
 	}
@@ -1131,10 +1117,6 @@ static void SoundBrowser_addFromFileSystem( const char* name ){
 	g_SoundBrowser.m_soundFS.insert( relative );
 }
 
-static void SoundBrowser_cacheSoundFile( const char* name ){
-	g_SoundBrowser.cacheSound( name );
-}
-
 static bool g_soundBrowserTreeConstructed = false;
 
 static void SoundBrowser_constructTree(){
@@ -1198,30 +1180,11 @@ static void SoundBrowser_constructTree(){
 	g_soundBrowserTreeConstructed = true;
 }
 
-void SoundBrowser_PrecacheWorldSounds(){
-	class : public IFileTypeList
-	{
-	public:
-		using StringSetNoCase = std::set<CopiedString, StringLessNoCase>;
-
-		StringSetNoCase m_soundExtensions;
-		void addType( const char* moduleName, filetype_t type ) override {
-			m_soundExtensions.emplace( moduleName );
-		}
-	} typelist;
-	GlobalFiletypes().getTypeList( "sound", &typelist, true, false, false );
-
-	for ( const CopiedString& ext : typelist.m_soundExtensions ) {
-		GlobalFileSystem().forEachFile( kSoundBrowserRoot, ext.c_str(), makeCallbackF( SoundBrowser_cacheSoundFile ), 99 );
-	}
-}
-
 void SoundBrowser_ReloadSounds(){
 	SoundBrowser_cancelPendingFilterApply();
 	g_SoundBrowser.stopPlayback();
 	g_SoundBrowser.m_soundCache.clear();
 	SoundBrowser_constructTree();
-	SoundBrowser_PrecacheWorldSounds();
 }
 
 void SoundBrowser_EnsureTree(){
@@ -1365,9 +1328,6 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 		} );
 
 		SoundBrowser_updateClearFiltersButton();
-		if ( g_SoundBrowser.m_filterUsed ) {
-			SoundBrowser_updateUsedFilterButtonLabel( SoundBrowser_collectUsedSounds().size() );
-		}
 
 		vbox->addWidget( filterBar );
 	}

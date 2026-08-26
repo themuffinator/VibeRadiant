@@ -1985,9 +1985,6 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 		} );
 
 		EntityBrowser_updateClearFiltersButton();
-		if ( g_EntityBrowser.m_filterUsed ) {
-			EntityBrowser_updateUsedFilterButtonLabel( EntityBrowser_collectUsedClasses().size() );
-		}
 
 		vbox->addWidget( filterBar );
 	}
