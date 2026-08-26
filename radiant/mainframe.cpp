@@ -1348,9 +1348,7 @@ bool Startup_hasValidGameInstallation(){
 	return file_is_directory( g_strEnginePath.c_str() );
 }
 
-bool Startup_tryAutoDetectGameInstallation(){
-	EnginePath_refreshDetectedInstalls();
-
+bool Startup_selectDetectedGameInstallation(){
 	const auto rule = EnginePath_buildInstallRule();
 	auto effectiveRule = rule;
 	EnginePath_applyLegacyHints( effectiveRule );
@@ -1367,6 +1365,11 @@ bool Startup_tryAutoDetectGameInstallation(){
 		return true;
 	}
 	return false;
+}
+
+bool Startup_tryAutoDetectGameInstallation(){
+	EnginePath_refreshDetectedInstalls();
+	return Startup_selectDetectedGameInstallation();
 }
 
 void Startup_promptEditorStyle(){
@@ -1445,7 +1448,7 @@ void EnginePath_verify(){
 		}
 	}
 	if ( needsPrompt ) {
-		if ( Startup_tryAutoDetectGameInstallation() ) {
+		if ( Startup_selectDetectedGameInstallation() ) {
 			needsPrompt = false;
 		}
 	}
