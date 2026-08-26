@@ -61,6 +61,14 @@ enum class flag : uint8_t
 extern bitflags<flag> mask;
 extern bool enable_color_codes;
 
+// Warning diagnostics are counted centrally so command-line tools can offer
+// q3map2-compatible "warnings as errors" behaviour without throwing from
+// worker threads or stat-tracker destructors.
+void reset_warning_count();
+size_t warning_count();
+void set_warnings_as_errors(bool enabled);
+void fail_if_warnings();
+
 // Windows: calls SetConsoleMode for ANSI escape sequence processing (so colors work)
 void preinitialize();
 
@@ -81,6 +89,16 @@ void print(const char *str);
 
 // print to default targets
 void vprint(fmt::string_view format, fmt::format_args args);
+
+// Format with a function-name prefix while classifying diagnostics from the
+// original message. This avoids treating arbitrary prefixed prose as a warning.
+void vfuncprint(const char *function, fmt::string_view format, fmt::format_args args);
+
+template<typename... T>
+inline void funcprint_impl(const char *function, fmt::format_string<T...> format, T &&...args)
+{
+    vfuncprint(function, format, fmt::make_format_args(args...));
+}
 
 // format print to specified targets
 // see: https://fmt.dev/10.0.0/api.html#argument-lists
@@ -108,10 +126,10 @@ void header(const char *name);
 
 // TODO: C++20 source_location
 #ifdef _MSC_VER
-#define funcprint(fmt, ...) print("{}: " fmt, __FUNCTION__, ##__VA_ARGS__)
+#define funcprint(...) funcprint_impl(__FUNCTION__, __VA_ARGS__)
 #define funcheader() header(__FUNCTION__)
 #else
-#define funcprint(fmt, ...) print("{}: " fmt, __func__, ##__VA_ARGS__)
+#define funcprint(...) funcprint_impl(__func__, __VA_ARGS__)
 #define funcheader() header(__func__)
 #endif
 
@@ -234,4 +252,3 @@ template<typename... T>
 #define Q_assert(x) logging::assert_((x), Q_stringify(x), __FILE__, __LINE__)
 
 #define Q_assert_unreachable() Q_assert(false)
-

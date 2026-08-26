@@ -30,6 +30,8 @@
 #include <utility>
 #include <optional>
 #include <fstream>
+#include <limits>
+#include <unordered_set>
 
 #include <qbsp/brush.hh>
 #include <qbsp/map.hh>
@@ -175,7 +177,7 @@ void mapdata_t::add_hash_edge(size_t v1, size_t v2, int64_t edge_index, const fa
 const std::optional<img::texture_meta> &mapdata_t::load_image_meta(std::string_view name)
 {
     static std::optional<img::texture_meta> nullmeta = std::nullopt;
-    auto it = meta_cache.find(name.data());
+    auto it = meta_cache.find(name);
 
     if (it != meta_cache.end()) {
         return it->second;
@@ -361,9 +363,21 @@ inline void CalculateBrushBounds(mapbrush_t &ob)
     }
 }
 
+static int AppendMiptex(maptexdata_t texture)
+{
+    if (map.miptex.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        FError("too many unique textures");
+    }
+
+    const int index = static_cast<int>(map.miptex.size());
+    map.miptex.push_back(std::move(texture));
+    map.miptex_lookup.emplace(map.miptex.back().name, static_cast<size_t>(index));
+    return index;
+}
+
 static void AddAnimTex(const char *name)
 {
-    int i, j, frame;
+    int i, frame;
     char framename[16], basechar = '0';
 
     frame = name[1];
@@ -388,14 +402,11 @@ static void AddAnimTex(const char *name)
     snprintf(framename, sizeof(framename), "%s", name);
     for (i = 0; i < frame; i++) {
         framename[1] = basechar + i;
-        for (j = 0; j < map.miptex.size(); j++) {
-            if (!Q_strcasecmp(framename, map.miptex.at(j).name.c_str()))
-                break;
-        }
-        if (j < map.miptex.size())
+        if (map.miptex_lookup.find(framename) != map.miptex_lookup.end()) {
             continue;
+        }
 
-        map.miptex.push_back({framename});
+        AppendMiptex({framename});
     }
 }
 
@@ -415,16 +426,12 @@ int FindMiptex(const char *name, std::optional<extended_texinfo_t> &extended_inf
             extended_info = extended_texinfo_t{};
         }
 
-        for (i = 0; i < map.miptex.size(); i++) {
-            const maptexdata_t &tex = map.miptex.at(i);
-
-            if (!Q_strcasecmp(name, tex.name.c_str())) {
-                return i;
-            }
+        const auto existing = map.miptex_lookup.equal_range(name);
+        if (existing.first != existing.second) {
+            return static_cast<int>(existing.first->second);
         }
 
-        i = map.miptex.size();
-        map.miptex.push_back({name});
+        i = AppendMiptex({name});
 
         /* Handle animating textures carefully */
         if (name[0] == '+') {
@@ -442,23 +449,23 @@ int FindMiptex(const char *name, std::optional<extended_texinfo_t> &extended_inf
             extended_info = extended_texinfo_t{};
         }
 
-        for (i = 0; i < map.miptex.size(); i++) {
-            const maptexdata_t &tex = map.miptex.at(i);
+        const auto existing = map.miptex_lookup.equal_range(name);
+        for (auto candidate = existing.first; candidate != existing.second; ++candidate) {
+            const maptexdata_t &tex = map.miptex.at(candidate->second);
 
             if (!Q_strcasecmp(name, tex.name.c_str()) && tex.flags.native_q2 == extended_info->flags.native_q2 &&
                 tex.value == extended_info->value && tex.animation == extended_info->animation) {
-
-                return i;
+                return static_cast<int>(candidate->second);
             }
         }
 
-        i = map.miptex.size();
-        map.miptex.push_back({name, extended_info->flags, extended_info->value, extended_info->animation});
+        i = AppendMiptex({name, extended_info->flags, extended_info->value, extended_info->animation});
 
         /* Handle animating textures carefully */
-        if (!extended_info->animation.empty() && recursive && Q_strcasecmp(name, wal->animation.c_str())) {
+        if (wal && !extended_info->animation.empty() && recursive && Q_strcasecmp(name, wal->animation.c_str())) {
 
             int last_i = i;
+            std::unordered_set<int> visited_miptex{i};
 
             // recursively load animated textures until we loop back to us
             while (true) {
@@ -480,8 +487,10 @@ int FindMiptex(const char *name, std::optional<extended_texinfo_t> &extended_inf
                 int next_i = FindMiptex(wal->name.data(), animation_info, internal, false);
                 map.miptex[last_i].animation_miptex = next_i;
 
-                // looped back
-                if (!Q_strcasecmp(wal->name.c_str(), name) || last_i == next_i)
+                // Looping back to any prior frame is malformed but can occur
+                // in external WAL metadata. Close the compiler-side chain at
+                // the original texture instead of looping forever.
+                if (!visited_miptex.insert(next_i).second)
                     break;
 
                 last_i = next_i;
@@ -497,15 +506,17 @@ int FindMiptex(const char *name, std::optional<extended_texinfo_t> &extended_inf
 
 static bool IsSkipName(const char *name)
 {
+    const gamedef_t *game = qbsp_options.target_game;
+
     if (qbsp_options.noskip.value())
         return false;
     if (!Q_strcasecmp(name, "skip"))
         return true;
-    if ((!Q_strcasecmp(name, "*waterskip")) || (!Q_strcasecmp(name, "!waterskip")))
+    if ((!Q_strcasecmp(name, "*waterskip")) || (!Q_strcasecmp(name, "!waterskip") && game->allows_hl_contents))
         return true;
-    if ((!Q_strcasecmp(name, "*slimeskip")) || (!Q_strcasecmp(name, "!slimeskip")))
+    if ((!Q_strcasecmp(name, "*slimeskip")) || (!Q_strcasecmp(name, "!slimeskip") && game->allows_hl_contents))
         return true;
-    if ((!Q_strcasecmp(name, "*lavaskip")) || (!Q_strcasecmp(name, "!lavaskip")))
+    if ((!Q_strcasecmp(name, "*lavaskip")) || (!Q_strcasecmp(name, "!lavaskip") && game->allows_hl_contents))
         return true;
     if (!Q_strcasecmp(name, "bevel")) // zhlt compat
         return true;
@@ -527,7 +538,9 @@ static bool IsNoExpandName(const char *name)
  */
 static bool IsSpecialName(const char *name, bool allow_litwater)
 {
-    if (((name[0] == '*') || (name[0] == '!')) && !allow_litwater)
+    const gamedef_t *game = qbsp_options.target_game;
+
+    if (((name[0] == '*') || (name[0] == '!' && game->allows_hl_contents)) && !allow_litwater)
         return true;
     if (!Q_strncasecmp(name, "sky", 3) && !qbsp_options.splitsky.value())
         return true;
@@ -552,12 +565,19 @@ Returns a global texinfo number
 */
 int FindTexinfo(const maptexinfo_t &texinfo, const qplane3d &plane, bool add)
 {
-    // NaN's will break mtexinfo_lookup, since they're being used as a std::map key and don't compare properly with <.
-    // They should have been stripped out already in ValidateTextureProjection.
+    // Non-finite values break the strict weak ordering required by the
+    // reverse-lookup map. They should already have been rejected while
+    // parsing, but keep this boundary safe for programmatic/in-process use.
     for (int i = 0; i < 2; i++) {
         for (int j = 0; j < 4; j++) {
-            Q_assert(!std::isnan(texinfo.vecs.at(i, j)));
+            if (!std::isfinite(texinfo.vecs.at(i, j))) {
+                FError("texinfo contains a non-finite texture vector");
+            }
         }
+    }
+
+    if (texinfo.miptex < 0 || static_cast<size_t>(texinfo.miptex) >= map.miptex.size()) {
+        FError("texinfo references invalid texture {}", texinfo.miptex);
     }
 
     // check for an exact match in the reverse lookup
@@ -571,6 +591,9 @@ int FindTexinfo(const maptexinfo_t &texinfo, const qplane3d &plane, bool add)
     }
 
     /* Allocate a new texinfo at the end of the array */
+    if (map.mtexinfos.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        FError("too many unique texinfos");
+    }
     const int num_texinfo = static_cast<int>(map.mtexinfos.size());
     map.mtexinfos.push_back(texinfo);
     map.mtexinfo_lookup[texinfo] = num_texinfo;
@@ -1926,13 +1949,27 @@ void ProcessAreaPortal(mapentity_t &entity)
         }
     }
 
-    if (map.antiregions.size() || map.region) {
+    if (!MapBrush_IsIncludedByRegion(entity.mapbrushes.front())) {
+        entity.areaportalnum = 0;
+        entity.epairs.remove("style");
         return;
     }
 
-    entity.areaportalnum = ++map.numareaportals;
+    if (!entity.areaportalnum) {
+        entity.areaportalnum = ++map.numareaportals;
+    }
     // set the portal number as "style"
-    entity.epairs.set("style", std::to_string(map.numareaportals));
+    entity.epairs.set("style", std::to_string(entity.areaportalnum));
+}
+
+bool MapBrush_IsIncludedByRegion(const mapbrush_t &brush)
+{
+    if (map.region && map.region->bounds.disjoint(brush.bounds)) {
+        return false;
+    }
+
+    return std::none_of(map.antiregions.begin(), map.antiregions.end(),
+        [&brush](const mapbrush_t &region) { return !region.bounds.disjoint(brush.bounds); });
 }
 
 /*
@@ -2251,31 +2288,33 @@ void ProcessMapBrushes()
 
     logging::print(logging::flag::STAT, "\n");
 
-    // remove ents in region
-    if (map.region || map.antiregions.size()) {
+    // Remove entities outside the selected compile region. Point entities are
+    // selected by origin; brush entities remain only when at least one of
+    // their brushes intersects the region and avoids every antiregion.
+    if (map.region || !map.antiregions.empty()) {
+        auto it = map.entities.begin();
+        if (it != map.entities.end()) {
+            ++it; // worldspawn is never culled
+        }
+        while (it != map.entities.end()) {
+            const mapentity_t &entity = *it;
+            bool remove_entity = false;
 
-        for (auto it = map.entities.begin(); it != map.entities.end();) {
-            auto &entity = *it;
-
-            bool removed = false;
-
-            if (!entity.mapbrushes.size()) {
-                if (map.region && !map.region->bounds.containsPoint(entity.origin)) {
-                    it = map.entities.erase(it);
-                    removed = true;
+            if (entity.mapbrushes.empty()) {
+                remove_entity = map.region && !map.region->bounds.containsPoint(entity.origin);
+                if (!remove_entity) {
+                    remove_entity = std::any_of(map.antiregions.begin(), map.antiregions.end(),
+                        [&entity](const mapbrush_t &region) { return region.bounds.containsPoint(entity.origin); });
                 }
-
-                for (auto &region : map.antiregions) {
-                    if (region.bounds.containsPoint(entity.origin)) {
-                        logging::print("removed {}\n", entity.epairs.get("classname"));
-                        it = map.entities.erase(it);
-                        removed = true;
-                        break;
-                    }
-                }
+            } else {
+                remove_entity =
+                    std::none_of(entity.mapbrushes.begin(), entity.mapbrushes.end(), MapBrush_IsIncludedByRegion);
             }
 
-            if (!removed) {
+            if (remove_entity) {
+                logging::print("removed {} outside compile region\n", entity.epairs.get("classname"));
+                it = map.entities.erase(it);
+            } else {
                 ++it;
             }
         }

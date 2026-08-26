@@ -1,11 +1,8 @@
-project (vmt-hub CXX)
-
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 COMPONENTS OpenGL Widgets OpenGLWidgets)
-if(Qt6_FOUND)
-else()
+find_package(Qt6 QUIET COMPONENTS Core Gui OpenGL Widgets OpenGLWidgets)
+if(NOT Qt6_FOUND)
     message(WARNING "Qt6 not found, disabling vmt-hub")
     return()
 endif()
@@ -22,13 +19,13 @@ qt_add_executable(vmt-hub
     mainwindow.h
     glview.cpp
     glview.h
-        stats.cpp
-        stats.h)
+    stats.cpp
+    stats.h)
 
 set_target_properties(vmt-hub PROPERTIES WIN32_EXECUTABLE YES)
 set_target_properties(vmt-hub PROPERTIES MACOSX_BUNDLE TRUE)
 
-INCLUDE_DIRECTORIES(${EMBREE_INCLUDE_DIRS})
+target_include_directories(vmt-hub PRIVATE ${EMBREE_INCLUDE_DIRS})
 
 # HACK: Windows embree .dll's from https://github.com/embree/embree/releases ship with a tbb12.dll
 # and we need to copy it from the embree/bin directory to our light.exe/testlight.exe dir in order for them to run
@@ -54,19 +51,25 @@ target_link_libraries(vmt-hub
         TBB::tbbmalloc
         fmt::fmt)
 
-# from: http://stackoverflow.com/questions/40564443/copying-qt-dlls-to-executable-directory-on-windows-using-cmake
 # Copy Qt DLL's to bin directory for debugging
 if (WIN32)
     add_custom_command(
         TARGET vmt-hub POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:Qt6::Core> $<TARGET_FILE_DIR:vmt-hub>/$<TARGET_FILE_NAME:Qt6::Core>
-        COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:Qt6::Widgets> $<TARGET_FILE_DIR:vmt-hub>/$<TARGET_FILE_NAME:Qt6::Widgets>
-        COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:Qt6::Gui> $<TARGET_FILE_DIR:vmt-hub>/$<TARGET_FILE_NAME:Qt6::Gui>
-        COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:Qt6::OpenGL> $<TARGET_FILE_DIR:vmt-hub>/$<TARGET_FILE_NAME:Qt6::OpenGL>
-        COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:Qt6::OpenGLWidgets> $<TARGET_FILE_DIR:vmt-hub>/$<TARGET_FILE_NAME:Qt6::OpenGLWidgets>
-        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:vmt-hub>/plugins/platforms
-        COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:Qt6::QWindowsIntegrationPlugin> $<TARGET_FILE_DIR:vmt-hub>/plugins/platforms/$<TARGET_FILE_NAME:Qt6::QWindowsIntegrationPlugin>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:Qt6::Core> $<TARGET_FILE_DIR:vmt-hub>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:Qt6::Widgets> $<TARGET_FILE_DIR:vmt-hub>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:Qt6::Gui> $<TARGET_FILE_DIR:vmt-hub>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:Qt6::OpenGL> $<TARGET_FILE_DIR:vmt-hub>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:Qt6::OpenGLWidgets> $<TARGET_FILE_DIR:vmt-hub>
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:vmt-hub>/platforms
     )
+
+    if(TARGET Qt6::QWindowsIntegrationPlugin)
+        add_custom_command(TARGET vmt-hub POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:Qt6::QWindowsIntegrationPlugin>
+                $<TARGET_FILE_DIR:vmt-hub>/platforms)
+    else()
+        message(WARNING "Qt Windows platform plugin target not found; vmt-hub will require an external Qt plugin path")
+    endif()
 
     # HACK: copy .dll dependencies
     add_custom_command(TARGET vmt-hub POST_BUILD
@@ -90,7 +93,9 @@ if (WIN32)
     install(FILES $<TARGET_FILE:Qt6::Gui> DESTINATION .)
     install(FILES $<TARGET_FILE:Qt6::OpenGL> DESTINATION .)
     install(FILES $<TARGET_FILE:Qt6::OpenGLWidgets> DESTINATION .)
-    install(FILES "$<TARGET_FILE:Qt6::QWindowsIntegrationPlugin>" DESTINATION plugins/platforms)
+    if(TARGET Qt6::QWindowsIntegrationPlugin)
+        install(FILES "$<TARGET_FILE:Qt6::QWindowsIntegrationPlugin>" DESTINATION platforms)
+    endif()
 endif ()
 
 function(apple_install_lib SRC_TARGET_NAME DEST_PATH)

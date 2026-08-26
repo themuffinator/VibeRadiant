@@ -22,6 +22,7 @@
  */
 
 #include <cstdarg>
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -30,6 +31,7 @@
 #include <fmt/chrono.h>
 #include <fmt/color.h>
 #include <string>
+#include <string_view>
 
 #include <common/log.hh>
 #include <common/settings.hh>
@@ -38,6 +40,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h> // for OutputDebugStringA
+#include <io.h> // for _isatty
 
 #ifdef min
 #undef min
@@ -45,6 +48,8 @@
 #ifdef max
 #undef max
 #endif
+#else
+#include <unistd.h> // for isatty
 #endif
 
 static std::ofstream logfile;
@@ -52,7 +57,61 @@ static std::ofstream logfile;
 namespace logging
 {
 bitflags<flag> mask = bitflags<flag>(flag::ALL) & ~bitflags<flag>(flag::VERBOSE);
-bool enable_color_codes = true;
+bool enable_color_codes = false;
+static std::atomic_size_t emitted_warning_count{0};
+static std::atomic_bool warnings_as_errors{false};
+
+static bool is_warning_message(std::string_view message)
+{
+    const auto first = message.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos || message.size() - first < 7) {
+        return false;
+    }
+
+    constexpr std::string_view warning = "warning";
+    for (size_t i = 0; i < warning.size(); ++i) {
+        if (static_cast<char>(std::tolower(static_cast<unsigned char>(message[first + i]))) != warning[i]) {
+            return false;
+        }
+    }
+
+    const size_t suffix = first + warning.size();
+    return suffix == message.size() || message[suffix] == ':' || message[suffix] == ',';
+}
+
+void reset_warning_count()
+{
+    emitted_warning_count = 0;
+    warnings_as_errors = false;
+}
+
+size_t warning_count()
+{
+    return emitted_warning_count.load();
+}
+
+void set_warnings_as_errors(bool enabled)
+{
+    warnings_as_errors = enabled;
+}
+
+void fail_if_warnings()
+{
+    const size_t count = warning_count();
+    if (warnings_as_errors && count != 0) {
+        Error("{} warning{} emitted; treating warnings as errors because -werror was specified", count,
+            count == 1 ? " was" : "s were");
+    }
+}
+
+static bool is_terminal()
+{
+#ifdef _WIN32
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(STDOUT_FILENO) != 0;
+#endif
+}
 
 void preinitialize()
 {
@@ -61,6 +120,8 @@ void preinitialize()
     HANDLE hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     SetConsoleMode(hOutput, ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 #endif
+
+    enable_color_codes = is_terminal();
 }
 
 void init(std::optional<fs::path> filename, const settings::common_settings &settings)
@@ -109,10 +170,14 @@ void set_print_callback(print_callback_t cb)
     active_print_callback = cb;
 }
 
-void print(flag logflag, const char *str)
+static void emit(flag logflag, const char *str, bool is_warning)
 {
     if (!(mask & logflag)) {
         return;
+    }
+
+    if (is_warning) {
+        ++emitted_warning_count;
     }
 
     if (active_print_callback) {
@@ -133,7 +198,7 @@ void print(flag logflag, const char *str)
         }
     }
 
-    print_mutex.lock();
+    const std::lock_guard lock(print_mutex);
 
     if (logflag != flag::PERCENT) {
         // log file, if open
@@ -158,8 +223,11 @@ void print(flag logflag, const char *str)
 
     // for TB, etc...
     fflush(stdout);
+}
 
-    print_mutex.unlock();
+void print(flag logflag, const char *str)
+{
+    emit(logflag, str, is_warning_message(str));
 }
 
 void vprint(flag logflag, fmt::string_view format, fmt::format_args args)
@@ -179,11 +247,18 @@ void vprint(fmt::string_view format, fmt::format_args args)
     vprint(flag::DEFAULT, format, args);
 }
 
+void vfuncprint(const char *function, fmt::string_view format, fmt::format_args args)
+{
+    const std::string message = fmt::vformat(format, args);
+    const std::string prefixed = fmt::format("{}: {}", function, message);
+    emit(flag::DEFAULT, prefixed.c_str(), is_warning_message(message));
+}
+
 static qtime_point start_time;
 static bool is_timing = false;
 static uint64_t last_count = -1;
 static qtime_point last_indeterminate_time;
-static std::atomic_bool locked = false;
+static std::mutex percent_mutex;
 static std::array<duration, 10> one_percent_times;
 static size_t num_percent_times, percent_time_index;
 static qtime_point last_percent_time;
@@ -237,19 +312,15 @@ void set_percent_callback(percent_callback_t cb)
 
 void percent(uint64_t count, uint64_t max, bool displayElapsed)
 {
-    bool expected = false;
-
     if (!(logging::mask & flag::CLOCK_ELAPSED)) {
         displayElapsed = false;
     }
 
+    std::unique_lock lock(percent_mutex, std::defer_lock);
     if (count == max) {
-        while (!locked.compare_exchange_weak(expected, true))
-            ; // wait until everybody else is done
-    } else {
-        if (!locked.compare_exchange_weak(expected, true)) {
-            return; // somebody else is doing this already
-        }
+        lock.lock(); // wait until any in-progress update is done
+    } else if (!lock.try_lock()) {
+        return; // somebody else is doing this already
     }
 
     // we got the lock
@@ -322,9 +393,6 @@ void percent(uint64_t count, uint64_t max, bool displayElapsed)
             }
         }
     }
-
-    // unlock for next call
-    locked = false;
 }
 
 // percent_clock
@@ -425,7 +493,10 @@ void stat_tracker_t::print_stats()
 
     for (auto &stat : stats) {
         if (stat.show_even_if_zero || stat.count) {
-            print(flag::STAT, "{}{:{}} {}\n", stat.is_warning ? "WARNING: " : "", fmt::group_digits(stat.count.load()),
+            // A warning remains important when ordinary statistics are hidden
+            // with -nostat/-quiet, and must still participate in -werror.
+            const flag output_flag = stat.is_warning ? flag::DEFAULT : flag::STAT;
+            print(output_flag, "{}{:{}} {}\n", stat.is_warning ? "WARNING: " : "", fmt::group_digits(stat.count.load()),
                 stat.is_warning ? 0 : number_padding, stat.name);
         }
     }

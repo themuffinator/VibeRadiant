@@ -31,6 +31,24 @@
 #include <qbsp/writebsp.hh>
 
 #include <list>
+#include <limits>
+#include <string_view>
+
+static int32_t CheckedFaceInt32(size_t value, std::string_view description)
+{
+    if (value > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        FError("{} {} exceeds the signed BSP index limit", description, value);
+    }
+    return static_cast<int32_t>(value);
+}
+
+static uint32_t CheckedFaceUint32(size_t value, std::string_view description)
+{
+    if (value > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        FError("{} {} exceeds the unsigned BSP index limit", description, value);
+    }
+    return static_cast<uint32_t>(value);
+}
 
 struct makefaces_stats_t : logging::stat_tracker_t
 {
@@ -88,6 +106,7 @@ inline void EmitVertex(const qvec3d &vert, size_t &vert_id)
     }
 
     // add new vertex!
+    CheckedFaceUint32(map.bsp.dvertexes.size(), "vertex index");
     map.add_hash_vector(vert, vert_id = map.bsp.dvertexes.size());
 
     map.bsp.dvertexes.emplace_back(vert);
@@ -107,24 +126,27 @@ static void EmitFaceVertices(face_t *f)
     }
 }
 
-static void EmitVertices_R(node_t *node)
-{
-    if (node->is_leaf()) {
-        return;
-    }
-
-    auto *nodedata = node->get_nodedata();
-    for (auto &f : nodedata->facelist) {
-        EmitFaceVertices(f.get());
-    }
-
-    EmitVertices_R(nodedata->children[0]);
-    EmitVertices_R(nodedata->children[1]);
-}
-
 void EmitVertices(node_t *headnode)
 {
-    EmitVertices_R(headnode);
+    std::vector<node_t *> pending{headnode};
+    while (!pending.empty()) {
+        node_t *node = pending.back();
+        pending.pop_back();
+        if (!node) {
+            FError("BSP tree contains a null child while emitting vertices");
+        }
+        if (node->is_leaf()) {
+            continue;
+        }
+
+        auto *nodedata = node->get_nodedata();
+        for (auto &face : nodedata->facelist) {
+            EmitFaceVertices(face.get());
+        }
+        // Reverse push preserves the original recursive child order.
+        pending.push_back(nodedata->children[1]);
+        pending.push_back(nodedata->children[0]);
+    }
 }
 
 //===========================================================================
@@ -162,9 +184,11 @@ inline int64_t GetEdge(size_t v1, size_t v2, const face_t *face, emit_faces_stat
     }
 
     /* emit an edge */
-    int64_t i = map.bsp.dedges.size();
+    const int32_t i = CheckedFaceInt32(map.bsp.dedges.size(), "edge index");
+    const uint32_t vertex1 = CheckedFaceUint32(v1, "edge vertex index");
+    const uint32_t vertex2 = CheckedFaceUint32(v2, "edge vertex index");
 
-    map.bsp.dedges.push_back(bsp2_dedge_t{static_cast<uint32_t>(v1), static_cast<uint32_t>(v2)});
+    map.bsp.dedges.push_back(bsp2_dedge_t{vertex1, vertex2});
 
     map.add_hash_edge(v1, v2, i, face);
 
@@ -180,6 +204,7 @@ static void EmitEdges(face_t *face, face_fragment_t *fragment, emit_faces_stats_
     if (qbsp_options.maxedges.value() && fragment->output_vertices.size() > qbsp_options.maxedges.value()) {
         FError("Internal error: face->numpoints > max edges ({})", qbsp_options.maxedges.value());
     }
+    CheckedFaceInt32(fragment->output_vertices.size(), "face edge count");
 
     fragment->edges.resize(fragment->output_vertices.size());
 
@@ -204,10 +229,11 @@ static void EmitFaceFragment(face_t *face, face_fragment_t *fragment, emit_faces
         return;
     }
 
-    int i;
-
     // emit a region
     Q_assert(!fragment->outputnumber.has_value());
+    if (map.bsp.dfaces.size() >= static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        FError("face count exceeds the signed BSP limit");
+    }
     fragment->outputnumber = map.bsp.dfaces.size();
 
     mface_t &out = map.bsp.dfaces.emplace_back();
@@ -219,17 +245,29 @@ static void EmitFaceFragment(face_t *face, face_fragment_t *fragment, emit_faces
     out.planenum = ExportMapPlane(face->planenum & ~1);
     out.side = face->planenum & 1;
     out.texinfo = ExportMapTexinfo(face->texinfo);
-    for (i = 0; i < MAXLIGHTMAPS; i++)
+    for (int i = 0; i < MAXLIGHTMAPS; i++)
         out.styles[i] = 255;
     out.lightofs = -1;
 
     // emit surfedges
-    out.firstedge = static_cast<int32_t>(map.bsp.dsurfedges.size());
-    std::copy(fragment->edges.cbegin(), fragment->edges.cbegin() + fragment->output_vertices.size(),
-        std::back_inserter(map.bsp.dsurfedges));
+    out.firstedge = CheckedFaceInt32(map.bsp.dsurfedges.size(), "surface-edge index");
+    const size_t edge_count = fragment->output_vertices.size();
+    if (edge_count > static_cast<size_t>(std::numeric_limits<int32_t>::max()) - map.bsp.dsurfedges.size()) {
+        FError("surface-edge count exceeds the signed BSP index limit");
+    }
+    if (fragment->edges.size() < edge_count) {
+        FError("face has incomplete emitted edge data");
+    }
+    for (size_t edge = 0; edge < edge_count; ++edge) {
+        const int64_t signed_edge = fragment->edges[edge];
+        if (signed_edge < std::numeric_limits<int32_t>::min() || signed_edge > std::numeric_limits<int32_t>::max()) {
+            FError("surface edge {} exceeds the signed BSP index limit", signed_edge);
+        }
+        map.bsp.dsurfedges.push_back(static_cast<int32_t>(signed_edge));
+    }
     fragment->edges.clear();
 
-    out.numedges = static_cast<int32_t>(map.bsp.dsurfedges.size()) - out.firstedge;
+    out.numedges = CheckedFaceInt32(edge_count, "face edge count");
 
     stats.unique_faces++;
 }
@@ -239,34 +277,11 @@ static void EmitFaceFragment(face_t *face, face_fragment_t *fragment, emit_faces
 MakeFaceEdges_r
 ================
 */
-static void EmitFaces_R(node_t *node, emit_faces_stats_t &stats)
-{
-    if (node->is_leaf()) {
-        return;
-    }
-
-    auto *nodedata = node->get_nodedata();
-    nodedata->firstface = static_cast<int>(map.bsp.dfaces.size());
-
-    for (auto &face : nodedata->facelist) {
-        // emit a region
-        for (auto &fragment : face->fragments) {
-            EmitEdges(face.get(), &fragment, stats);
-            EmitFaceFragment(face.get(), &fragment, stats);
-        }
-    }
-
-    nodedata->numfaces = static_cast<int>(map.bsp.dfaces.size()) - nodedata->firstface;
-
-    EmitFaces_R(nodedata->children[0], stats);
-    EmitFaces_R(nodedata->children[1], stats);
-}
-
 /*
 ================
 MakeFaceEdges
 ================
-*/
+ */
 size_t EmitFaces(node_t *headnode)
 {
     logging::funcheader();
@@ -277,7 +292,32 @@ size_t EmitFaces(node_t *headnode)
 
     size_t firstface = map.bsp.dfaces.size();
 
-    EmitFaces_R(headnode, stats);
+    std::vector<node_t *> pending{headnode};
+    while (!pending.empty()) {
+        node_t *node = pending.back();
+        pending.pop_back();
+        if (!node) {
+            FError("BSP tree contains a null child while emitting faces");
+        }
+        if (node->is_leaf()) {
+            continue;
+        }
+
+        auto *nodedata = node->get_nodedata();
+        nodedata->firstface = CheckedFaceInt32(map.bsp.dfaces.size(), "node first-face index");
+        for (auto &face : nodedata->facelist) {
+            for (auto &fragment : face->fragments) {
+                EmitEdges(face.get(), &fragment, stats);
+                EmitFaceFragment(face.get(), &fragment, stats);
+            }
+        }
+        nodedata->numfaces =
+            CheckedFaceInt32(map.bsp.dfaces.size() - static_cast<size_t>(nodedata->firstface), "node face count");
+
+        // Reverse push preserves the original recursive child order.
+        pending.push_back(nodedata->children[1]);
+        pending.push_back(nodedata->children[0]);
+    }
 
     map.hashedges.clear();
 
@@ -408,8 +448,29 @@ static node_t *FixupMarkFaces_ProcessCluster_FindStorageLeaf(node_t *node)
     return node;
 }
 
+// Returns an invalid AABB for an empty set. Callers must reject that case before
+// expanding node bounds, otherwise the sentinel infinities become BSP bounds.
+static aabb3d BoundFaces(const std::set<face_t *> &markfaces)
+{
+    aabb3d result;
+    for (const face_t *face : markfaces) {
+        for (const qvec3d &point : face->w) {
+            result += point;
+        }
+    }
+    return result;
+}
+
+static void AddBoundsToNodeAndAncestors(node_t *node, const aabb3d &bounds)
+{
+    for (; node; node = node->parent) {
+        node->bounds += bounds;
+    }
+}
+
 static void FixupMarkFaces_AddFacesToLeaf(node_t *node, const std::set<face_t *> &marfaces_to_add)
 {
+    Q_assert(!marfaces_to_add.empty());
     Q_assert(FixupMarkFaces_IsUsableLeaf(node));
     auto *leafdata = node->get_leafdata();
 
@@ -422,6 +483,12 @@ static void FixupMarkFaces_AddFacesToLeaf(node_t *node, const std::set<face_t *>
 
     auto new_markfaces = std::vector<face_t *>(current_markfaces.begin(), current_markfaces.end());
     leafdata->markfaces = new_markfaces;
+
+    // The propagated faces can lie outside the chosen storage leaf. Quake
+    // renderers use leaf/node bounds for frustum culling, so include those faces
+    // in the storage leaf and every ancestor even though this deliberately makes
+    // the spatial bounds conservative.
+    AddBoundsToNodeAndAncestors(node, BoundFaces(marfaces_to_add));
 }
 
 /**
@@ -438,6 +505,9 @@ static void FixupMarkFaces_ProcessCluster(node_t *node)
     // gather all marksurfaces of func_detail_fence containing leafs in the cluster into a std::set
     std::set<face_t *> marfaces_to_propagate;
     FixupDetailFence_FindDetailFenceFaces(&marfaces_to_propagate, node);
+    if (marfaces_to_propagate.empty()) {
+        return;
+    }
 
     // start with the cluster...
     std::vector<node_t *> queue;

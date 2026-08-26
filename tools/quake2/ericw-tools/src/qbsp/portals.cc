@@ -937,7 +937,7 @@ void EmitAreaPortals(tree_t &tree)
     map.bsp.dareas.emplace_back();
 
     // don't do anything else if we've leaked
-    if (map.leakfile || map.antiregions.size() || map.region) {
+    if (map.leakfile) {
 
         map.bsp.dareas.emplace_back();
 

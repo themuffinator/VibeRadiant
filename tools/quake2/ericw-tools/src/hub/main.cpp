@@ -18,11 +18,12 @@ See file, 'COPYING', for details.
 */
 
 #include "mainwindow.h"
-#include <QApplication>
-#include <QSurfaceFormat>
-#include <QSettings>
 #include <QCoreApplication>
+#include <QApplication>
 #include <QGuiApplication>
+#include <QPalette>
+#include <QSettings>
+#include <QSurfaceFormat>
 #include <QtGlobal>
 
 int main(int argc, char *argv[])
@@ -34,17 +35,21 @@ int main(int argc, char *argv[])
     // allow non-integer monitor scaling
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
 
-    QApplication a(argc, argv);
-    a.setStyle("fusion");
-    a.setPalette(QPalette(QColor(64, 64, 64)));
-
+    // The default surface format must be selected before QApplication creates
+    // any platform OpenGL contexts.
     QSurfaceFormat fmt;
     fmt.setVersion(3, 3);
     fmt.setProfile(QSurfaceFormat::CoreProfile);
+    fmt.setDepthBufferSize(24);
+    fmt.setStencilBufferSize(8);
 #ifdef _DEBUG
     fmt.setOption(QSurfaceFormat::DebugContext);
 #endif
     QSurfaceFormat::setDefaultFormat(fmt);
+
+    QApplication a(argc, argv);
+    a.setStyle("fusion");
+    a.setPalette(QPalette(QColor(64, 64, 64)));
 
     MainWindow w;
     w.show();

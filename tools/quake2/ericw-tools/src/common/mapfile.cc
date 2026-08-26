@@ -7,25 +7,34 @@
 namespace mapfile
 {
 
-/*static*/ bool brush_side_t::is_valid_texture_projection(
-    const qvec3f &faceNormal, const qvec3f &s_vec, const qvec3f &t_vec)
+/*static*/ bool brush_side_t::is_valid_texture_projection(const qvec3f &faceNormal, const texvecf &vecs)
 {
     // Verify that the texture space basis (s, t, normal) is linearly independent.
     // If the texture normal (cross(s,t)) is perpendicular to the face normal,
     // the basis is singular and the projection is invalid.
     // This matches the invertibility requirement of TexSpaceToWorld in bsputils.cc.
 
+    for (size_t row = 0; row < 2; ++row) {
+        for (size_t col = 0; col < 4; ++col) {
+            if (!std::isfinite(vecs.at(row, col))) {
+                return false;
+            }
+        }
+    }
+
+    const qvec3f s_vec = vecs.row(0).xyz();
+    const qvec3f t_vec = vecs.row(1).xyz();
     const qvec3f tex_normal = qv::normalize(qv::cross(s_vec, t_vec));
 
     for (size_t i = 0; i < 3; i++) {
-        if (std::isnan(tex_normal[i])) {
+        if (!std::isfinite(tex_normal[i])) {
             return false;
         }
     }
 
     const float cosangle = qv::dot(tex_normal, faceNormal);
 
-    if (std::isnan(cosangle)) {
+    if (!std::isfinite(cosangle)) {
         return false;
     } else if (fabs(cosangle) < ZERO_EPSILON) {
         return false;
@@ -34,17 +43,16 @@ namespace mapfile
     return true;
 }
 
+bool brush_side_t::is_valid_texture_projection() const
+{
+    return is_valid_texture_projection(plane.normal, vecs);
+}
+
 void brush_side_t::validate_texture_projection()
 {
     if (!is_valid_texture_projection()) {
-        /*
-        if (qbsp_options.verbose.value()) {
-        logging::print("WARNING: {}: repairing invalid texture projection (\"{}\" near {} {} {})\n", mapface.line,
-        mapface.texname, (int)mapface.planepts[0][0], (int)mapface.planepts[0][1], (int)mapface.planepts[0][2]);
-        } else {
-        issue_stats.num_repaired++;
-        }
-        */
+        logging::print("WARNING: {}: repairing invalid texture projection (\"{}\" near {} {} {})\n", location, texture,
+            static_cast<int>(planepts[0][0]), static_cast<int>(planepts[0][1]), static_cast<int>(planepts[0][2]));
 
         // Reset texturing to sensible defaults
         set_texinfo(texdef_quake_ed_t{{0.0, 0.0}, 0, {1.0, 1.0}});
@@ -509,7 +517,7 @@ void brush_side_t::write_texinfo(std::ostream &stream, const texdef_valve_t &tex
 
 void brush_side_t::write_texinfo(std::ostream &stream, const texdef_etp_t &texdef)
 {
-    write_texinfo(stream, (const texdef_quake_ed_t &)texdef);
+    write_texinfo(stream, static_cast<const texdef_quake_ed_t &>(texdef));
     ewt::print(stream, "//TX{}", texdef.tx2 ? '2' : '1');
 }
 
@@ -880,6 +888,7 @@ static texdef_valve_t TexDef_BSPToValve(const texvecf &in_vecs)
         res.shift[i] = in_vecs.at(i, 3);
         res.axis.set_row(i, axis);
     }
+    res.rotate = 0.0;
 
     return res;
 }
@@ -1055,10 +1064,10 @@ void map_entity_t::parse_entity_dict(parser_t &parser)
     std::string key = std::move(parser.token);
 
     // trim whitespace from start/end
-    while (std::isspace(key.front())) {
+    while (!key.empty() && std::isspace(static_cast<unsigned char>(key.front()))) {
         key.erase(key.begin());
     }
-    while (std::isspace(key.back())) {
+    while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) {
         key.erase(key.end() - 1);
     }
 

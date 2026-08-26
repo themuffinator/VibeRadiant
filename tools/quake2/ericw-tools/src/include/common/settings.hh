@@ -28,16 +28,65 @@
 #include <vector>
 #include <string>
 #include <cassert>
+#include <cmath>
+#include <cstdint>
 #include <sstream>
 #include <map>
 #include <set>
 #include <limits>
 #include <optional>
+#include <stdexcept>
+#include <type_traits>
 #include <unordered_set>
 #include <functional>
 
 namespace settings
 {
+namespace detail
+{
+template<typename T>
+std::optional<T> parse_number(const std::string &token)
+{
+    static_assert(std::is_arithmetic_v<T>);
+
+    try {
+        size_t parsed = 0;
+
+        if constexpr (std::is_floating_point_v<T>) {
+            const double value = std::stod(token, &parsed);
+            if (parsed != token.size() || !std::isfinite(value)) {
+                return std::nullopt;
+            }
+            if (value < static_cast<double>(std::numeric_limits<T>::lowest()) ||
+                value > static_cast<double>(std::numeric_limits<T>::max())) {
+                return std::nullopt;
+            }
+            return static_cast<T>(value);
+        } else if constexpr (std::is_signed_v<T>) {
+            const long long value = std::stoll(token, &parsed, 10);
+            if (parsed != token.size() || value < static_cast<long long>(std::numeric_limits<T>::lowest()) ||
+                value > static_cast<long long>(std::numeric_limits<T>::max())) {
+                return std::nullopt;
+            }
+            return static_cast<T>(value);
+        } else {
+            if (!token.empty() && token.front() == '-') {
+                return std::nullopt;
+            }
+            const unsigned long long value = std::stoull(token, &parsed, 10);
+            if (parsed != token.size() || value > static_cast<unsigned long long>(std::numeric_limits<T>::max())) {
+                return std::nullopt;
+            }
+            return static_cast<T>(value);
+        }
+    } catch (const std::invalid_argument &) {
+        return std::nullopt;
+    } catch (const std::out_of_range &) {
+        return std::nullopt;
+    }
+}
+} // namespace detail
+
 struct parse_exception : public std::exception
 {
 private:
@@ -48,13 +97,20 @@ public:
     const char *what() const noexcept override;
 };
 
-// thrown after displaying `--help` text.
-// the command-line tools should catch this and exit with status 0.
-// tests should let the test framework catch this and fail.
-// (previously, the `--help` code called exit(0); directly which caused
-// spurious test successes.)
+// Thrown after displaying a complete command-line diagnostic. Explicit help
+// uses status 0; invalid command lines use a nonzero status. Tests should let
+// the test framework catch this rather than terminating the process.
 struct quit_after_help_exception : public std::exception
 {
+    explicit quit_after_help_exception(int exit_code = 0) noexcept
+        : _exit_code(exit_code)
+    {
+    }
+
+    int exit_code() const noexcept { return _exit_code; }
+
+private:
+    int _exit_code;
 };
 
 enum class source
@@ -306,20 +362,10 @@ public:
     bool parse(const std::string &setting_name, parser_base_t &parser, source source) override
     {
         if (parser.parse_token(PARSE_PEEK)) {
-            try {
-                T f;
-
-                if constexpr (std::is_floating_point_v<T>) {
-                    f = std::stod(parser.token);
-                } else {
-                    f = static_cast<T>(std::stoull(parser.token));
-                }
-                // if no exception was thrown then we parsed a float/int here successfully
+            if (const auto value = detail::parse_number<T>(parser.token)) {
                 Q_assert(parser.parse_token());
-                this->set_value(f, source);
+                this->set_value(*value, source);
                 return true;
-            } catch (std::exception &) {
-                // fall through...
             }
         }
 
@@ -404,16 +450,28 @@ public:
             }
 
             // see if it's an integer
-            try {
-                const int i = std::stoi(parser.token);
+            using underlying_type = std::underlying_type_t<T>;
+            auto value = detail::parse_number<underlying_type>(parser.token);
 
-                this->set_value(static_cast<T>(i), source);
+            // Map entity keys historically accept integer-valued floating
+            // spellings (for example, "2.0") for enum values. Preserve that
+            // compatibility while still requiring the complete token to be
+            // numeric and range-safe.
+            if (!value) {
+                if (const auto floatingValue = detail::parse_number<double>(parser.token);
+                    floatingValue && std::isfinite(*floatingValue) && std::trunc(*floatingValue) == *floatingValue &&
+                    *floatingValue >= static_cast<double>(std::numeric_limits<underlying_type>::lowest()) &&
+                    *floatingValue <= static_cast<double>(std::numeric_limits<underlying_type>::max())) {
+                    value = static_cast<underlying_type>(*floatingValue);
+                }
+            }
+
+            if (value) {
+                this->set_value(static_cast<T>(*value), source);
 
                 // consume the token we peeked above
                 Q_assert(parser.parse_token());
                 return true;
-            } catch (std::invalid_argument &) {
-            } catch (std::out_of_range &) {
             }
         }
 
@@ -665,6 +723,7 @@ public:
     setting_bool nostat;
     setting_bool noprogress;
     setting_bool nocolor;
+    setting_bool werror;
     setting_redirect quiet;
     setting_path gamedir;
     setting_path basedir;

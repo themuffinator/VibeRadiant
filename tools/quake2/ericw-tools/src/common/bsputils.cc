@@ -19,17 +19,24 @@
 
 #include <common/bsputils.hh>
 
+#include <algorithm>
 #include <array>
+#include <charconv>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
+#include <limits>
+#include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <common/log.hh>
 #include <common/qvec.hh>
 
 const dmodelh2_t *BSP_GetWorldModel(const mbsp_t *bsp)
 {
     // We only support .bsp's that have a world model
-    if (bsp->dmodels.size() < 1) {
+    if (!bsp || bsp->dmodels.empty()) {
         FError("BSP has no models");
     }
     return &bsp->dmodels[0];
@@ -37,90 +44,155 @@ const dmodelh2_t *BSP_GetWorldModel(const mbsp_t *bsp)
 
 int Face_GetNum(const mbsp_t *bsp, const mface_t *f)
 {
-    Q_assert(f != nullptr);
+    if (!bsp || !f || bsp->dfaces.empty()) {
+        FError("Corrupt BSP: face pointer is out of bounds");
+    }
 
-    const ptrdiff_t diff = f - bsp->dfaces.data();
-    Q_assert(diff >= 0 && diff < bsp->dfaces.size());
+    const uintptr_t begin = reinterpret_cast<uintptr_t>(bsp->dfaces.data());
+    const uintptr_t address = reinterpret_cast<uintptr_t>(f);
+    const size_t byte_size = bsp->dfaces.size() * sizeof(mface_t);
+    if (address < begin || address - begin >= byte_size || (address - begin) % sizeof(mface_t) != 0) {
+        FError("Corrupt BSP: face pointer is out of bounds");
+    }
 
-    return static_cast<int>(diff);
+    const size_t index = (address - begin) / sizeof(mface_t);
+    if (index > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        FError("Corrupt BSP: face index exceeds the supported range");
+    }
+    return static_cast<int>(index);
 }
 
 const bsp2_dnode_t *BSP_GetNode(const mbsp_t *bsp, int nodenum)
 {
-    Q_assert(nodenum >= 0 && nodenum < bsp->dnodes.size());
-    return &bsp->dnodes[nodenum];
+    if (!bsp || nodenum < 0 || static_cast<size_t>(nodenum) >= bsp->dnodes.size()) {
+        FError("Corrupt BSP: node {} is out of bounds", nodenum);
+    }
+    return &bsp->dnodes[static_cast<size_t>(nodenum)];
 }
 
 const mleaf_t *BSP_GetLeaf(const mbsp_t *bsp, int leafnum)
 {
-    if (leafnum < 0 || leafnum >= bsp->dleafs.size()) {
-        Error("Corrupt BSP: leaf {} is out of bounds (bsp->numleafs = {})", leafnum, bsp->dleafs.size());
+    if (!bsp || leafnum < 0 || static_cast<size_t>(leafnum) >= bsp->dleafs.size()) {
+        FError("Corrupt BSP: leaf {} is out of bounds", leafnum);
     }
-    return &bsp->dleafs[leafnum];
+    return &bsp->dleafs[static_cast<size_t>(leafnum)];
 }
 
 int BSP_GetLeafNum(const mbsp_t *bsp, const mleaf_t *leaf)
 {
-    ptrdiff_t index = leaf - bsp->dleafs.data();
-    if (index < 0 || index >= bsp->dleafs.size()) {
-        Error("Leaf {} out of bounds", index);
+    if (!bsp || !leaf || bsp->dleafs.empty()) {
+        FError("Corrupt BSP: leaf pointer is out of bounds");
+    }
+
+    const uintptr_t begin = reinterpret_cast<uintptr_t>(bsp->dleafs.data());
+    const uintptr_t address = reinterpret_cast<uintptr_t>(leaf);
+    const size_t byte_size = bsp->dleafs.size() * sizeof(mleaf_t);
+    if (address < begin || address - begin >= byte_size || (address - begin) % sizeof(mleaf_t) != 0) {
+        FError("Corrupt BSP: leaf pointer is out of bounds");
+    }
+
+    const size_t index = (address - begin) / sizeof(mleaf_t);
+    if (index > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        FError("Corrupt BSP: leaf index exceeds the supported range");
     }
     return static_cast<int>(index);
 }
 
 const mleaf_t *BSP_GetLeafFromNodeNum(const mbsp_t *bsp, int nodenum)
 {
-    const int leafnum = (-1 - nodenum);
-    return BSP_GetLeaf(bsp, leafnum);
+    if (nodenum >= 0) {
+        FError("Corrupt BSP: node reference {} does not encode a leaf", nodenum);
+    }
+
+    const int64_t leafnum = -1ll - static_cast<int64_t>(nodenum);
+    if (leafnum > std::numeric_limits<int>::max()) {
+        FError("Corrupt BSP: leaf reference {} is out of bounds", nodenum);
+    }
+    return BSP_GetLeaf(bsp, static_cast<int>(leafnum));
 }
 
 const dplane_t *BSP_GetPlane(const mbsp_t *bsp, int planenum)
 {
-    Q_assert(planenum >= 0 && planenum < bsp->dplanes.size());
-    return &bsp->dplanes[planenum];
+    if (!bsp || planenum < 0 || static_cast<size_t>(planenum) >= bsp->dplanes.size()) {
+        FError("Corrupt BSP: plane {} is out of bounds", planenum);
+    }
+    return &bsp->dplanes[static_cast<size_t>(planenum)];
 }
 
 const mface_t *BSP_GetFace(const mbsp_t *bsp, int fnum)
 {
-    Q_assert(fnum >= 0 && fnum < bsp->dfaces.size());
-    return &bsp->dfaces[fnum];
+    if (!bsp || fnum < 0 || static_cast<size_t>(fnum) >= bsp->dfaces.size()) {
+        FError("Corrupt BSP: face {} is out of bounds", fnum);
+    }
+    return &bsp->dfaces[static_cast<size_t>(fnum)];
 }
 
 const mtexinfo_t *BSP_GetTexinfo(const mbsp_t *bsp, int texinfo)
 {
-    if (texinfo < 0) {
+    if (!bsp || texinfo < 0) {
         return nullptr;
     }
-    if (texinfo >= bsp->texinfo.size()) {
+    if (static_cast<size_t>(texinfo) >= bsp->texinfo.size()) {
         return nullptr;
     }
-    const mtexinfo_t *tex = &bsp->texinfo[texinfo];
+    const mtexinfo_t *tex = &bsp->texinfo[static_cast<size_t>(texinfo)];
     return tex;
 }
 
 mface_t *BSP_GetFace(mbsp_t *bsp, int fnum)
 {
-    Q_assert(fnum >= 0 && fnum < bsp->dfaces.size());
-    return &bsp->dfaces[fnum];
+    return const_cast<mface_t *>(BSP_GetFace(const_cast<const mbsp_t *>(bsp), fnum));
+}
+
+static void ValidateFaceSurfedgeRange(const mbsp_t *bsp, const mface_t *face)
+{
+    if (!bsp || !face) {
+        FError("Face edge lookup requires valid BSP and face objects");
+    }
+    if (face->firstedge < 0 || face->numedges < 0) {
+        FError("Corrupt BSP: face has invalid surfedge range ({}, {})", face->firstedge, face->numedges);
+    }
+
+    const size_t firstedge = static_cast<size_t>(face->firstedge);
+    const size_t numedges = static_cast<size_t>(face->numedges);
+    if (firstedge > bsp->dsurfedges.size() || numedges > bsp->dsurfedges.size() - firstedge) {
+        FError("Corrupt BSP: face surfedge range ({}, {}) exceeds {} entries", firstedge, numedges,
+            bsp->dsurfedges.size());
+    }
 }
 
 /* small helper that just retrieves the correct vertex from face->surfedge->edge lookups */
 int Face_VertexAtIndex(const mbsp_t *bsp, const mface_t *f, int v)
 {
-    Q_assert(v >= 0);
-    Q_assert(v < f->numedges);
+    ValidateFaceSurfedgeRange(bsp, f);
+    if (v < 0 || v >= f->numedges) {
+        FError("Corrupt BSP: face vertex index {} is outside [0, {})", v, f->numedges);
+    }
 
-    int edge = f->firstedge + v;
-    edge = bsp->dsurfedges[edge];
-    if (edge < 0)
-        return bsp->dedges[-edge][1];
-    return bsp->dedges[edge][0];
+    const size_t surfedge_index = static_cast<size_t>(f->firstedge) + static_cast<size_t>(v);
+    const int32_t surfedge = bsp->dsurfedges[surfedge_index];
+    const uint64_t edge_index =
+        surfedge < 0 ? static_cast<uint64_t>(-static_cast<int64_t>(surfedge)) : static_cast<uint64_t>(surfedge);
+    if (edge_index >= bsp->dedges.size()) {
+        FError("Corrupt BSP: surfedge {} references edge {}, but only {} edges exist", surfedge_index, edge_index,
+            bsp->dedges.size());
+    }
+
+    const uint32_t vertex = bsp->dedges[static_cast<size_t>(edge_index)][surfedge < 0 ? 1 : 0];
+    if (static_cast<uint64_t>(vertex) >= static_cast<uint64_t>(bsp->dvertexes.size()) ||
+        static_cast<uint64_t>(vertex) > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+        FError("Corrupt BSP: edge {} references vertex {}, but only {} vertices exist", edge_index, vertex,
+            bsp->dvertexes.size());
+    }
+    return static_cast<int>(vertex);
 }
 
 const qvec3f &Vertex_GetPos(const mbsp_t *bsp, int num)
 {
-    Q_assert(num >= 0 && num < bsp->dvertexes.size());
-    return bsp->dvertexes[num];
+    if (!bsp || num < 0 || static_cast<size_t>(num) >= bsp->dvertexes.size()) {
+        FError("Corrupt BSP: vertex {} is out of bounds", num);
+    }
+    return bsp->dvertexes[static_cast<size_t>(num)];
 }
 
 const qvec3f &Face_PointAtIndex(const mbsp_t *bsp, const mface_t *f, int v)
@@ -136,8 +208,10 @@ qvec3d Face_Normal(const mbsp_t *bsp, const mface_t *f)
 
 qplane3f Face_Plane(const mbsp_t *bsp, const mface_t *f)
 {
-    Q_assert(f->planenum >= 0 && f->planenum < bsp->dplanes.size());
-    qplane3f result = bsp->dplanes[f->planenum];
+    if (!bsp || !f || f->planenum < 0 || static_cast<size_t>(f->planenum) >= bsp->dplanes.size()) {
+        FError("Corrupt BSP: face plane {} is out of bounds", f ? f->planenum : -1);
+    }
+    qplane3f result = bsp->dplanes[static_cast<size_t>(f->planenum)];
 
     if (f->side) {
         return -result;
@@ -148,7 +222,7 @@ qplane3f Face_Plane(const mbsp_t *bsp, const mface_t *f)
 
 const mtexinfo_t *Face_Texinfo(const mbsp_t *bsp, const mface_t *face)
 {
-    if (face->texinfo < 0 || face->texinfo >= bsp->texinfo.size())
+    if (!bsp || !face || face->texinfo < 0 || static_cast<size_t>(face->texinfo) >= bsp->texinfo.size())
         return nullptr;
 
     return &bsp->texinfo[face->texinfo];
@@ -156,6 +230,10 @@ const mtexinfo_t *Face_Texinfo(const mbsp_t *bsp, const mface_t *face)
 
 const miptex_t *Face_Miptex(const mbsp_t *bsp, const mface_t *face)
 {
+    if (!bsp || !face) {
+        return nullptr;
+    }
+
     // no miptex data (Q2 maps)
     if (!bsp->dtex.textures.size())
         return nullptr;
@@ -165,7 +243,11 @@ const miptex_t *Face_Miptex(const mbsp_t *bsp, const mface_t *face)
     if (texinfo == nullptr)
         return nullptr;
 
-    const miptex_t &miptex = bsp->dtex.textures[texinfo->miptex];
+    if (texinfo->miptex < 0 || static_cast<size_t>(texinfo->miptex) >= bsp->dtex.textures.size()) {
+        return nullptr;
+    }
+
+    const miptex_t &miptex = bsp->dtex.textures[static_cast<size_t>(texinfo->miptex)];
 
     // sometimes the texture just wasn't written. including its name.
     if (miptex.name.empty())
@@ -176,7 +258,17 @@ const miptex_t *Face_Miptex(const mbsp_t *bsp, const mface_t *face)
 
 std::string_view Face_TextureNameView(const mbsp_t *bsp, const mface_t *face)
 {
-    return std::string_view(Face_TextureName(bsp, face));
+    const mtexinfo_t *texinfo = Face_Texinfo(bsp, face);
+    if (!texinfo) {
+        return {};
+    }
+
+    if (!texinfo->texturename.empty()) {
+        return texinfo->texturename;
+    }
+
+    const miptex_t *miptex = Face_Miptex(bsp, face);
+    return miptex ? std::string_view(miptex->name) : std::string_view{};
 }
 
 const char *Face_TextureName(const mbsp_t *bsp, const mface_t *face)
@@ -188,8 +280,8 @@ const char *Face_TextureName(const mbsp_t *bsp, const mface_t *face)
     }
 
     // Q2 has texture written directly here
-    if (texinfo->texture[0]) {
-        return texinfo->texture.data();
+    if (!texinfo->texturename.empty()) {
+        return texinfo->texturename.c_str();
     }
 
     // Q1 has it on the miptex
@@ -207,28 +299,27 @@ const qvec3f &GetSurfaceVertexPoint(const mbsp_t *bsp, const mface_t *f, int v)
     return bsp->dvertexes[Face_VertexAtIndex(bsp, f, v)];
 }
 
-static int TextureName_Contents(const char *texname)
+static int TextureName_Contents(const gamedef_t *game, const char *texname)
 {
     if (!Q_strncasecmp(texname, "sky", 3))
         return CONTENTS_SKY;
-	else if (texname[0] == '*') // don't check liquids if not prefixed as such
-	{
-		if (!Q_strncasecmp(texname, "*lava", 5))
-        	return CONTENTS_LAVA;
-    	else if (!Q_strncasecmp(texname, "*slime", 6))
-      		return CONTENTS_SLIME;
-		else
-			return CONTENTS_WATER;
-	}
-	else if (texname[0] == '!') // don't check liquids if not prefixed as such
-	{
-		if (!Q_strncasecmp(texname, "!lava", 5))
-        	return CONTENTS_LAVA;
-    	else if (!Q_strncasecmp(texname, "!slime", 6))
-      		return CONTENTS_SLIME;
-		else
-			return CONTENTS_WATER;
-	}
+    else if (texname[0] == '*') // don't check liquids if not prefixed as such
+    {
+        if (!Q_strncasecmp(texname, "*lava", 5))
+            return CONTENTS_LAVA;
+        else if (!Q_strncasecmp(texname, "*slime", 6))
+            return CONTENTS_SLIME;
+        else
+            return CONTENTS_WATER;
+    } else if (texname[0] == '!' && game->allows_hl_contents) // don't check liquids if not prefixed as such
+    {
+        if (!Q_strncasecmp(texname, "!lava", 5))
+            return CONTENTS_LAVA;
+        else if (!Q_strncasecmp(texname, "!slime", 6))
+            return CONTENTS_SLIME;
+        else
+            return CONTENTS_WATER;
+    }
     return CONTENTS_SOLID;
 }
 
@@ -236,6 +327,9 @@ static int TextureName_Contents(const char *texname)
 bool // mxd
 ContentsOrSurfaceFlags_IsTranslucent(const mbsp_t *bsp, const int contents_or_surf_flags)
 {
+    if (!bsp || !bsp->loadversion || !bsp->loadversion->game) {
+        FError("Contents query requires a valid BSP version");
+    }
     if (bsp->loadversion->game->id == GAME_QUAKE_II)
         return (contents_or_surf_flags & (Q2_SURF_TRANS33 | Q2_SURF_TRANS66 | Q2_SURF_WARP));
     else
@@ -252,80 +346,131 @@ Face_IsTranslucent(const mbsp_t *bsp, const mface_t *face)
 int // mxd. Returns CONTENTS_ value for Q1, Q2_SURF_ bitflags for Q2...
 Face_ContentsOrSurfaceFlags(const mbsp_t *bsp, const mface_t *face)
 {
+    if (!bsp || !bsp->loadversion || !bsp->loadversion->game || !face) {
+        FError("Face contents query requires valid BSP and face objects");
+    }
     if (bsp->loadversion->game->id == GAME_QUAKE_II) {
         const mtexinfo_t *info = Face_Texinfo(bsp, face);
+        if (!info) {
+            FError("Corrupt BSP: face texture info is out of bounds");
+        }
         return info->flags.native_q2;
     } else {
-        return TextureName_Contents(Face_TextureName(bsp, face));
+        return TextureName_Contents(bsp->loadversion->game, Face_TextureName(bsp, face));
     }
 }
 
 const dmodelh2_t *BSP_DModelForModelString(const mbsp_t *bsp, const std::string &submodel_str)
 {
+    if (!bsp || submodel_str.size() < 2 || submodel_str.front() != '*') {
+        return nullptr;
+    }
+
     int submodel = -1;
-    if (1 == sscanf(submodel_str.c_str(), "*%d", &submodel)) {
-
-        if (submodel < 0 || submodel >= bsp->dmodels.size()) {
-            return nullptr;
-        }
-
-        return &bsp->dmodels[submodel];
-    }
-    return nullptr;
-}
-
-static bool Light_PointInSolid_r(
-    const mbsp_t *bsp, const std::vector<contentflags_t> &extended_flags, const int nodenum, const qvec3d &point)
-{
-    if (nodenum < 0) {
-        const mleaf_t *leaf = BSP_GetLeafFromNodeNum(bsp, nodenum);
-        int leafnum = BSP_GetLeafNum(bsp, leaf);
-
-        auto contentflags = extended_flags[leafnum];
-
-        // these are solids for this test (luxels can't be put inside)
-        return !!(contentflags.flags & (EWT_VISCONTENTS_SOLID | EWT_VISCONTENTS_DETAIL_WALL | EWT_VISCONTENTS_SKY));
+    const char *const first = submodel_str.data() + 1;
+    const char *const last = submodel_str.data() + submodel_str.size();
+    const auto [end, error] = std::from_chars(first, last, submodel);
+    if (error != std::errc{} || end != last || submodel < 0 || static_cast<size_t>(submodel) >= bsp->dmodels.size()) {
+        return nullptr;
     }
 
-    const bsp2_dnode_t *node = &bsp->dnodes[nodenum];
-    const double dist = bsp->dplanes[node->planenum].distance_to_fast(point);
-
-    if (dist > 0.1)
-        return Light_PointInSolid_r(bsp, extended_flags, node->children[0], point);
-    if (dist < -0.1)
-        return Light_PointInSolid_r(bsp, extended_flags, node->children[1], point);
-
-    // too close to the plane, check both sides
-    return Light_PointInSolid_r(bsp, extended_flags, node->children[0], point) ||
-           Light_PointInSolid_r(bsp, extended_flags, node->children[1], point);
+    return &bsp->dmodels[static_cast<size_t>(submodel)];
 }
 
 // Tests hull 0 of the given model
 bool Light_PointInSolid(
     const mbsp_t *bsp, const dmodelh2_t *model, const std::vector<contentflags_t> &extended_flags, const qvec3d &point)
 {
-    return Light_PointInSolid_r(bsp, extended_flags, model->headnode[0], point);
+    if (!bsp || !model) {
+        FError("Light point query requires valid BSP and model objects");
+    }
+
+    std::vector<int> pending{model->headnode[0]};
+    size_t visited_nodes = 0;
+    while (!pending.empty()) {
+        const int nodenum = pending.back();
+        pending.pop_back();
+
+        if (nodenum < 0) {
+            const int leafnum = BSP_GetLeafNum(bsp, BSP_GetLeafFromNodeNum(bsp, nodenum));
+            if (static_cast<size_t>(leafnum) >= extended_flags.size()) {
+                FError("Corrupt BSP: leaf {} has no extended contents entry", leafnum);
+            }
+
+            const auto contentflags = extended_flags[static_cast<size_t>(leafnum)];
+            // These are solids for this test (luxels can't be put inside).
+            if (contentflags.flags & (EWT_VISCONTENTS_SOLID | EWT_VISCONTENTS_DETAIL_WALL | EWT_VISCONTENTS_SKY)) {
+                return true;
+            }
+            continue;
+        }
+
+        if (++visited_nodes > bsp->dnodes.size()) {
+            FError("Corrupt BSP: hull 0 node tree contains a cycle or shared node");
+        }
+
+        const bsp2_dnode_t *node = BSP_GetNode(bsp, nodenum);
+        const double dist = BSP_GetPlane(bsp, node->planenum)->distance_to_fast(point);
+        if (!std::isfinite(dist)) {
+            FError("Corrupt BSP: non-finite node-plane distance at node {}", nodenum);
+        }
+
+        if (dist > 0.1) {
+            pending.push_back(node->children[SIDE_FRONT]);
+        } else if (dist < -0.1) {
+            pending.push_back(node->children[SIDE_BACK]);
+        } else {
+            // Too close to the plane: inspect both sides without recursion.
+            pending.push_back(node->children[SIDE_BACK]);
+            pending.push_back(node->children[SIDE_FRONT]);
+        }
+    }
+
+    return false;
 }
 
 bool Light_PointInWorld(const mbsp_t *bsp, const std::vector<contentflags_t> &extended_flags, const qvec3d &point)
 {
-    return Light_PointInSolid(bsp, &bsp->dmodels[0], extended_flags, point);
+    return Light_PointInSolid(bsp, BSP_GetWorldModel(bsp), extended_flags, point);
 }
 
 static std::vector<qplane3d> Face_AllocInwardFacingEdgePlanes(const mbsp_t *bsp, const mface_t *face)
 {
+    ValidateFaceSurfedgeRange(bsp, face);
+    if (face->numedges < 3) {
+        FError("Corrupt BSP: face has fewer than three edges");
+    }
+
     std::vector<qplane3d> out;
-    out.reserve(face->numedges);
+    out.reserve(static_cast<size_t>(face->numedges));
 
     const qplane3f faceplane = Face_Plane(bsp, face);
+    const qvec3d face_normal = faceplane.normal;
+    const double face_normal_length_squared = qv::length2(face_normal);
+    if (!std::isfinite(face_normal_length_squared) || face_normal_length_squared <= 0.0) {
+        FError("Corrupt BSP: face has a zero or non-finite plane normal");
+    }
+
     for (int i = 0; i < face->numedges; i++) {
         const qvec3f &v0 = GetSurfaceVertexPoint(bsp, face, i);
         const qvec3f &v1 = GetSurfaceVertexPoint(bsp, face, (i + 1) % face->numedges);
 
-        qvec3d edgevec = qv::normalize(v1 - v0);
-        qvec3d normal = qv::cross(edgevec, faceplane.normal);
+        const qvec3d start = v0;
+        const qvec3d edge = qvec3d(v1) - start;
+        const double edge_length_squared = qv::length2(edge);
+        if (!std::isfinite(edge_length_squared) || edge_length_squared <= 0.0) {
+            FError("Corrupt BSP: face edge {} is zero-length or non-finite", i);
+        }
 
-        out.emplace_back(normal, qv::dot(normal, v0));
+        const qvec3d edgevec = edge / std::sqrt(edge_length_squared);
+        const qvec3d normal = qv::cross(edgevec, face_normal);
+        const double normal_length_squared = qv::length2(normal);
+        const double distance = qv::dot(normal, start);
+        if (!std::isfinite(normal_length_squared) || normal_length_squared <= 0.0 || !std::isfinite(distance)) {
+            FError("Corrupt BSP: face edge {} cannot form a finite inward plane", i);
+        }
+
+        out.emplace_back(normal, distance);
     }
 
     return out;
@@ -344,67 +489,90 @@ static bool EdgePlanes_PointInside(const std::vector<qplane3d> &edgeplanes, cons
 /**
  * pass 0,0,0 for wantedNormal to disable the normal check
  */
-static void BSP_FindFaceAtPoint_r(const mbsp_t *bsp, const int nodenum, const qvec3d &point, const qvec3d &wantedNormal,
-    std::vector<const mface_t *> &result)
+static void BSP_FindFacesAtPoint_r(const mbsp_t *bsp, const int root_nodenum, const qvec3d &point,
+    const qvec3d &wantedNormal, std::vector<const mface_t *> &result)
 {
-    if (nodenum < 0) {
-        // we're only interested in nodes, since faces are owned by nodes.
-        return;
-    }
+    std::vector<int> pending{root_nodenum};
+    size_t visited_nodes = 0;
+    while (!pending.empty()) {
+        const int nodenum = pending.back();
+        pending.pop_back();
 
-    const bsp2_dnode_t *node = &bsp->dnodes[nodenum];
-    const double dist = bsp->dplanes[node->planenum].distance_to_fast(point);
+        if (nodenum < 0) {
+            // Faces are owned by nodes, but validate every reached leaf.
+            BSP_GetLeafFromNodeNum(bsp, nodenum);
+            continue;
+        }
 
-    if (dist > 0.1) {
-        BSP_FindFaceAtPoint_r(bsp, node->children[0], point, wantedNormal, result);
-        return;
-    }
-    if (dist < -0.1) {
-        BSP_FindFaceAtPoint_r(bsp, node->children[1], point, wantedNormal, result);
-        return;
-    }
+        if (++visited_nodes > bsp->dnodes.size()) {
+            FError("Corrupt BSP: hull 0 node tree contains a cycle or shared node");
+        }
 
-    // Point is close to this node plane. Check all faces on the plane.
-    for (int i = 0; i < node->numfaces; i++) {
-        const mface_t *face = BSP_GetFace(bsp, node->firstface + i);
-        // First check if it's facing the right way
-        qvec3d faceNormal = Face_Normal(bsp, face);
+        const bsp2_dnode_t *node = BSP_GetNode(bsp, nodenum);
+        const double dist = BSP_GetPlane(bsp, node->planenum)->distance_to_fast(point);
+        if (!std::isfinite(dist)) {
+            FError("Corrupt BSP: non-finite node-plane distance at node {}", nodenum);
+        }
 
-        if (wantedNormal != qvec3d{0, 0, 0}) {
-            if (qv::dot(faceNormal, wantedNormal) < 0) {
-                // Opposite, so not the right face.
+        if (dist > 0.1) {
+            pending.push_back(node->children[SIDE_FRONT]);
+            continue;
+        }
+        if (dist < -0.1) {
+            pending.push_back(node->children[SIDE_BACK]);
+            continue;
+        }
+
+        // Point is close to this node plane. Check all faces on the plane.
+        const size_t first_face = static_cast<size_t>(node->firstface);
+        const size_t num_faces = static_cast<size_t>(node->numfaces);
+        if (first_face > bsp->dfaces.size() || num_faces > bsp->dfaces.size() - first_face) {
+            FError("Corrupt BSP: node {} face range ({}, {}) is out of bounds", nodenum, first_face, num_faces);
+        }
+        for (size_t i = 0; i < num_faces; i++) {
+            const mface_t *face = &bsp->dfaces[first_face + i];
+            // First check if it's facing the right way.
+            const qvec3d faceNormal = Face_Normal(bsp, face);
+
+            if (wantedNormal != qvec3d{0, 0, 0} && qv::dot(faceNormal, wantedNormal) < 0) {
                 continue;
+            }
+
+            // Next test if it's within the boundaries of the face.
+            const auto edgeplanes = Face_AllocInwardFacingEdgePlanes(bsp, face);
+
+            if (EdgePlanes_PointInside(edgeplanes, point)) {
+                result.push_back(face);
             }
         }
 
-        // Next test if it's within the boundaries of the face
-        auto edgeplanes = Face_AllocInwardFacingEdgePlanes(bsp, face);
-        const bool insideFace = EdgePlanes_PointInside(edgeplanes, point);
-
-        // Found a match?
-        if (insideFace) {
-            result.push_back(face);
-        }
+        // Push back first so front retains the original depth-first order.
+        pending.push_back(node->children[SIDE_BACK]);
+        pending.push_back(node->children[SIDE_FRONT]);
     }
-
-    // No match found on this plane. Check both sides of the tree.
-    BSP_FindFaceAtPoint_r(bsp, node->children[0], point, wantedNormal, result);
-    BSP_FindFaceAtPoint_r(bsp, node->children[1], point, wantedNormal, result);
 }
 
 std::vector<const mface_t *> BSP_FindFacesAtPoint(
     const mbsp_t *bsp, const dmodelh2_t *model, const qvec3d &point, const qvec3d &wantedNormal)
 {
+    if (!bsp || !model) {
+        FError("Face point query requires valid BSP and model objects");
+    }
+
     std::vector<const mface_t *> result;
-    BSP_FindFaceAtPoint_r(bsp, model->headnode[0], point, wantedNormal, result);
+    BSP_FindFacesAtPoint_r(bsp, model->headnode[0], point, wantedNormal, result);
     return result;
 }
 
 const mface_t *BSP_FindFaceAtPoint(
     const mbsp_t *bsp, const dmodelh2_t *model, const qvec3d &point, const qvec3d &wantedNormal)
 {
+    if (!bsp || !model) {
+        FError("Face point query requires valid BSP and model objects");
+    }
+
     std::vector<const mface_t *> result;
-    BSP_FindFaceAtPoint_r(bsp, model->headnode[0], point, wantedNormal, result);
+    BSP_FindFacesAtPoint_r(bsp, model->headnode[0], point, wantedNormal, result);
 
     if (result.empty()) {
         return nullptr;
@@ -412,109 +580,159 @@ const mface_t *BSP_FindFaceAtPoint(
     return result[0];
 }
 
-static const bsp2_dnode_t *BSP_FindNodeAtPoint_r(
-    const mbsp_t *bsp, const int nodenum, const qvec3d &point, const qvec3d &wantedNormal)
-{
-    if (nodenum < 0) {
-        // we're only interested in nodes
-        return nullptr;
-    }
-
-    const bsp2_dnode_t *node = &bsp->dnodes[nodenum];
-    const double dist = bsp->dplanes[node->planenum].distance_to_fast(point);
-
-    if (dist > 0.1)
-        return BSP_FindNodeAtPoint_r(bsp, node->children[0], point, wantedNormal);
-    if (dist < -0.1)
-        return BSP_FindNodeAtPoint_r(bsp, node->children[1], point, wantedNormal);
-
-    // Point is close to this node plane. Check normal
-    if (qv::epsilonEqual(1.0, fabs(qv::dot(bsp->dplanes[node->planenum].normal, wantedNormal)), 0.01)) {
-        return node;
-    }
-
-    // No match found on this plane. Check both sides of the tree.
-    const bsp2_dnode_t *side0Match = BSP_FindNodeAtPoint_r(bsp, node->children[0], point, wantedNormal);
-    if (side0Match != nullptr) {
-        return side0Match;
-    } else {
-        return BSP_FindNodeAtPoint_r(bsp, node->children[1], point, wantedNormal);
-    }
-}
-
 const bsp2_dnode_t *BSP_FindNodeAtPoint(
     const mbsp_t *bsp, const dmodelh2_t *model, const qvec3d &point, const qvec3d &wanted_normal)
 {
-    return BSP_FindNodeAtPoint_r(bsp, model->headnode[0], point, wanted_normal);
+    if (!bsp || !model) {
+        FError("Node point query requires valid BSP and model objects");
+    }
+
+    std::vector<int> pending{model->headnode[0]};
+    size_t visited_nodes = 0;
+    while (!pending.empty()) {
+        const int nodenum = pending.back();
+        pending.pop_back();
+
+        if (nodenum < 0) {
+            BSP_GetLeafFromNodeNum(bsp, nodenum);
+            continue;
+        }
+
+        if (++visited_nodes > bsp->dnodes.size()) {
+            FError("Corrupt BSP: hull 0 node tree contains a cycle or shared node");
+        }
+
+        const bsp2_dnode_t *node = BSP_GetNode(bsp, nodenum);
+        const dplane_t *plane = BSP_GetPlane(bsp, node->planenum);
+        const double dist = plane->distance_to_fast(point);
+        if (!std::isfinite(dist)) {
+            FError("Corrupt BSP: non-finite node-plane distance at node {}", nodenum);
+        }
+
+        if (dist > 0.1) {
+            pending.push_back(node->children[SIDE_FRONT]);
+            continue;
+        }
+        if (dist < -0.1) {
+            pending.push_back(node->children[SIDE_BACK]);
+            continue;
+        }
+
+        if (qv::epsilonEqual(1.0, fabs(qv::dot(plane->normal, wanted_normal)), 0.01)) {
+            return node;
+        }
+
+        // Push back first so front retains the original depth-first order.
+        pending.push_back(node->children[SIDE_BACK]);
+        pending.push_back(node->children[SIDE_FRONT]);
+    }
+
+    return nullptr;
 }
 
 static const mleaf_t *BSP_FindLeafAtPoint_r(const mbsp_t *bsp, const int nodenum, const qvec3d &point)
 {
-    if (nodenum < 0) {
-        return BSP_GetLeafFromNodeNum(bsp, nodenum);
+    int current = nodenum;
+    size_t visited_nodes = 0;
+    while (current >= 0) {
+        if (++visited_nodes > bsp->dnodes.size()) {
+            FError("Corrupt BSP: hull 0 node tree contains a cycle");
+        }
+
+        const bsp2_dnode_t *node = BSP_GetNode(bsp, current);
+        const double dist = BSP_GetPlane(bsp, node->planenum)->distance_to_fast(point);
+        if (!std::isfinite(dist)) {
+            FError("Corrupt BSP: non-finite node-plane distance at node {}", current);
+        }
+
+        current = node->children[dist >= 0 ? SIDE_FRONT : SIDE_BACK];
     }
 
-    const bsp2_dnode_t *node = &bsp->dnodes[nodenum];
-    const double dist = bsp->dplanes[node->planenum].distance_to_fast(point);
-
-    if (dist >= 0) {
-        return BSP_FindLeafAtPoint_r(bsp, node->children[0], point);
-    } else {
-        return BSP_FindLeafAtPoint_r(bsp, node->children[1], point);
-    }
+    return BSP_GetLeafFromNodeNum(bsp, current);
 }
 
 const mleaf_t *BSP_FindLeafAtPoint(const mbsp_t *bsp, const dmodelh2_t *model, const qvec3d &point)
 {
+    if (!bsp || !model) {
+        FError("Leaf point query requires valid BSP and model objects");
+    }
     return BSP_FindLeafAtPoint_r(bsp, model->headnode[0], point);
 }
 
 static clipnode_info_t BSP_FindClipnodeAtPoint_r(const mbsp_t *bsp, const int parent_clipnodenum,
     const planeside_t parent_side, const int clipnodenum, const qvec3d &point)
 {
-    if (clipnodenum < 0) {
-        // actually contents
-        clipnode_info_t info;
-        info.parent_clipnode = parent_clipnodenum;
-        info.contents = clipnodenum;
-        info.side = parent_side;
-        return info;
+    int current = clipnodenum;
+    int parent = parent_clipnodenum;
+    planeside_t side = parent_side;
+    size_t visited_nodes = 0;
+
+    while (current >= 0) {
+        if (static_cast<size_t>(current) >= bsp->dclipnodes.size()) {
+            FError("Corrupt BSP: clipnode {} is out of bounds", current);
+        }
+        if (++visited_nodes > bsp->dclipnodes.size()) {
+            FError("Corrupt BSP: clipnode tree contains a cycle");
+        }
+
+        const auto *node = &bsp->dclipnodes[static_cast<size_t>(current)];
+        const double dist = BSP_GetPlane(bsp, node->planenum)->distance_to_fast(point);
+        if (!std::isfinite(dist)) {
+            FError("Corrupt BSP: non-finite clipnode-plane distance at clipnode {}", current);
+        }
+
+        parent = current;
+        side = dist >= 0 ? SIDE_FRONT : SIDE_BACK;
+        current = node->children[side];
     }
 
-    const auto *node = &bsp->dclipnodes.at(clipnodenum);
-    const double dist = bsp->dplanes[node->planenum].distance_to_fast(point);
-
-    if (dist >= 0) {
-        return BSP_FindClipnodeAtPoint_r(bsp, clipnodenum, SIDE_FRONT, node->children[SIDE_FRONT], point);
-    } else {
-        return BSP_FindClipnodeAtPoint_r(bsp, clipnodenum, SIDE_BACK, node->children[SIDE_BACK], point);
-    }
+    return {.parent_clipnode = parent, .side = side, .contents = current};
 }
 clipnode_info_t BSP_FindClipnodeAtPoint(
     const mbsp_t *bsp, hull_index_t hullnum, const dmodelh2_t *model, const qvec3d &point)
 {
-    Q_assert(hullnum.value() > 0);
-    return BSP_FindClipnodeAtPoint_r(bsp, 0, static_cast<planeside_t>(-1), model->headnode.at(hullnum.value()), point);
+    if (!bsp || !model || !hullnum || *hullnum == 0 || static_cast<size_t>(*hullnum) >= model->headnode.size()) {
+        FError("Clipnode point query requires a valid non-zero hull and model");
+    }
+    return BSP_FindClipnodeAtPoint_r(
+        bsp, 0, static_cast<planeside_t>(-1), model->headnode[static_cast<size_t>(*hullnum)], point);
 }
 
 int BSP_FindContentsAtPoint(const mbsp_t *bsp, hull_index_t hullnum, const dmodelh2_t *model, const qvec3d &point)
 {
-    if (!hullnum.value_or(0)) {
+    if (!bsp || !model) {
+        FError("Contents point query requires valid BSP and model objects");
+    }
+
+    const size_t hull = static_cast<size_t>(hullnum.value_or(0));
+    if (hull >= model->headnode.size()) {
+        FError("Contents point query hull {} is out of bounds", hull);
+    }
+    if (hull == 0) {
         return BSP_FindLeafAtPoint_r(bsp, model->headnode[0], point)->contents;
     }
-    auto info =
-        BSP_FindClipnodeAtPoint_r(bsp, 0, static_cast<planeside_t>(-1), model->headnode.at(hullnum.value()), point);
+    const auto info = BSP_FindClipnodeAtPoint_r(bsp, 0, static_cast<planeside_t>(-1), model->headnode[hull], point);
     return info.contents;
 }
 
 std::vector<const mface_t *> Leaf_Markfaces(const mbsp_t *bsp, const mleaf_t *leaf)
 {
-    std::vector<const mface_t *> result;
-    result.reserve(leaf->nummarksurfaces);
+    BSP_GetLeafNum(bsp, leaf);
+    const size_t first = static_cast<size_t>(leaf->firstmarksurface);
+    const size_t count = static_cast<size_t>(leaf->nummarksurfaces);
+    if (first > bsp->dleaffaces.size() || count > bsp->dleaffaces.size() - first) {
+        FError("Corrupt BSP: leaf marksurface range ({}, {}) is out of bounds", first, count);
+    }
 
-    for (uint32_t i = 0; i < leaf->nummarksurfaces; ++i) {
-        uint32_t face_index = bsp->dleaffaces.at(leaf->firstmarksurface + i);
-        result.push_back(BSP_GetFace(bsp, face_index));
+    std::vector<const mface_t *> result;
+    result.reserve(count);
+
+    for (size_t i = 0; i < count; ++i) {
+        const uint32_t face_index = bsp->dleaffaces[first + i];
+        if (static_cast<size_t>(face_index) >= bsp->dfaces.size()) {
+            FError("Corrupt BSP: leaf marksurface references face {} out of {}", face_index, bsp->dfaces.size());
+        }
+        result.push_back(&bsp->dfaces[static_cast<size_t>(face_index)]);
     }
 
     return result;
@@ -522,12 +740,22 @@ std::vector<const mface_t *> Leaf_Markfaces(const mbsp_t *bsp, const mleaf_t *le
 
 std::vector<const dbrush_t *> Leaf_Brushes(const mbsp_t *bsp, const mleaf_t *leaf)
 {
-    std::vector<const dbrush_t *> result;
-    result.reserve(leaf->numleafbrushes);
+    BSP_GetLeafNum(bsp, leaf);
+    const size_t first = static_cast<size_t>(leaf->firstleafbrush);
+    const size_t count = static_cast<size_t>(leaf->numleafbrushes);
+    if (first > bsp->dleafbrushes.size() || count > bsp->dleafbrushes.size() - first) {
+        FError("Corrupt BSP: leaf brush range ({}, {}) is out of bounds", first, count);
+    }
 
-    for (uint32_t i = 0; i < leaf->numleafbrushes; ++i) {
-        uint32_t brush_index = bsp->dleafbrushes.at(leaf->firstleafbrush + i);
-        result.push_back(&bsp->dbrushes.at(brush_index));
+    std::vector<const dbrush_t *> result;
+    result.reserve(count);
+
+    for (size_t i = 0; i < count; ++i) {
+        const uint32_t brush_index = bsp->dleafbrushes[first + i];
+        if (static_cast<size_t>(brush_index) >= bsp->dbrushes.size()) {
+            FError("Corrupt BSP: leaf brush list references brush {} out of {}", brush_index, bsp->dbrushes.size());
+        }
+        result.push_back(&bsp->dbrushes[static_cast<size_t>(brush_index)]);
     }
 
     return result;
@@ -535,9 +763,10 @@ std::vector<const dbrush_t *> Leaf_Brushes(const mbsp_t *bsp, const mleaf_t *lea
 
 std::vector<qvec3f> Face_Points(const mbsp_t *bsp, const mface_t *face)
 {
+    ValidateFaceSurfedgeRange(bsp, face);
     std::vector<qvec3f> points;
 
-    points.reserve(face->numedges);
+    points.reserve(static_cast<size_t>(face->numedges));
 
     for (int j = 0; j < face->numedges; j++) {
         points.push_back(Face_PointAtIndex(bsp, face, j));
@@ -548,6 +777,7 @@ std::vector<qvec3f> Face_Points(const mbsp_t *bsp, const mface_t *face)
 
 polylib::winding_t Face_Winding(const mbsp_t *bsp, const mface_t *face)
 {
+    ValidateFaceSurfedgeRange(bsp, face);
     polylib::winding_t w{};
 
     for (int j = 0; j < face->numedges; j++) {
@@ -565,7 +795,11 @@ qvec3f Face_Centroid(const mbsp_t *bsp, const mface_t *face)
 
 void Face_DebugPrint(const mbsp_t *bsp, const mface_t *face)
 {
-    const mtexinfo_t *tex = &bsp->texinfo[face->texinfo];
+    ValidateFaceSurfedgeRange(bsp, face);
+    const mtexinfo_t *tex = Face_Texinfo(bsp, face);
+    if (!tex) {
+        FError("Corrupt BSP: face texture info is out of bounds");
+    }
     const char *texname = Face_TextureName(bsp, face);
 
     logging::print("face {}, texture '{}', {} edges; vectors:\n"
@@ -573,8 +807,8 @@ void Face_DebugPrint(const mbsp_t *bsp, const mface_t *face)
         Face_GetNum(bsp, face), texname, face->numedges, tex->vecs);
 
     for (int i = 0; i < face->numedges; i++) {
-        int edge = bsp->dsurfedges[face->firstedge + i];
-        int vert = Face_VertexAtIndex(bsp, face, i);
+        const int edge = bsp->dsurfedges[static_cast<size_t>(face->firstedge) + static_cast<size_t>(i)];
+        const int vert = Face_VertexAtIndex(bsp, face, i);
         const qvec3f &point = GetSurfaceVertexPoint(bsp, face, i);
         logging::print("{} {:3} ({:3.3}, {:3.3}, {:3.3}) :: edge {}\n", i ? "          " : "    verts ", vert, point[0],
             point[1], point[2], edge);
@@ -623,11 +857,21 @@ void CompressRow(const uint8_t *vis, const size_t numbytes, std::back_insert_ite
 
 size_t DecompressedVisSize(const mbsp_t *bsp)
 {
-    if (bsp->loadversion->game->id == GAME_QUAKE_II) {
-        return (bsp->dvis.bit_offsets.size() + 7) / 8;
+    if (!bsp || !bsp->loadversion || !bsp->loadversion->game) {
+        FError("visibility decompression requires a valid BSP version");
     }
 
-    return (bsp->dmodels[0].visleafs + 7) / 8;
+    if (bsp->loadversion->game->id == GAME_QUAKE_II) {
+        const size_t clusters = bsp->dvis.bit_offsets.size();
+        return (clusters / 8) + (clusters % 8 != 0);
+    }
+
+    const dmodelh2_t *world = BSP_GetWorldModel(bsp);
+    if (world->visleafs < 0) {
+        FError("Corrupt BSP: world model has a negative visibility leaf count");
+    }
+    const size_t visleafs = static_cast<size_t>(world->visleafs);
+    return (visleafs / 8) + (visleafs % 8 != 0);
 }
 
 int VisleafToLeafnum(int visleaf)
@@ -643,37 +887,47 @@ int LeafnumToVisleaf(int leafnum)
 // returns true if pvs can see leaf
 bool Pvs_LeafVisible(const mbsp_t *bsp, const std::vector<uint8_t> &pvs, const mleaf_t *leaf)
 {
+    if (!bsp || !bsp->loadversion || !bsp->loadversion->game || !leaf) {
+        FError("PVS query requires valid BSP and leaf objects");
+    }
+    const int leafnum = BSP_GetLeafNum(bsp, leaf);
+
     if (bsp->loadversion->game->id == GAME_QUAKE_II) {
         if (leaf->cluster < 0) {
             return false;
         }
 
-        if (leaf->cluster >= bsp->dvis.bit_offsets.size() ||
-            bsp->dvis.get_bit_offset(VIS_PVS, leaf->cluster) >= bsp->dvis.bits.size()) {
+        const size_t cluster = static_cast<size_t>(leaf->cluster);
+        if (cluster >= bsp->dvis.bit_offsets.size()) {
             logging::print("Pvs_LeafVisible: invalid visofs for cluster {}\n", leaf->cluster);
             return false;
         }
+        const int32_t offset = bsp->dvis.get_bit_offset(VIS_PVS, cluster);
+        if (offset < 0 || static_cast<size_t>(offset) >= bsp->dvis.bits.size() || cluster / 8 >= pvs.size()) {
+            logging::print("Pvs_LeafVisible: invalid visibility data for cluster {}\n", leaf->cluster);
+            return false;
+        }
 
-        return !!(pvs[leaf->cluster >> 3] & (1 << (leaf->cluster & 7)));
+        return !!(pvs[cluster >> 3] & nth_bit(cluster & 7));
     } else {
-        const int leafnum = (leaf - bsp->dleafs.data());
         const int visleaf = LeafnumToVisleaf(leafnum);
 
         if (leafnum == 0) {
             // can't see into the shared solid leaf
             return false;
         }
-        if (visleaf < -1 || visleaf >= bsp->dmodels[0].visleafs) {
-            logging::print("WARNING: bad/empty vis data on leaf?");
+        const dmodelh2_t *world = BSP_GetWorldModel(bsp);
+        if (visleaf < 0 || visleaf >= world->visleafs || static_cast<size_t>(visleaf) / 8 >= pvs.size()) {
+            logging::print("Pvs_LeafVisible: invalid visibility data for leaf {}\n", leafnum);
             return false;
         }
 
-        return !!(pvs[visleaf >> 3] & (1 << (visleaf & 7)));
+        return !!(pvs[static_cast<size_t>(visleaf) >> 3] & nth_bit(static_cast<size_t>(visleaf) & 7));
     }
 }
 
 // from DarkPlaces (Mod_Q1BSP_DecompressVis)
-void DecompressVis(const uint8_t *in, const uint8_t *inend, uint8_t *out, uint8_t *outend)
+bool DecompressVis(const uint8_t *in, const uint8_t *inend, uint8_t *out, uint8_t *outend)
 {
     int c;
     uint8_t *outstart = out;
@@ -681,7 +935,7 @@ void DecompressVis(const uint8_t *in, const uint8_t *inend, uint8_t *out, uint8_
         if (in == inend) {
             logging::print("DecompressVis: input underrun (decompressed {} of {} output bytes)\n", (out - outstart),
                 (outend - outstart));
-            return;
+            return false;
         }
 
         c = *in++;
@@ -693,24 +947,25 @@ void DecompressVis(const uint8_t *in, const uint8_t *inend, uint8_t *out, uint8_
         if (in == inend) {
             logging::print("DecompressVis: input underrun (during zero-run) (decompressed {} of {} output bytes)\n",
                 (out - outstart), (outend - outstart));
-            return;
+            return false;
         }
 
         const int run_length = *in++;
         if (!run_length) {
             logging::print("DecompressVis: 0 repeat\n");
-            return;
+            return false;
         }
 
         for (c = run_length; c > 0; c--) {
             if (out == outend) {
                 logging::print("DecompressVis: output overrun (decompressed {} of {} output bytes)\n", (out - outstart),
                     (outend - outstart));
-                return;
+                return false;
             }
             *out++ = 0;
         }
     }
+    return true;
 }
 
 /**
@@ -729,23 +984,30 @@ std::unordered_map<int, std::vector<uint8_t>> DecompressAllVis(const mbsp_t *bsp
     const size_t decompressed_size = DecompressedVisSize(bsp);
 
     if (bsp->loadversion->game->id == GAME_QUAKE_II) {
-        const int num_clusters = bsp->dvis.bit_offsets.size();
+        if (bsp->dvis.bit_offsets.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            FError("visibility cluster count {} exceeds the supported range", bsp->dvis.bit_offsets.size());
+        }
 
-        for (int cluster = 0; cluster < num_clusters; ++cluster) {
-            if (bsp->dvis.get_bit_offset(VIS_PVS, cluster) >= bsp->dvis.bits.size()) {
+        for (size_t cluster = 0; cluster < bsp->dvis.bit_offsets.size(); ++cluster) {
+            const int32_t offset = bsp->dvis.get_bit_offset(VIS_PVS, cluster);
+            if (offset < 0 || static_cast<size_t>(offset) >= bsp->dvis.bits.size()) {
                 logging::print("DecompressAllVis: invalid visofs for cluster {}\n", cluster);
                 continue;
             }
 
             std::vector<uint8_t> decompressed(decompressed_size);
-            DecompressVis(bsp->dvis.bits.data() + bsp->dvis.get_bit_offset(VIS_PVS, cluster),
-                bsp->dvis.bits.data() + bsp->dvis.bits.size(), decompressed.data(),
-                decompressed.data() + decompressed.size());
-            result[cluster] = std::move(decompressed);
+            if (!decompressed.empty()) {
+                if (!DecompressVis(bsp->dvis.bits.data() + static_cast<size_t>(offset),
+                        bsp->dvis.bits.data() + bsp->dvis.bits.size(), decompressed.data(),
+                        decompressed.data() + decompressed.size())) {
+                    continue;
+                }
+            }
+            result[static_cast<int>(cluster)] = std::move(decompressed);
         }
     } else {
-        for (int leafnum = 0; leafnum < bsp->dleafs.size(); ++leafnum) {
-            auto &leaf = bsp->dleafs[leafnum];
+        for (size_t leafnum = 0; leafnum < bsp->dleafs.size(); ++leafnum) {
+            const auto &leaf = bsp->dleafs[leafnum];
             if (leaf.visofs < 0) {
                 continue;
             }
@@ -757,14 +1019,19 @@ std::unordered_map<int, std::vector<uint8_t>> DecompressAllVis(const mbsp_t *bsp
                 continue;
             }
 
-            if (leaf.visofs >= bsp->dvis.bits.size()) {
+            if (static_cast<size_t>(leaf.visofs) >= bsp->dvis.bits.size()) {
                 logging::print("DecompressAllVis: invalid visofs for leaf {}\n", leafnum);
                 continue;
             }
 
             std::vector<uint8_t> decompressed(decompressed_size);
-            DecompressVis(bsp->dvis.bits.data() + leaf.visofs, bsp->dvis.bits.data() + bsp->dvis.bits.size(),
-                decompressed.data(), decompressed.data() + decompressed.size());
+            if (!decompressed.empty()) {
+                if (!DecompressVis(bsp->dvis.bits.data() + static_cast<size_t>(leaf.visofs),
+                        bsp->dvis.bits.data() + bsp->dvis.bits.size(), decompressed.data(),
+                        decompressed.data() + decompressed.size())) {
+                    continue;
+                }
+            }
             result[map_key] = std::move(decompressed);
         }
     }
@@ -772,36 +1039,72 @@ std::unordered_map<int, std::vector<uint8_t>> DecompressAllVis(const mbsp_t *bsp
     return result;
 }
 
-static void BSP_VisitAllLeafs_R(
-    const mbsp_t &bsp, const int nodenum, const std::function<void(const mleaf_t &)> &visitor)
-{
-    if (nodenum < 0) {
-        auto *leaf = BSP_GetLeafFromNodeNum(&bsp, nodenum);
-        visitor(*leaf);
-        return;
-    }
-
-    const bsp2_dnode_t &node = bsp.dnodes.at(nodenum);
-    BSP_VisitAllLeafs_R(bsp, node.children[0], visitor);
-    BSP_VisitAllLeafs_R(bsp, node.children[1], visitor);
-}
-
 void BSP_VisitAllLeafs(const mbsp_t &bsp, const dmodelh2_t &model, const std::function<void(const mleaf_t &)> &visitor)
 {
-    BSP_VisitAllLeafs_R(bsp, model.headnode[0], visitor);
+    if (!visitor) {
+        FError("BSP leaf traversal requires a visitor");
+    }
+
+    std::vector<int> pending{model.headnode[0]};
+    size_t visited_nodes = 0;
+    while (!pending.empty()) {
+        const int nodenum = pending.back();
+        pending.pop_back();
+
+        if (nodenum < 0) {
+            visitor(*BSP_GetLeafFromNodeNum(&bsp, nodenum));
+            continue;
+        }
+        if (++visited_nodes > bsp.dnodes.size()) {
+            FError("Corrupt BSP: hull 0 node tree contains a cycle or shared node");
+        }
+
+        const bsp2_dnode_t *node = BSP_GetNode(&bsp, nodenum);
+        const dplane_t *plane = BSP_GetPlane(&bsp, node->planenum);
+        if (!std::isfinite(plane->normal[0]) || !std::isfinite(plane->normal[1]) || !std::isfinite(plane->normal[2]) ||
+            !std::isfinite(plane->dist)) {
+            FError("Corrupt BSP: node {} has a non-finite plane", nodenum);
+        }
+        pending.push_back(node->children[SIDE_BACK]);
+        pending.push_back(node->children[SIDE_FRONT]);
+    }
+}
+
+void BSPX_ValidateDecoupledLM(const bspx_decoupled_lm_perface &face, size_t face_num)
+{
+    for (size_t row = 0; row < 2; ++row) {
+        for (size_t column = 0; column < 4; ++column) {
+            if (!std::isfinite(face.world_to_lm_space.at(row, column))) {
+                FError("DECOUPLED_LM face {} has a non-finite world-to-lightmap matrix component at ({}, {})", face_num,
+                    row, column);
+            }
+        }
+    }
 }
 
 bspx_decoupled_lm_perface BSPX_DecoupledLM(const bspxentries_t &entries, int face_num)
 {
-    auto &lump_bytes = entries.at("DECOUPLED_LM");
+    constexpr size_t serialized_face_size = (sizeof(uint16_t) * 2) + sizeof(int32_t) + (sizeof(float) * 8);
+    const auto &lump_bytes = entries.at("DECOUPLED_LM");
 
-    auto stream = imemstream(lump_bytes.data(), lump_bytes.size());
+    if (face_num < 0 || static_cast<size_t>(face_num) > std::numeric_limits<size_t>::max() / serialized_face_size) {
+        FError("invalid DECOUPLED_LM face index {}", face_num);
+    }
 
-    stream.seekg(face_num * sizeof(bspx_decoupled_lm_perface));
+    const size_t offset = static_cast<size_t>(face_num) * serialized_face_size;
+    if (offset > lump_bytes.size() || serialized_face_size > lump_bytes.size() - offset) {
+        FError("DECOUPLED_LM face index {} is outside the lump", face_num);
+    }
+
+    auto stream = imemstream(lump_bytes.data() + offset, serialized_face_size);
     stream >> endianness<std::endian::little>;
 
-    bspx_decoupled_lm_perface result;
+    bspx_decoupled_lm_perface result{};
     stream >= result;
+    if (!stream || stream.tellg() != static_cast<std::streamoff>(serialized_face_size)) {
+        FError("malformed DECOUPLED_LM data for face {}", face_num);
+    }
+    BSPX_ValidateDecoupledLM(result, static_cast<size_t>(face_num));
     return result;
 }
 
@@ -811,12 +1114,20 @@ std::optional<bspxfacenormals> BSPX_FaceNormals(const mbsp_t &bsp, const bspxent
     if (it == entries.end()) {
         return std::nullopt;
     }
+    if (it->second.empty()) {
+        logging::print("WARNING: bad FACENORMALS lump\n");
+        return std::nullopt;
+    }
 
     auto stream = imemstream(it->second.data(), it->second.size());
     stream >> endianness<std::endian::little>;
 
     bspxfacenormals result;
     result.stream_read(stream, bsp);
+    if (!stream || stream.tellg() != static_cast<std::streamoff>(it->second.size())) {
+        logging::print("WARNING: bad FACENORMALS lump\n");
+        return std::nullopt;
+    }
     return result;
 }
 
@@ -826,6 +1137,10 @@ std::optional<lightgrid_octree_t> BSPX_LightgridOctree(const bspxentries_t &entr
     if (it == entries.end()) {
         return std::nullopt;
     }
+    if (it->second.empty()) {
+        logging::print("WARNING: bad LIGHTGRID_OCTREE lump\n");
+        return std::nullopt;
+    }
 
     auto stream = imemstream(it->second.data(), it->second.size());
     stream >> endianness<std::endian::little>;
@@ -833,7 +1148,7 @@ std::optional<lightgrid_octree_t> BSPX_LightgridOctree(const bspxentries_t &entr
     lightgrid_octree_t result;
     stream >= result;
 
-    if (stream.tellg() != it->second.size()) {
+    if (!stream || stream.tellg() != static_cast<std::streamoff>(it->second.size())) {
         logging::print("WARNING: bad LIGHTGRID_OCTREE lump\n");
         return std::nullopt;
     }
@@ -847,12 +1162,21 @@ std::optional<lightgrids_t> BSPX_Lightgrids(const bspxentries_t &entries)
     if (it == entries.end()) {
         return std::nullopt;
     }
+    if (it->second.empty()) {
+        logging::print("WARNING: bad LIGHTGRIDS lump\n");
+        return std::nullopt;
+    }
 
     auto stream = imemstream(it->second.data(), it->second.size());
     stream >> endianness<std::endian::little>;
 
     lightgrids_t result;
     stream >= result;
+
+    if (!stream || stream.tellg() != static_cast<std::streamoff>(it->second.size())) {
+        logging::print("WARNING: bad LIGHTGRIDS lump\n");
+        return std::nullopt;
+    }
 
     return result;
 }
@@ -1136,18 +1460,40 @@ qvec3f faceextents_t::LMCoordToWorld(qvec2f lm) const
     return res;
 }
 
-/**
- * Returns an offset, in samples, from the start of the face's lightmaps to the location of the given style data.
- * Returns -1 if the face doesn't have lightmaps for that style.
- */
-static int StyleOffset(int style, const mface_t *face, const faceextents_t &faceextents)
+static std::optional<size_t> lightmap_pixel_index(
+    const mface_t *face, const faceextents_t &faceextents, qvec2i coord, int style, std::string_view description)
 {
-    for (int i = 0; i < face->styles.size(); ++i) {
-        if (face->styles[i] == style) {
-            return i * faceextents.width() * faceextents.height();
-        }
+    const int64_t width_signed = static_cast<int64_t>(faceextents.lm_extents[0]) + 1;
+    const int64_t height_signed = static_cast<int64_t>(faceextents.lm_extents[1]) + 1;
+    if (width_signed <= 0 || height_signed <= 0) {
+        FError("invalid {} lightmap dimensions {}x{}", description, width_signed, height_signed);
     }
-    return -1;
+    if (coord[0] < 0 || coord[1] < 0 || coord[0] >= width_signed || coord[1] >= height_signed) {
+        FError("{} lightmap coordinate {} is outside {}x{}", description, coord, width_signed, height_signed);
+    }
+
+    const auto style_it = std::ranges::find(face->styles, style);
+    if (style_it == face->styles.end()) {
+        return std::nullopt;
+    }
+
+    const size_t width = static_cast<size_t>(width_signed);
+    const size_t height = static_cast<size_t>(height_signed);
+    if (width > std::numeric_limits<size_t>::max() / height) {
+        FError("{} lightmap dimensions {}x{} overflow the sample count", description, width, height);
+    }
+    const size_t samples_per_style = width * height;
+    const size_t style_index = static_cast<size_t>(style_it - face->styles.begin());
+    if (style_index > std::numeric_limits<size_t>::max() / samples_per_style) {
+        FError("{} lightmap style offset overflow", description);
+    }
+    const size_t style_offset = style_index * samples_per_style;
+    const size_t coordinate_offset = static_cast<size_t>(coord[1]) * width + static_cast<size_t>(coord[0]);
+    if (style_offset > std::numeric_limits<size_t>::max() - coordinate_offset) {
+        FError("{} lightmap pixel offset overflow", description);
+    }
+
+    return style_offset + coordinate_offset;
 }
 
 /**
@@ -1160,36 +1506,60 @@ qvec3b LM_Sample(const mbsp_t *bsp, const mface_t *face, const lit_variant_t *li
         return {0, 0, 0};
     }
 
-    Q_assert(coord[0] >= 0);
-    Q_assert(coord[1] >= 0);
-    Q_assert(coord[0] < faceextents.width());
-    Q_assert(coord[1] < faceextents.height());
-
-    int style_offset = StyleOffset(style, face, faceextents);
-    if (style_offset == -1) {
+    const auto pixel = lightmap_pixel_index(face, faceextents, coord, style, "LDR");
+    if (!pixel) {
         return {0, 0, 0};
     }
 
-    int pixel = style_offset + coord[0] + (coord[1] * faceextents.width());
-
-    assert(byte_offset_of_face >= 0);
-
-    const uint8_t *data = bsp->dlightdata.data();
+    if (byte_offset_of_face < 0) {
+        FError("invalid negative LDR lightmap offset {}", byte_offset_of_face);
+    }
+    const size_t face_offset = static_cast<size_t>(byte_offset_of_face);
 
     if (lit && std::holds_alternative<lit1_t>(*lit)) {
-        const uint8_t *lit_data = std::get_if<lit1_t>(lit)->rgbdata.data();
+        const auto &lit_data = std::get<lit1_t>(*lit).rgbdata;
+        if (face_offset > std::numeric_limits<size_t>::max() / 3 || *pixel > std::numeric_limits<size_t>::max() / 3) {
+            FError("RGB .lit sample offset overflow");
+        }
+        const size_t lit_face_offset = face_offset * 3;
+        const size_t pixel_offset = *pixel * 3;
+        if (lit_face_offset > std::numeric_limits<size_t>::max() - pixel_offset) {
+            FError("RGB .lit sample offset overflow");
+        }
+        const size_t sample_offset = lit_face_offset + pixel_offset;
+        if (sample_offset > lit_data.size() || 3 > lit_data.size() - sample_offset) {
+            FError("RGB .lit sample {} is outside the file ({} bytes)", *pixel, lit_data.size());
+        }
 
-        return qvec3f{lit_data[(3 * byte_offset_of_face) + (pixel * 3) + 0],
-            lit_data[(3 * byte_offset_of_face) + (pixel * 3) + 1],
-            lit_data[(3 * byte_offset_of_face) + (pixel * 3) + 2]};
+        return {lit_data[sample_offset], lit_data[sample_offset + 1], lit_data[sample_offset + 2]};
     } else if (bsp->loadversion->game->has_rgb_lightmap) {
-        return qvec3f{data[byte_offset_of_face + (pixel * 3) + 0], data[byte_offset_of_face + (pixel * 3) + 1],
-            data[byte_offset_of_face + (pixel * 3) + 2]};
+        if (*pixel > std::numeric_limits<size_t>::max() / 3) {
+            FError("native RGB lightmap sample offset overflow");
+        }
+        const size_t pixel_offset = *pixel * 3;
+        if (face_offset > std::numeric_limits<size_t>::max() - pixel_offset) {
+            FError("native RGB lightmap sample offset overflow");
+        }
+        const size_t sample_offset = face_offset + pixel_offset;
+        if (sample_offset > bsp->dlightdata.size() || 3 > bsp->dlightdata.size() - sample_offset) {
+            FError("native RGB lightmap sample {} is outside the lump ({} bytes)", *pixel, bsp->dlightdata.size());
+        }
+
+        return {bsp->dlightdata[sample_offset], bsp->dlightdata[sample_offset + 1], bsp->dlightdata[sample_offset + 2]};
     } else if (!lit || std::holds_alternative<lit_none>(*lit)) {
-        return qvec3f{
-            data[byte_offset_of_face + pixel], data[byte_offset_of_face + pixel], data[byte_offset_of_face + pixel]};
+        if (face_offset > std::numeric_limits<size_t>::max() - *pixel) {
+            FError("native grayscale lightmap sample offset overflow");
+        }
+        const size_t sample_offset = face_offset + *pixel;
+        if (sample_offset >= bsp->dlightdata.size()) {
+            FError(
+                "native grayscale lightmap sample {} is outside the lump ({} bytes)", *pixel, bsp->dlightdata.size());
+        }
+
+        const uint8_t sample = bsp->dlightdata[sample_offset];
+        return {sample, sample, sample};
     } else {
-        throw std::runtime_error("not implemented");
+        FError("LM_Sample requires RGB or no .lit data");
     }
 }
 
@@ -1200,61 +1570,72 @@ qvec3f LM_Sample_HDR(const mbsp_t *bsp, const mface_t *face, const faceextents_t
         return {0, 0, 0};
     }
 
-    Q_assert(coord[0] >= 0);
-    Q_assert(coord[1] >= 0);
-    Q_assert(coord[0] < faceextents.width());
-    Q_assert(coord[1] < faceextents.height());
-
-    int style_offset = StyleOffset(0, face, faceextents);
-    if (style_offset == -1) {
+    const auto pixel_index = lightmap_pixel_index(face, faceextents, coord, 0, "HDR");
+    if (!pixel_index) {
         return {0, 0, 0};
     }
 
-    int pixel = style_offset + coord[0] + (coord[1] * faceextents.width());
+    if (byte_offset_of_face < 0) {
+        FError("invalid negative HDR lightmap offset {}", byte_offset_of_face);
+    }
+    if (bsp->loadversion->game->has_rgb_lightmap && byte_offset_of_face % 3 != 0) {
+        FError("RGB HDR lightmap offset {} is not sample-aligned", byte_offset_of_face);
+    }
 
-    assert(byte_offset_of_face >= 0);
+    const size_t sample_offset_of_face = bsp->loadversion->game->has_rgb_lightmap
+                                             ? static_cast<size_t>(byte_offset_of_face) / 3
+                                             : static_cast<size_t>(byte_offset_of_face);
+    if (sample_offset_of_face > std::numeric_limits<size_t>::max() - *pixel_index) {
+        FError("HDR lightmap sample index overflow");
+    }
+    const size_t sample_index = sample_offset_of_face + *pixel_index;
 
-    const uint32_t *packed_samples = nullptr;
+    std::optional<uint32_t> packed_sample;
     if (lit && std::holds_alternative<lit_hdr>(*lit)) {
-        packed_samples = std::get_if<lit_hdr>(lit)->samples.data();
+        const auto &samples = std::get<lit_hdr>(*lit).samples;
+        if (sample_index >= samples.size()) {
+            FError("HDR .lit sample {} is outside the file ({} samples)", sample_index, samples.size());
+        }
+        packed_sample = samples[sample_index];
     } else if (bspx) {
         if (auto it = bspx->find("LIGHTING_E5BGR9"); it != bspx->end()) {
-            // FIXME: alignment ignored
-            packed_samples = reinterpret_cast<const uint32_t *>(it->second.data());
+            constexpr size_t packed_sample_size = sizeof(uint32_t);
+            if (sample_index > std::numeric_limits<size_t>::max() / packed_sample_size) {
+                FError("BSPX HDR lightmap sample index overflow");
+            }
+
+            const size_t byte_offset = sample_index * packed_sample_size;
+            const auto &bytes = it->second;
+            if (byte_offset > bytes.size() || packed_sample_size > bytes.size() - byte_offset) {
+                FError("BSPX HDR lightmap sample {} is outside the lump ({} bytes)", sample_index, bytes.size());
+            }
+
+            packed_sample = static_cast<uint32_t>(bytes[byte_offset]) |
+                            (static_cast<uint32_t>(bytes[byte_offset + 1]) << 8) |
+                            (static_cast<uint32_t>(bytes[byte_offset + 2]) << 16) |
+                            (static_cast<uint32_t>(bytes[byte_offset + 3]) << 24);
         }
     }
 
-    if (!packed_samples)
+    if (!packed_sample) {
         throw std::runtime_error("LM_Sample_HDR requires either an HDR .lit file or BSPX lump");
-
-    int sample_offset_of_face =
-        bsp->loadversion->game->has_rgb_lightmap ? byte_offset_of_face / 3 : byte_offset_of_face;
-
-    return HDR_UnpackE5BRG9(packed_samples[sample_offset_of_face + pixel]);
-}
-
-static void AddLeafs(const mbsp_t *bsp, int nodenum, std::map<int, std::vector<int>> &cluster_to_leafnums)
-{
-    if (nodenum < 0) {
-        const mleaf_t *leaf = BSP_GetLeafFromNodeNum(bsp, nodenum);
-
-        // cluster -1 is invalid
-        if (leaf->cluster != -1) {
-            int leafnum = leaf - bsp->dleafs.data();
-            cluster_to_leafnums[leaf->cluster].push_back(leafnum);
-        }
-
-        return;
     }
 
-    auto *node = BSP_GetNode(bsp, nodenum);
-    AddLeafs(bsp, node->children[0], cluster_to_leafnums);
-    AddLeafs(bsp, node->children[1], cluster_to_leafnums);
+    return HDR_UnpackE5BRG9(*packed_sample);
 }
 
 std::map<int, std::vector<int>> ClusterToLeafnumsMap(const mbsp_t *bsp)
 {
+    if (!bsp) {
+        FError("Cluster-to-leaf mapping requires a BSP");
+    }
+
     std::map<int, std::vector<int>> result;
-    AddLeafs(bsp, bsp->dmodels[0].headnode[0], result);
+    BSP_VisitAllLeafs(*bsp, *BSP_GetWorldModel(bsp), [&](const mleaf_t &leaf) {
+        // cluster -1 is invalid
+        if (leaf.cluster != -1) {
+            result[leaf.cluster].push_back(BSP_GetLeafNum(bsp, &leaf));
+        }
+    });
     return result;
 }

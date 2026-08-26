@@ -30,7 +30,9 @@ See file, 'COPYING', for details.
 #include <QVector3D>
 #include <QMatrix4x4>
 
+#include <memory>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <common/qvec.hh>
@@ -58,8 +60,16 @@ class GLView : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core
     Q_OBJECT
 
 private:
-    std::optional<mbsp_t> m_bsp;
+    std::shared_ptr<const mbsp_t> m_bsp;
     std::unordered_map<int, std::vector<uint8_t>> m_decompressedVis;
+    std::unordered_map<int, int> m_lightStyleLayers;
+    // Reused every visibility update to avoid allocating one or two face-sized
+    // arrays while the camera is moving.
+    std::vector<uint8_t> m_faceVisibilityScratch;
+    std::vector<uint8_t> m_filteredFaceVisibilityScratch;
+
+    static constexpr uint32_t GEOM_MASK_WORLD = 0x1;
+    static constexpr uint32_t GEOM_MASK_BMODEL = 0x2;
 
     std::unique_ptr<spatialindex_t> m_spatialindex;
     uint32_t m_keysPressed;
@@ -96,6 +106,9 @@ private:
     QVector3D cameraRight() const
     {
         QVector3D v = QVector3D::crossProduct(m_cameraFwd, QVector3D(0, 0, 1));
+        if (qFuzzyIsNull(v.lengthSquared())) {
+            return QVector3D(1, 0, 0);
+        }
         v.normalize();
         return v;
     }
@@ -123,8 +136,8 @@ private:
     int m_totalFaces = 0;
     int m_totalLeafs = 0;
     int m_totalModels = 0;
-    int m_portalCount = 0;
-    int m_lightgridSampleCount = 0;
+    size_t m_portalCount = 0;
+    size_t m_lightgridSampleCount = 0;
     std::optional<std::string> m_textureFilter;
     std::unordered_map<std::string, std::vector<int>> m_facesByTexture;
 
@@ -189,11 +202,11 @@ private:
         material_key key;
         std::shared_ptr<QOpenGLTexture> texture;
         size_t first_index = 0;
-        size_t index_count = 0;
+        int index_count = 0;
     };
     std::vector<drawcall_t> m_drawcalls;
-    size_t num_leak_points = 0;
-    size_t num_portal_indices = 0;
+    int num_leak_points = 0;
+    int num_portal_indices = 0;
     int m_selected_face = -1;
 
     QOpenGLShaderProgram *m_program = nullptr, *m_skybox_program = nullptr;
@@ -251,13 +264,13 @@ public:
     ~GLView();
 
 private:
-    void setFaceVisibilityArray(uint8_t *data);
+    void setFaceVisibilityArray(const uint8_t *data);
     static bool isVolumeInFrustum(const std::array<QVector4D, 4> &frustum, const qvec3f &mins, const qvec3f &maxs);
     static std::vector<QVector3D> getFrustumCorners(float displayAspect);
     static std::array<QVector4D, 4> getFrustumPlanes(const QMatrix4x4 &MVP);
 
 public:
-    void renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries_t &bspx,
+    void renderBSP(const QString &file, std::shared_ptr<const mbsp_t> bsp_data, const bspxentries_t &bspx,
         const std::vector<entdict_t> &entities, const full_atlas_t &lightmap, const settings::common_settings &settings,
         bool use_bspx_normals);
     void setCamera(const qvec3d &origin);
@@ -285,11 +298,12 @@ public:
     void setLightStyleIntensity(int style_id, int intensity);
     void setMagFilter(QOpenGLTexture::Filter filter);
     bool getKeepOrigin() const { return m_keepOrigin; }
+    [[nodiscard]] bool hasPreview() const noexcept { return static_cast<bool>(m_bsp); }
     void setDrawTranslucencyAsOpaque(bool drawopaque);
     void setShowBmodels(bool bmodels);
     void setBrightness(float brightness);
 
-    void takeScreenshot(QString destPath, int w, int h);
+    bool takeScreenshot(const QString &destPath, int w, int h);
 
 private:
     void error(const QString &context, const QString &context2, const QString &log);
@@ -320,6 +334,7 @@ private:
 protected:
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
 

@@ -24,6 +24,8 @@
 #include <common/bspfile_q2.hh>
 #include <common/bspxfile.hh>
 
+#include <string_view>
+
 using bspxentries_t = std::unordered_map<std::string, std::vector<uint8_t>>;
 
 struct bspdata_t
@@ -42,10 +44,10 @@ struct bspdata_t
         bspxentries_t entries;
 
         // transfer ownership of the vector into a BSPX lump
-        void transfer(const char *xname, std::vector<uint8_t> &xdata);
+        void transfer(std::string_view xname, std::vector<uint8_t> &xdata);
 
         // transfer ownership of the vector into a BSPX lump
-        void transfer(const char *xname, std::vector<uint8_t> &&xdata);
+        void transfer(std::string_view xname, std::vector<uint8_t> &&xdata);
     };
 
     bspxentries bspx;

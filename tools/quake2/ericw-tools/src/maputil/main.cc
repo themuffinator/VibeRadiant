@@ -19,11 +19,16 @@ See file, 'COPYING', for details.
 
 #include <maputil/maputil.hh>
 #include <common/log.hh>
+#include <common/settings.hh>
 
 int main(int argc, const char **argv)
 {
+    logging::preinitialize();
+
     try {
         return maputil_main(argc, argv);
+    } catch (const settings::quit_after_help_exception &e) {
+        return e.exit_code();
     } catch (const std::exception &e) {
         exit_on_exception(e);
     }

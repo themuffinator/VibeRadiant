@@ -14,12 +14,14 @@
 
 // Build information
 #define VIBEY_BUILD_DATE "@VIBEY_BUILD_DATE@"
-#define VIBEY_BUILD_TYPE "@CMAKE_BUILD_TYPE@"
+#ifndef VIBEY_BUILD_TYPE
+#define VIBEY_BUILD_TYPE "Unknown"
+#endif
 
 // Feature flags
+#ifndef HAVE_EMBREE
 #cmakedefine HAVE_EMBREE
-#cmakedefine HAVE_OPTIX
-#cmakedefine HAVE_OIDN
+#endif
 
 namespace vibey {
 namespace version {
@@ -35,22 +37,6 @@ inline const char* build_date() { return VIBEY_BUILD_DATE; }
 
 inline bool has_embree() {
 #ifdef HAVE_EMBREE
-    return true;
-#else
-    return false;
-#endif
-}
-
-inline bool has_optix() {
-#ifdef HAVE_OPTIX
-    return true;
-#else
-    return false;
-#endif
-}
-
-inline bool has_oidn() {
-#ifdef HAVE_OIDN
     return true;
 #else
     return false;

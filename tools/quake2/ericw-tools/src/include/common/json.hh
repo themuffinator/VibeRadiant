@@ -21,6 +21,9 @@
 
 // JSON & formatters for our types
 
+#include <memory>
+#include <string>
+
 #include <json/json.h>
 #include <common/qvec.hh>
 
@@ -83,9 +86,17 @@ static qvec3b to_qvec3b(const Json::Value &j)
 
 static Json::Value parse_json(const uint8_t *begin, const uint8_t *end)
 {
+    if (!begin || !end) {
+        Json::throwRuntimeError("missing JSON input");
+    }
+
     Json::Value result;
     Json::CharReaderBuilder rbuilder;
+    rbuilder["failIfExtra"] = true;
     auto reader = std::unique_ptr<Json::CharReader>(rbuilder.newCharReader());
-    reader->parse(reinterpret_cast<const char *>(begin), reinterpret_cast<const char *>(end), &result, nullptr);
+    std::string errors;
+    if (!reader->parse(reinterpret_cast<const char *>(begin), reinterpret_cast<const char *>(end), &result, &errors)) {
+        Json::throwRuntimeError(errors.empty() ? "invalid JSON input" : errors);
+    }
     return result;
 }

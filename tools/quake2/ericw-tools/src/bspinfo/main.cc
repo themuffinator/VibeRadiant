@@ -24,6 +24,9 @@
 #include <common/settings.hh>
 
 #include <fstream>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include <common/json.hh>
 #include "common/fs.hh"
@@ -64,19 +67,42 @@ static void PrintBSPTextureUsage(const mbsp_t &bsp)
     }
 }
 
-static void FindInfiniteChains(const mbsp_t &bsp)
+static void ValidateTexinfoChains(const mbsp_t &bsp)
 {
-    for (auto &ti : bsp.texinfo) {
-        if (ti.nexttexinfo == -1)
+    enum class visit_state : uint8_t
+    {
+        unseen,
+        visiting,
+        done
+    };
+    std::vector<visit_state> states(bsp.texinfo.size(), visit_state::unseen);
+
+    for (size_t root = 0; root < bsp.texinfo.size(); ++root) {
+        if (states[root] != visit_state::unseen)
             continue;
 
-        int loop = 0;
+        std::vector<size_t> path;
+        int64_t current = static_cast<int64_t>(root);
 
-        for (int i = ti.nexttexinfo; i != -1; i = bsp.texinfo[i].nexttexinfo, loop++) {
-            if (loop > bsp.texinfo.size()) {
-                printf("INFINITE LOOP!");
-                exit(1);
+        while (current != -1) {
+            if (current < 0 || static_cast<size_t>(current) >= bsp.texinfo.size()) {
+                FError("texinfo {} has out-of-range nexttexinfo index {}", path.empty() ? root : path.back(), current);
             }
+
+            const size_t index = static_cast<size_t>(current);
+            if (states[index] == visit_state::done)
+                break;
+            if (states[index] == visit_state::visiting) {
+                FError("infinite texinfo animation chain detected at index {}", index);
+            }
+
+            states[index] = visit_state::visiting;
+            path.push_back(index);
+            current = bsp.texinfo[index].nexttexinfo;
+        }
+
+        for (size_t index : path) {
+            states[index] = visit_state::done;
         }
     }
 }
@@ -84,20 +110,73 @@ static void FindInfiniteChains(const mbsp_t &bsp)
 // TODO
 settings::common_settings bspinfo_options;
 
+static void PrintUsage()
+{
+    fmt::print("usage: vmt-bspinfo [-help/-h/-?] [-werror] [-export-lightmap-atlas] [--] bspfile [bspfiles]\n");
+}
+
+static bool IsHelpArgument(std::string_view argument)
+{
+    return argument == "-help" || argument == "--help" || argument == "-h" || argument == "--h" || argument == "-?" ||
+           argument == "--?";
+}
+
 int main(int argc, char **argv)
 {
     try {
         logging::preinitialize();
+        logging::reset_warning_count();
 
         fmt::print("---- vmt-bspinfo / VibeyMapTools {} ----\n", VIBEYMAPTOOLS_VERSION);
+        if (argc == 2 && IsHelpArgument(argv[1])) {
+            PrintUsage();
+            return 0;
+        }
         if (argc == 1) {
-            printf("usage: bspinfo bspfile [bspfiles]\n");
-            exit(1);
+            PrintUsage();
+            return 1;
         }
 
-        for (int32_t i = 1; i < argc; i++) {
+        std::vector<std::string_view> inputs;
+        bool end_of_options = false;
+        bool export_lightmap_atlas = false;
+        for (int32_t i = 1; i < argc; ++i) {
+            const std::string_view argument = argv[i];
+
+            if (!end_of_options && argument == "--") {
+                end_of_options = true;
+                continue;
+            }
+            if (!end_of_options && IsHelpArgument(argument)) {
+                PrintUsage();
+                return 0;
+            }
+            if (!end_of_options && (argument == "-werror" || argument == "--werror")) {
+                logging::set_warnings_as_errors(true);
+                continue;
+            }
+            if (!end_of_options && (argument == "-export-lightmap-atlas" || argument == "--export-lightmap-atlas")) {
+                export_lightmap_atlas = true;
+                continue;
+            }
+            if (!end_of_options && argument.starts_with('-')) {
+                fmt::print(stderr, "ERROR: unknown option '{}'\n", argument);
+                PrintUsage();
+                return 1;
+            }
+
+            inputs.push_back(argument);
+        }
+
+        if (inputs.empty()) {
+            fmt::print(stderr, "ERROR: expected at least one BSP input file\n");
+            PrintUsage();
+            return 1;
+        }
+
+        for (const std::string_view input : inputs) {
             printf("---------------------\n");
-            fs::path source = DefaultExtension(argv[i], ".bsp");
+            fs::path source = DefaultExtension(std::string(input), ".bsp");
             fmt::print("{}\n", source);
 
             bspdata_t bsp;
@@ -109,19 +188,23 @@ int main(int argc, char **argv)
 
             // WriteBSPFile(fs::path(source).replace_extension("bsp.rewrite"), &bsp);
 
-            ConvertBSPFormat(&bsp, &bspver_generic);
+            if (!ConvertBSPFormat(&bsp, &bspver_generic)) {
+                FError("couldn't convert {} to the generic BSP representation", source);
+            }
 
-            serialize_bsp(bsp, std::get<mbsp_t>(bsp.bsp), fs::path(source).replace_extension("bsp.json"));
+            ValidateTexinfoChains(std::get<mbsp_t>(bsp.bsp));
+
+            serialize_bsp(
+                bsp, std::get<mbsp_t>(bsp.bsp), fs::path(source).replace_extension("bsp.json"), export_lightmap_atlas);
 
             PrintBSPTextureUsage(std::get<mbsp_t>(bsp.bsp));
-
-            FindInfiniteChains(std::get<mbsp_t>(bsp.bsp));
 
             printf("---------------------\n");
 
             fs::clear();
         }
 
+        logging::fail_if_warnings();
         return 0;
     } catch (const std::exception &e) {
         exit_on_exception(e);

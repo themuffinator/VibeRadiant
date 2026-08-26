@@ -45,11 +45,6 @@ struct side_t
 
     bool tested;
 
-    // CSG acceleration
-    qvec3d origin;
-    double radius;
-    void update_radius();
-
     side_t clone_non_winding_data() const;
     side_t clone() const;
 

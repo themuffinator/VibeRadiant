@@ -21,6 +21,8 @@
 
 #include <cstring>
 #include <algorithm>
+#include <limits>
+#include <string_view>
 
 #include <common/log.hh>
 #include <common/aabb.hh>
@@ -144,33 +146,31 @@ setting_blocksize::setting_blocksize(setting_container *dictionary, const namese
 
 bool setting_blocksize::parse(const std::string &setting_name, parser_base_t &parser, source source)
 {
-    qvec3d vec = {1024, 1024, 1024};
+    qvec3i vec = {1024, 1024, 1024};
+    int parsedValues = 0;
 
     for (int i = 0; i < 3; i++) {
         if (!parser.parse_token(PARSE_PEEK)) {
-            return false;
+            break;
         }
 
         // don't allow negatives
-        if (parser.token[0] != '-') {
-            try {
-                vec[i] = std::stol(parser.token);
-                parser.parse_token();
-                continue;
-            } catch (std::exception &) {
-                // intentional fall-through
-            }
+        if (const auto value = settings::detail::parse_number<int32_t>(parser.token); value && *value >= 0) {
+            vec[i] = *value;
+            parser.parse_token();
+            ++parsedValues;
+            continue;
         }
 
-        // if we didn't parse a valid number, fail
-        if (i == 0) {
-            return false;
-        } else if (i == 1) {
-            // we parsed one valid number; use it all the way through
-            vec[1] = vec[2] = vec[0];
-        }
+        break;
+    }
 
-        // for [x, y] z will be left default
+    if (parsedValues == 0) {
+        return false;
+    }
+    if (parsedValues == 1) {
+        // One value applies to every axis; with two values, z keeps the default.
+        vec[1] = vec[2] = vec[0];
     }
 
     set_value(vec, source);
@@ -491,8 +491,6 @@ qbsp_settings::qbsp_settings()
           "uses alternate texture alignment which was default in tyrutils-ericw v0.15.1 and older"},
       forcegoodtree{
           this, "forcegoodtree", false, &debugging_group, "force use of expensive processing for BrushBSP stage"},
-      midsplitsurffraction{this, "midsplitsurffraction", 0.f, 0.f, 1.f, &debugging_group,
-          "if 0 (default), use `maxnodesize` for deciding when to switch to midsplit bsp heuristic.\nif 0 < midsplitSurfFraction <= 1, switch to midsplit if the node contains more than this fraction of the model's\ntotal surfaces. Try 0.15 to 0.5. Works better than maxNodeSize for maps with a 3D skybox (e.g. +-128K unit maps)"},
       maxnodesize{this, "maxnodesize", 1024, &debugging_group,
           "triggers simpler BSP Splitting when node exceeds size (default 1024, 0 to disable)"},
       oldrottex{this, "oldrottex", false, &debugging_group, "use old rotate_ brush texturing aligned at (0 0 0)"},
@@ -568,9 +566,7 @@ qbsp_settings::qbsp_settings()
       logbmodels{this, {"logbmodels"}, false, &logging_group, "print log output for bmodels"},
       debug_missing_portal_sides{this, {"debug_missing_portal_sides"}, false, &logging_group,
           "output debug .prt files for missing portal sides"},
-      fixupdetailfence{this, {"fixupdetailfence"}, true, &debugging_group, "fixup detail fence"},
-      tjunc_detail{this, {"tjunc-detail", "tjunc_detail"}, false, &debugging_group,
-          "don't exclude detail brushes from T-junction fixing"}
+      fixupdetailfence{this, {"fixupdetailfence"}, true, &debugging_group, "fixup detail fence"}
 {
 }
 
@@ -593,8 +589,8 @@ void qbsp_settings::initialize(int argc, const char **argv)
     try {
         common_settings::initialize(argc - 1, argv + 1);
 
-        if (remainder.size() <= 0 || remainder.size() > 2) {
-            print_help(true);
+        if (remainder.empty() || remainder.size() > 2) {
+            throw parse_exception("expected a source .map and optional destination .bsp");
         }
 
         qbsp_options.map_path = remainder[0];
@@ -607,7 +603,7 @@ void qbsp_settings::initialize(int argc, const char **argv)
         logging::print("ERROR OCCURRED WHEN TRYING TO PARSE ARGUMENTS:\n");
         logging::print(ex.what());
         logging::print("\n\n");
-        throw settings::quit_after_help_exception();
+        throw settings::quit_after_help_exception(1);
     }
 }
 
@@ -636,7 +632,7 @@ void qbsp_settings::load_texture_def(const std::string &pathname)
 
         // FIXME: why is this necessary? is it a trailing \0? only happens on release
         // repro with a texdef with no newline at the end
-        while (std::isspace(to[to.size() - 1])) {
+        while (!to.empty() && std::isspace(static_cast<unsigned char>(to.back()))) {
             to.resize(to.size() - 1);
         }
 
@@ -810,34 +806,78 @@ struct brush_list_stats_t : logging::stat_tracker_t
     stat &total_optimized_faces = register_stat("optimized brush side texinfos");
 };
 
-static void ExportBrushList_r(const mapentity_t &entity, node_t *node, brush_list_stats_t &stats)
+static int32_t CheckedBrushInt32(size_t value, std::string_view description)
 {
-    if (node->is_leaf()) {
+    if (value > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        FError("{} {} exceeds the signed BSP index limit", description, value);
+    }
+    return static_cast<int32_t>(value);
+}
+
+static uint32_t CheckedBrushUint32(size_t value, std::string_view description)
+{
+    if (value > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        FError("{} {} exceeds the unsigned BSP index limit", description, value);
+    }
+    return static_cast<uint32_t>(value);
+}
+
+static void ExportBrushListNodes(node_t *node, brush_list_stats_t &stats)
+{
+    std::vector<node_t *> pending{node};
+
+    while (!pending.empty()) {
+        node = pending.back();
+        pending.pop_back();
+        if (!node) {
+            FError("BSP brush-list tree contains a null child");
+        }
+
+        if (!node->is_leaf()) {
+            auto *nodedata = node->get_nodedata();
+            pending.push_back(nodedata->children[1]);
+            pending.push_back(nodedata->children[0]);
+            continue;
+        }
+
         auto *leafdata = node->get_leafdata();
         int native = qbsp_options.target_game->contents_to_native(
             qbsp_options.target_game->contents_remap_for_export(leafdata->contents, gamedef_t::remap_type_t::leaf));
         if (native) {
             if (leafdata->original_brushes.size()) {
-                leafdata->numleafbrushes = leafdata->original_brushes.size();
+                leafdata->numleafbrushes = CheckedBrushUint32(leafdata->original_brushes.size(), "leaf brush count");
                 stats.total_leaf_brushes += leafdata->numleafbrushes;
-                leafdata->firstleafbrush = map.bsp.dleafbrushes.size();
+                leafdata->firstleafbrush = CheckedBrushUint32(map.bsp.dleafbrushes.size(), "leaf-brush index");
+                if (leafdata->original_brushes.size() > map.bsp.dleafbrushes.max_size() - map.bsp.dleafbrushes.size()) {
+                    FError("leaf brush list exceeds the BSP container limit");
+                }
+                if (leafdata->original_brushes.size() >
+                    static_cast<size_t>(std::numeric_limits<uint32_t>::max()) - map.bsp.dleafbrushes.size()) {
+                    FError("leaf brush list exceeds the unsigned BSP limit");
+                }
                 for (auto &b : leafdata->original_brushes) {
 
                     if (!b->mapbrush->outputnumber.has_value()) {
-                        b->mapbrush->outputnumber = {static_cast<uint32_t>(map.bsp.dbrushes.size())};
+                        if (b->mapbrush->faces.size() >
+                            static_cast<size_t>(std::numeric_limits<int32_t>::max()) - map.bsp.dbrushsides.size()) {
+                            FError("brush-side list exceeds the signed BSP limit");
+                        }
+                        b->mapbrush->outputnumber = {CheckedBrushUint32(map.bsp.dbrushes.size(), "brush index")};
 
                         int brushcontents = qbsp_options.target_game->contents_to_native(
                             qbsp_options.target_game->contents_remap_for_export(
                                 b->contents, gamedef_t::remap_type_t::brush));
 
                         dbrush_t &brush = map.bsp.dbrushes.emplace_back(
-                            dbrush_t{.firstside = static_cast<int32_t>(map.bsp.dbrushsides.size()),
+                            dbrush_t{.firstside = CheckedBrushInt32(map.bsp.dbrushsides.size(), "brush-side index"),
                                 .numsides = 0,
                                 .contents = brushcontents});
 
                         for (auto &side : b->mapbrush->faces) {
-
-                            maptexinfo_t &texinfo = map.mtexinfos[side.texinfo];
+                            if (side.texinfo < 0 || static_cast<size_t>(side.texinfo) >= map.mtexinfos.size()) {
+                                FError("brush side references invalid texinfo {}", side.texinfo);
+                            }
+                            maptexinfo_t &texinfo = map.mtexinfos[static_cast<size_t>(side.texinfo)];
                             int texinfo_id = side.texinfo;
 
                             if (!texinfo.outputnum.has_value()) {
@@ -858,8 +898,19 @@ static void ExportBrushList_r(const mapentity_t &entity, node_t *node, brush_lis
                                 }
                             }
 
+                            if (map.bsp.dbrushsides.size() >=
+                                static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+                                FError("brush-side count exceeds the signed BSP index limit");
+                            }
+                            const int32_t plane = ExportMapPlane(side.planenum);
+                            if (plane < 0) {
+                                FError("brush side references invalid plane {}", plane);
+                            }
                             map.bsp.dbrushsides.push_back(
-                                {(uint32_t)ExportMapPlane(side.planenum), (int32_t)ExportMapTexinfo(texinfo_id)});
+                                {static_cast<uint32_t>(plane), ExportMapTexinfo(static_cast<size_t>(texinfo_id))});
+                            if (brush.numsides == std::numeric_limits<int32_t>::max()) {
+                                FError("brush side count exceeds the signed BSP limit");
+                            }
                             brush.numsides++;
                             stats.total_brush_sides++;
                         }
@@ -867,30 +918,31 @@ static void ExportBrushList_r(const mapentity_t &entity, node_t *node, brush_lis
                         stats.total_brushes++;
                     }
 
+                    if (map.bsp.dleafbrushes.size() == static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+                        FError("leaf-brush count exceeds the unsigned BSP limit");
+                    }
                     map.bsp.dleafbrushes.push_back(b->mapbrush->outputnumber.value());
                 }
             }
         }
-
-        return;
     }
-
-    auto *nodedata = node->get_nodedata();
-    ExportBrushList_r(entity, nodedata->children[0], stats);
-    ExportBrushList_r(entity, nodedata->children[1], stats);
 }
 
-static void ExportBrushList(mapentity_t &entity, node_t *node)
+void ExportBrushList(node_t *node)
 {
     logging::funcheader();
 
     brush_list_stats_t stats;
 
-    ExportBrushList_r(entity, node, stats);
+    ExportBrushListNodes(node, stats);
 }
 
 static bool IsTrigger(const mapentity_t &entity)
 {
+    if (entity.mapbrushes.empty() || entity.mapbrushes.front().faces.empty()) {
+        return false;
+    }
+
     auto &tex = entity.mapbrushes.front().faces[0].texname;
 
     if (tex.length() < 6) {
@@ -906,59 +958,56 @@ static bool IsTrigger(const mapentity_t &entity)
     return trigger_pos == (tex.size() - strlen("trigger"));
 }
 
-static void CountLeafs_r(node_t *node, content_stats_t &stats)
+struct leaf_height_stats_t
 {
-    if (auto *leafdata = node->get_leafdata()) {
-        stats.count_contents_in_stats(leafdata->contents);
-        return;
-    }
-
-    auto *nodedata = node->get_nodedata();
-    CountLeafs_r(nodedata->children[0], stats);
-    CountLeafs_r(nodedata->children[1], stats);
-}
-
-static int NodeHeight(node_t *node)
-{
-    if (node->parent) {
-        return 1 + NodeHeight(node->parent);
-    }
-    return 1;
-}
-
-static void CountLeafHeights_r(node_t *node, std::vector<int> &heights)
-{
-    if (node->is_leaf()) {
-        heights.push_back(NodeHeight(node));
-        return;
-    }
-    auto *nodedata = node->get_nodedata();
-    CountLeafHeights_r(nodedata->children[0], heights);
-    CountLeafHeights_r(nodedata->children[1], heights);
-}
+    size_t count = 0;
+    size_t maximum = 0;
+    uint64_t total = 0;
+};
 
 void CountLeafs(node_t *headnode)
 {
     logging::funcheader();
 
     auto stats = content_stats_t();
-    CountLeafs_r(headnode, stats);
+    leaf_height_stats_t height_stats;
+    std::vector<std::pair<node_t *, size_t>> pending;
+    pending.emplace_back(headnode, 1);
+
+    while (!pending.empty()) {
+        const auto [node, depth] = pending.back();
+        pending.pop_back();
+        if (!node) {
+            FError("BSP tree contains a null child");
+        }
+
+        if (auto *leafdata = node->get_leafdata()) {
+            stats.count_contents_in_stats(leafdata->contents);
+            height_stats.count++;
+            height_stats.maximum = std::max(height_stats.maximum, depth);
+            if (depth > std::numeric_limits<uint64_t>::max() - height_stats.total) {
+                FError("BSP tree height statistics overflow");
+            }
+            height_stats.total += depth;
+            continue;
+        }
+
+        if (depth == std::numeric_limits<size_t>::max()) {
+            FError("BSP tree is too deep");
+        }
+        auto *nodedata = node->get_nodedata();
+        pending.emplace_back(nodedata->children[1], depth + 1);
+        pending.emplace_back(nodedata->children[0], depth + 1);
+    }
     stats.print_content_stats("leafs");
 
-    // count the heights of the tree at each leaf
-    logging::stat_tracker_t stat_print;
-
-    std::vector<int> leaf_heights;
-    CountLeafHeights_r(headnode, leaf_heights);
-
-    const int max_height = *std::max_element(leaf_heights.begin(), leaf_heights.end());
-    stat_print.register_stat("max tree height").count += max_height;
-
-    double avg_height = 0;
-    for (int height : leaf_heights) {
-        avg_height += (height / static_cast<double>(leaf_heights.size()));
+    if (!height_stats.count) {
+        FError("BSP tree contains no leaves");
     }
-    stat_print.register_stat("avg tree height").count += static_cast<int>(avg_height);
+
+    logging::stat_tracker_t stat_print;
+    stat_print.register_stat("max tree height").count += height_stats.maximum;
+    stat_print.register_stat("avg tree height").count += height_stats.total / height_stats.count;
 }
 
 static void GatherBspbrushes_r(node_t *node, bspbrush_t::container &container)
@@ -1004,7 +1053,11 @@ static bool ShouldGenerateClipnodes(mapentity_t &entity, hull_index_t hullnum)
         return true;
     }
 
-    return hulls & (1 << hullnum.value_or(0));
+    const auto hull = static_cast<uint32_t>(hullnum.value_or(0));
+    if (hull >= std::numeric_limits<uint32_t>::digits) {
+        return false;
+    }
+    return static_cast<uint32_t>(hulls) & (uint32_t{1} << hull);
 }
 
 /*
@@ -1312,7 +1365,7 @@ static void ProcessEntity(mapentity_t &entity, hull_index_t hullnum)
     entity.firstoutputfacenumber = EmitFaces(tree.headnode);
 
     if (qbsp_options.target_game->id == GAME_QUAKE_II) {
-        ExportBrushList(entity, tree.headnode);
+        ExportBrushList(tree.headnode);
     }
 
     ExportDrawNodes(entity, tree.headnode, entity.firstoutputfacenumber.value());
@@ -1461,7 +1514,7 @@ static void BSPX_CreateBrushList()
 
     for (size_t entnum = 0; entnum < map.entities.size(); ++entnum) {
         mapentity_t &ent = map.entities.at(entnum);
-        size_t modelnum;
+        int32_t modelnum;
 
         if (IsWorldBrushEntity(ent)) {
             continue;
@@ -1471,10 +1524,16 @@ static void BSPX_CreateBrushList()
             modelnum = 0;
         } else {
             const std::string &mod = ent.epairs.get("model");
-            if (mod[0] != '*') {
+            if (mod.empty() || mod.front() != '*') {
                 continue;
             }
-            modelnum = std::stoi(mod.substr(1));
+            const auto parsed_modelnum = settings::detail::parse_number<int32_t>(mod.substr(1));
+            if (!parsed_modelnum || *parsed_modelnum < 0 ||
+                static_cast<size_t>(*parsed_modelnum) >= map.bsp.dmodels.size()) {
+                logging::print("WARNING: ignoring invalid model reference '{}' while creating BRUSHLIST\n", mod);
+                continue;
+            }
+            modelnum = *parsed_modelnum;
         }
 
         std::vector<mapbrush_t *> brushes;
@@ -1486,23 +1545,36 @@ static void BSPX_CreateBrushList()
         }
 
         if (modelnum == 0) {
+            const auto include_world_brush_entity = [](const mapentity_t &candidate) {
+                if (!IsWorldBrushEntity(candidate)) {
+                    return false;
+                }
+                const std::string &classname = candidate.epairs.get("classname");
+                return Q_strcasecmp(classname, "func_detail_illusionary") &&
+                       Q_strcasecmp(classname, "func_illusionary_visblocker");
+            };
+
+            size_t required_capacity = brushes.size();
+            for (size_t e = 1; e < map.entities.size(); ++e) {
+                const mapentity_t &candidate = map.entities[e];
+                if (!include_world_brush_entity(candidate)) {
+                    continue;
+                }
+                if (candidate.mapbrushes.size() > brushes.max_size() - required_capacity) {
+                    FError("too many world brushes for BRUSHLIST");
+                }
+                required_capacity += candidate.mapbrushes.size();
+            }
+            brushes.reserve(required_capacity);
+
             // add brushes from world brush entities (func_group, etc.) to the worldspawn model
             for (size_t e = 1; e < map.entities.size(); ++e) {
                 mapentity_t &bent = map.entities.at(e);
-
-                brushes.reserve(brushes.size() + ent.mapbrushes.size());
-
-                if (IsWorldBrushEntity(bent)) {
-                    // skip illusionary entities
-                    const std::string &classname = bent.epairs.get("classname");
-                    if (!Q_strcasecmp(classname, "func_detail_illusionary"))
-                        continue;
-                    if (!Q_strcasecmp(classname, "func_illusionary_visblocker"))
-                        continue;
-
-                    for (auto &b : bent.mapbrushes) {
-                        brushes.push_back(&b);
-                    }
+                if (!include_world_brush_entity(bent)) {
+                    continue;
+                }
+                for (auto &b : bent.mapbrushes) {
+                    brushes.push_back(&b);
                 }
             }
         }
@@ -1695,7 +1767,7 @@ static void LoadSecondaryTextures()
 ProcessFile
 =================
 */
-void ProcessFile()
+static void ProcessFileImpl()
 {
     if (qbsp_options.convertmapformat.value() != conversion_t::none) {
         ConvertMapFile();
@@ -1725,6 +1797,21 @@ void ProcessFile()
     WriteEntitiesToString();
     BSPX_CreateBrushList();
     FinishBSPFile();
+}
+
+void ProcessFile()
+{
+    const auto start = I_FloatTime();
+    ProcessFileImpl();
+
+    const auto end = I_FloatTime();
+    logging::print("\n{:.3} seconds elapsed\n", end - start);
+    logging::close();
+
+    // Keep warning promotion at the public, synchronous tool boundary, after
+    // all output and log cleanup. This also covers in-process callers such as
+    // Hub before another tool resets the process-global warning state.
+    logging::fail_if_warnings();
 }
 
 /*
@@ -1829,15 +1916,6 @@ main
 int qbsp_main(int argc, const char **argv)
 {
     InitQBSP(argc, argv);
-
-    // do it!
-    auto start = I_FloatTime();
     ProcessFile();
-    auto end = I_FloatTime();
-
-    logging::print("\n{:.3} seconds elapsed\n", (end - start));
-
-    logging::close();
-
     return 0;
 }

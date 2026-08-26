@@ -25,83 +25,219 @@
 #include <common/log.hh>
 #include <qbsp/qbsp.hh>
 
+#include <array>
 #include <vector>
 #include <algorithm>
 #include <cstdint>
 #include <common/json.hh>
 #include <fstream>
 
+#include <limits>
 #include <stdexcept>
+#include <string_view>
+#include <utility>
+
+static int32_t CheckedInt32Index(size_t value, std::string_view description)
+{
+    if (value > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        FError("{} {} exceeds the signed BSP index limit", description, value);
+    }
+    return static_cast<int32_t>(value);
+}
+
+static uint32_t CheckedUint32Index(size_t value, std::string_view description)
+{
+    if (value > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        FError("{} {} exceeds the unsigned BSP index limit", description, value);
+    }
+    return static_cast<uint32_t>(value);
+}
 
 /**
  * Returns the output plane number
  */
-size_t ExportMapPlane(size_t planenum)
+int32_t ExportMapPlane(size_t planenum)
 {
-    mapplane_t &plane = map.planes[planenum];
+    mapplane_t &plane = map.planes.at(planenum);
 
     if (plane.outputnum.has_value()) {
-        return plane.outputnum.value(); // already output.
+        return CheckedInt32Index(plane.outputnum.value(), "plane index"); // already output.
     }
 
+    CheckedInt32Index(map.bsp.dplanes.size(), "plane index");
     plane.outputnum = map.bsp.dplanes.size();
     dplane_t &dplane = map.bsp.dplanes.emplace_back();
     dplane.normal = plane.get_normal();
     dplane.dist = plane.get_dist();
     dplane.type = static_cast<int32_t>(plane.get_type());
-    return plane.outputnum.value();
+    return CheckedInt32Index(plane.outputnum.value(), "plane index");
 }
 
-size_t ExportMapTexinfo(size_t texinfonum)
+namespace
 {
-    maptexinfo_t &src = map.mtexinfos.at(texinfonum);
+bool ShouldSkipMapTexinfo(const maptexinfo_t &src)
+{
+    if (qbsp_options.target_game == nullptr) {
+        FError("Internal error: no target game selected while exporting texinfo");
+    }
+    return !qbsp_options.includeskip.value() && src.flags.is_nodraw() &&
+           (qbsp_options.target_game->id != GAME_QUAKE_II || !(src.flags.native_q2 & Q2_SURF_LIGHT));
+}
 
-    if (src.outputnum.has_value())
-        return src.outputnum.value();
-    else if (!qbsp_options.includeskip.value() && src.flags.is_nodraw()) {
-        // TODO: move to game specific
-        // always include LIGHT
-        if (qbsp_options.target_game->id != GAME_QUAKE_II || !(src.flags.native_q2 & Q2_SURF_LIGHT))
-            return -1;
+size_t ValidateMapTexinfoChain(size_t texinfonum)
+{
+    if (texinfonum >= map.mtexinfos.size()) {
+        FError("Internal error: invalid source texinfo {}", texinfonum);
     }
 
-    // this will be the index of the exported texinfo in the BSP lump
-    const size_t i = map.bsp.texinfo.size();
+    std::vector<bool> visited(map.mtexinfos.size());
+    size_t new_entries = 0;
+    size_t current = texinfonum;
+    for (;;) {
+        if (visited[current]) {
+            break;
+        }
+        visited[current] = true;
 
-    mtexinfo_t &dest = map.bsp.texinfo.emplace_back();
+        const maptexinfo_t &src = map.mtexinfos[current];
+        if (src.outputnum.has_value()) {
+            if (*src.outputnum >= map.bsp.texinfo.size()) {
+                FError("Internal error: Texinfo {} has stale output index {}", current, *src.outputnum);
+            }
+            break;
+        }
+        if (ShouldSkipMapTexinfo(src)) {
+            break;
+        }
+        if (!src.flags.is_valid(qbsp_options.target_game)) {
+            FError("Internal error: Texinfo {} has invalid surface flags native_q1: {} native_q2: {}", current,
+                static_cast<int32_t>(src.flags.native_q1), static_cast<int32_t>(src.flags.native_q2));
+        }
+        if (src.miptex < 0 || static_cast<size_t>(src.miptex) >= map.miptex.size()) {
+            FError("Internal error: Texinfo {} references invalid texture {}", current, src.miptex);
+        }
+        CheckedInt32Index(current, "source texinfo index");
+        ++new_entries;
 
-    // make sure we don't write any non-native flags.
-    // e.g. Quake only accepts 0 or TEX_SPECIAL.
-    if (!src.flags.is_valid(qbsp_options.target_game)) {
-        FError("Internal error: Texinfo {} has invalid surface flags native_q1: {} native_q2: {}", texinfonum,
-            static_cast<int32_t>(src.flags.native_q1), static_cast<int32_t>(src.flags.native_q2));
+        if (!src.next.has_value()) {
+            break;
+        }
+        if (*src.next < 0 || static_cast<size_t>(*src.next) >= map.mtexinfos.size()) {
+            FError("Internal error: Texinfo {} references invalid animation texinfo {}", current, *src.next);
+        }
+        current = static_cast<size_t>(*src.next);
     }
 
-    dest.flags = src.flags;
-    dest.miptex = src.miptex;
-    dest.vecs = src.vecs;
-
-    const std::string &src_name = map.texinfoTextureName(texinfonum);
-    if (src_name.size() > (dest.texture.size() - 1)) {
-        logging::print("WARNING: texture name '{}' exceeds maximum length {} and will be truncated\n", src_name,
-            dest.texture.size() - 1);
+    constexpr size_t MAX_TEXINFO_ENTRIES = static_cast<size_t>(std::numeric_limits<int32_t>::max()) + 1;
+    if (map.bsp.texinfo.size() > MAX_TEXINFO_ENTRIES || new_entries > MAX_TEXINFO_ENTRIES - map.bsp.texinfo.size()) {
+        FError("texinfo output exceeds the signed BSP index limit");
     }
-    for (size_t i = 0; i < (dest.texture.size() - 1); ++i) {
-        if (i < src_name.size())
-            dest.texture[i] = src_name[i];
-        else
-            dest.texture[i] = '\0';
-    }
-    dest.texture[dest.texture.size() - 1] = '\0';
-    dest.value = map.miptex[src.miptex].value;
+    return new_entries;
+}
 
-    src.outputnum = i;
-
-    if (src.next.has_value()) {
-        map.bsp.texinfo[i].nexttexinfo = ExportMapTexinfo(src.next.value());
+class texinfo_export_rollback_t
+{
+public:
+    explicit texinfo_export_rollback_t(size_t expected_entries)
+        : initial_size_(map.bsp.texinfo.size())
+    {
+        assigned_.reserve(expected_entries);
     }
 
-    return i;
+    ~texinfo_export_rollback_t()
+    {
+        if (!active_) {
+            return;
+        }
+        map.bsp.texinfo.resize(initial_size_);
+        for (const size_t index : assigned_) {
+            map.mtexinfos[index].outputnum.reset();
+        }
+    }
+
+    void record_assignment(size_t index) { assigned_.push_back(index); }
+    void release() noexcept { active_ = false; }
+
+private:
+    size_t initial_size_;
+    std::vector<size_t> assigned_;
+    bool active_ = true;
+};
+
+int32_t ExportMapTexinfoUnchecked(size_t texinfonum, texinfo_export_rollback_t &rollback)
+{
+    std::optional<size_t> previous_output;
+    int32_t first_output = -1;
+    size_t current = texinfonum;
+
+    for (;;) {
+        maptexinfo_t &src = map.mtexinfos[current];
+        int32_t output_index;
+        bool reached_end = false;
+
+        if (src.outputnum.has_value()) {
+            output_index = CheckedInt32Index(src.outputnum.value(), "texinfo index");
+            reached_end = true;
+        } else if (ShouldSkipMapTexinfo(src)) {
+            output_index = -1;
+            reached_end = true;
+        } else {
+            // This will be the index of the exported texinfo in the BSP lump.
+            output_index = CheckedInt32Index(map.bsp.texinfo.size(), "texinfo index");
+            const size_t destination_index = static_cast<size_t>(output_index);
+            mtexinfo_t &dest = map.bsp.texinfo.emplace_back();
+
+            // Make sure we don't write any non-native flags.
+            // e.g. Quake only accepts 0 or TEX_SPECIAL.
+            dest.flags = src.flags;
+            dest.miptex = src.miptex;
+            dest.vecs = src.vecs;
+
+            const std::string &src_name = map.texinfoTextureName(static_cast<int>(current));
+            dest.texturename = src_name;
+            dest.value = map.miptex[src.miptex].value;
+
+            rollback.record_assignment(current);
+            src.outputnum = destination_index;
+            reached_end = !src.next.has_value();
+        }
+
+        if (previous_output.has_value()) {
+            map.bsp.texinfo[*previous_output].nexttexinfo = output_index;
+        } else {
+            first_output = output_index;
+        }
+
+        if (reached_end) {
+            return first_output;
+        }
+
+        previous_output = static_cast<size_t>(output_index);
+        current = static_cast<size_t>(*src.next);
+    }
+}
+} // namespace
+
+int32_t ExportMapTexinfo(size_t texinfonum)
+{
+    if (texinfonum >= map.mtexinfos.size()) {
+        FError("Internal error: invalid source texinfo {}", texinfonum);
+    }
+    const maptexinfo_t &src = map.mtexinfos[texinfonum];
+    if (src.outputnum.has_value()) {
+        if (*src.outputnum >= map.bsp.texinfo.size()) {
+            FError("Internal error: Texinfo {} has stale output index {}", texinfonum, *src.outputnum);
+        }
+        return CheckedInt32Index(*src.outputnum, "texinfo index");
+    }
+    if (ShouldSkipMapTexinfo(src)) {
+        return -1;
+    }
+
+    texinfo_export_rollback_t rollback(ValidateMapTexinfoChain(texinfonum));
+    const int32_t result = ExportMapTexinfoUnchecked(texinfonum, rollback);
+    rollback.release();
+    return result;
 }
 
 //===========================================================================
@@ -111,28 +247,70 @@ size_t ExportMapTexinfo(size_t texinfonum)
 ExportClipNodes
 ==================
 */
-static size_t ExportClipNodes(node_t *node)
+static int32_t ExportClipNodes(node_t *node)
 {
+    if (!node) {
+        FError("BSP clipnode tree contains a null root");
+    }
     if (auto *leafdata = node->get_leafdata()) {
         return qbsp_options.target_game->contents_to_native(leafdata->contents);
     }
 
-    auto *nodedata = node->get_nodedata();
+    struct frame_t
+    {
+        node_t *node;
+        size_t output_index;
+        size_t next_child = 0;
+        std::array<int32_t, 2> children{};
+    };
 
-    /* emit a clipnode */
-    const size_t nodenum = map.bsp.dclipnodes.size();
-    map.bsp.dclipnodes.emplace_back();
+    const auto append_node = [](node_t *current) {
+        if (!current) {
+            FError("BSP clipnode tree contains a null child");
+        }
+        if (current->is_leaf()) {
+            FError("Internal error: attempted to append a leaf as a clipnode");
+        }
 
-    const int child0 = ExportClipNodes(nodedata->children[0]);
-    const int child1 = ExportClipNodes(nodedata->children[1]);
+        const int32_t output_index = CheckedInt32Index(map.bsp.dclipnodes.size(), "clipnode index");
+        map.bsp.dclipnodes.emplace_back();
+        return std::pair{output_index, static_cast<size_t>(output_index)};
+    };
 
-    // Careful not to modify the vector while using this clipnode pointer
-    bsp2_dclipnode_t &clipnode = map.bsp.dclipnodes[nodenum];
-    clipnode.planenum = ExportMapPlane(nodedata->planenum);
-    clipnode.children[0] = child0;
-    clipnode.children[1] = child1;
+    const auto [root_output, root_index] = append_node(node);
+    std::vector<frame_t> pending{{node, root_index}};
 
-    return nodenum;
+    while (!pending.empty()) {
+        frame_t &frame = pending.back();
+        auto *nodedata = frame.node->get_nodedata();
+
+        if (frame.next_child < frame.children.size()) {
+            const size_t child_number = frame.next_child++;
+            node_t *child = nodedata->children[child_number];
+            if (!child) {
+                FError("BSP clipnode tree contains a null child");
+            }
+
+            if (auto *leafdata = child->get_leafdata()) {
+                frame.children[child_number] = qbsp_options.target_game->contents_to_native(leafdata->contents);
+            } else {
+                const auto [child_output, child_index] = append_node(child);
+                frame.children[child_number] = child_output;
+                pending.push_back({child, child_index});
+            }
+            continue;
+        }
+
+        // The recursive implementation exported planes after both children.
+        // Retaining that order keeps BSP plane numbering byte-for-byte stable.
+        bsp2_dclipnode_t &clipnode = map.bsp.dclipnodes[frame.output_index];
+        clipnode.planenum = ExportMapPlane(nodedata->planenum);
+        clipnode.children[0] = frame.children[0];
+        clipnode.children[1] = frame.children[1];
+        pending.pop_back();
+    }
+
+    return root_output;
 }
 
 /*
@@ -150,6 +328,9 @@ accomodate new data interleaved with old.
 void ExportClipNodes(mapentity_t &entity, node_t *nodes, hull_index_t::value_type hullnum)
 {
     auto &model = map.bsp.dmodels.at(entity.outputmodelnumber.value());
+    if (hullnum >= model.headnode.size()) {
+        FError("hull {} exceeds the model headnode limit", hullnum);
+    }
     model.headnode[hullnum] = ExportClipNodes(nodes);
 }
 
@@ -190,7 +371,7 @@ static void ExportLeaf(node_t *node)
     //
     // the only reason a solid leaf would have marksurfaces is in Q1, we convert func_detail_fence to CONTENTS_SOLID.
     // this leads to inconsitent rendering (winquake, FTEQW ignore the marksurfaces on solid leafs, QS renders them).
-    dleaf.firstmarksurface = static_cast<int>(map.bsp.dleaffaces.size());
+    dleaf.firstmarksurface = CheckedUint32Index(map.bsp.dleaffaces.size(), "marksurface index");
 
     if (!(remapped.flags & EWT_VISCONTENTS_SOLID)) {
         for (auto &face : leafdata->markfaces) {
@@ -206,17 +387,19 @@ static void ExportLeaf(node_t *node)
             /* grab final output faces */
             for (auto &fragment : face->fragments) {
                 if (fragment.outputnumber.has_value()) {
-                    map.bsp.dleaffaces.push_back(fragment.outputnumber.value());
+                    map.bsp.dleaffaces.push_back(
+                        CheckedUint32Index(fragment.outputnumber.value(), "marksurface face index"));
                 }
             }
         }
     }
-    dleaf.nummarksurfaces = static_cast<int>(map.bsp.dleaffaces.size()) - dleaf.firstmarksurface;
+    dleaf.nummarksurfaces =
+        CheckedUint32Index(map.bsp.dleaffaces.size() - dleaf.firstmarksurface, "leaf marksurface count");
 
     if (dleaf.contents & Q2_CONTENTS_SOLID) {
         dleaf.area = AREA_INVALID;
     } else {
-        if (map.leakfile || map.region || map.antiregions.size()) {
+        if (map.leakfile) {
             dleaf.area = 1;
         } else {
             dleaf.area = leafdata->area;
@@ -238,48 +421,78 @@ ExportDrawNodes
 */
 static void ExportDrawNodes(node_t *node)
 {
-    const size_t ourNodeIndex = map.bsp.dnodes.size();
-    bsp2_dnode_t *dnode = &map.bsp.dnodes.emplace_back();
+    struct frame_t
+    {
+        node_t *node;
+        size_t output_index;
+        size_t next_child = 0;
+    };
 
-    dnode->mins = qv::floor(node->bounds.mins());
-    dnode->maxs = qv::ceil(node->bounds.maxs());
-
-    auto *nodedata = node->get_nodedata();
-    dnode->planenum = ExportMapPlane(nodedata->planenum);
-    dnode->firstface = nodedata->firstface;
-    dnode->numfaces = nodedata->numfaces;
-
-    // recursively output the other nodes
-    for (size_t i = 0; i < 2; i++) {
-        if (auto *children_i_leafdata = nodedata->children[i]->get_leafdata()) {
-            // children[i] is a leaf
-            // In Q2, all leaves must have their own ID even if they share solidity.
-            if (qbsp_options.target_game->id != GAME_QUAKE_II && children_i_leafdata->contents.is_any_solid()) {
-                dnode->children[i] = PLANENUM_LEAF;
-            } else {
-                int32_t nextLeafIndex = static_cast<int32_t>(map.bsp.dleafs.size());
-                const int32_t childnum = -(nextLeafIndex + 1);
-                dnode->children[i] = childnum;
-                ExportLeaf(nodedata->children[i]);
-            }
-        } else {
-            // children[i] is a node
-            const int32_t childnum = static_cast<int32_t>(map.bsp.dnodes.size());
-            dnode->children[i] = childnum;
-            ExportDrawNodes(nodedata->children[i]);
-
-            // Important: our dnode pointer may be invalid after the recursive call, if the vector got resized.
-            // So re-set the pointer.
-            dnode = &map.bsp.dnodes[ourNodeIndex];
+    const auto append_node = [](node_t *current) {
+        if (!current) {
+            FError("BSP draw-node tree contains a null child");
         }
-    }
+        auto *nodedata = current->get_nodedata();
+        if (!nodedata) {
+            FError("Internal error: attempted to append a leaf as a draw node");
+        }
 
-    // DarkPlaces asserts that the leaf numbers are different
-    // if mod_bsp_portalize is 1 (default)
-    // The most likely way it could fail is if both sides are the
-    // shared CONTENTS_SOLID leaf (-1)
-    Q_assert(!(dnode->children[0] == -1 && dnode->children[1] == -1));
-    Q_assert(dnode->children[0] != dnode->children[1]);
+        const int32_t output_node = CheckedInt32Index(map.bsp.dnodes.size(), "draw-node index");
+        const size_t output_index = static_cast<size_t>(output_node);
+        bsp2_dnode_t &dnode = map.bsp.dnodes.emplace_back();
+        dnode.mins = qv::floor(current->bounds.mins());
+        dnode.maxs = qv::ceil(current->bounds.maxs());
+        dnode.planenum = ExportMapPlane(nodedata->planenum);
+        dnode.firstface = nodedata->firstface;
+        dnode.numfaces = nodedata->numfaces;
+        return std::pair{output_node, output_index};
+    };
+
+    const auto [root_output, root_index] = append_node(node);
+    static_cast<void>(root_output);
+    std::vector<frame_t> pending{{node, root_index}};
+
+    while (!pending.empty()) {
+        frame_t &frame = pending.back();
+        auto *nodedata = frame.node->get_nodedata();
+
+        if (frame.next_child < nodedata->children.size()) {
+            const size_t child_number = frame.next_child++;
+            node_t *child = nodedata->children[child_number];
+            if (!child) {
+                FError("BSP draw-node tree contains a null child");
+            }
+
+            if (auto *leafdata = child->get_leafdata()) {
+                // In Q2, all leaves must have their own ID even if they share solidity.
+                if (qbsp_options.target_game->id != GAME_QUAKE_II && leafdata->contents.is_any_solid()) {
+                    map.bsp.dnodes[frame.output_index].children[child_number] = PLANENUM_LEAF;
+                } else {
+                    if (map.bsp.dleafs.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+                        FError("leaf index {} exceeds the BSP node-child limit", map.bsp.dleafs.size());
+                    }
+                    const int64_t encoded_leaf = -static_cast<int64_t>(map.bsp.dleafs.size()) - 1;
+                    map.bsp.dnodes[frame.output_index].children[child_number] = static_cast<int32_t>(encoded_leaf);
+                    ExportLeaf(child);
+                }
+            } else {
+                // Assign the child before entering it, matching the recursive implementation's failure semantics.
+                const int32_t child_output = CheckedInt32Index(map.bsp.dnodes.size(), "draw-node index");
+                map.bsp.dnodes[frame.output_index].children[child_number] = child_output;
+                const auto [appended_output, child_index] = append_node(child);
+                Q_assert(appended_output == child_output);
+                pending.push_back({child, child_index});
+            }
+            continue;
+        }
+
+        const bsp2_dnode_t &dnode = map.bsp.dnodes[frame.output_index];
+        // DarkPlaces asserts that the leaf numbers are different if mod_bsp_portalize is 1 (default). The most likely
+        // way it could fail is if both sides are the shared CONTENTS_SOLID leaf (-1).
+        Q_assert(!(dnode.children[0] == -1 && dnode.children[1] == -1));
+        Q_assert(dnode.children[0] != dnode.children[1]);
+        pending.pop_back();
+    }
 }
 
 /*
@@ -289,11 +502,18 @@ ExportDrawNodes
 */
 void ExportDrawNodes(mapentity_t &entity, node_t *headnode, int firstface)
 {
+    if (!headnode) {
+        FError("BSP draw-node tree contains a null root");
+    }
+
     // populate model struct (which was emitted previously)
     dmodelh2_t &dmodel = map.bsp.dmodels.at(entity.outputmodelnumber.value());
-    dmodel.headnode[0] = static_cast<int32_t>(map.bsp.dnodes.size());
+    dmodel.headnode[0] = CheckedInt32Index(map.bsp.dnodes.size(), "draw-node index");
+    if (firstface < 0 || static_cast<size_t>(firstface) > map.bsp.dfaces.size()) {
+        FError("model has invalid first face {}", firstface);
+    }
     dmodel.firstface = firstface;
-    dmodel.numfaces = static_cast<int32_t>(map.bsp.dfaces.size()) - firstface;
+    dmodel.numfaces = CheckedInt32Index(map.bsp.dfaces.size() - static_cast<size_t>(firstface), "model face count");
 
     const size_t mapleafsAtStart = map.bsp.dleafs.size();
 
@@ -304,7 +524,7 @@ void ExportDrawNodes(mapentity_t &entity, node_t *headnode, int firstface)
     }
 
     // count how many leafs were exported by the above calls
-    dmodel.visleafs = static_cast<int32_t>(map.bsp.dleafs.size() - mapleafsAtStart);
+    dmodel.visleafs = CheckedInt32Index(map.bsp.dleafs.size() - mapleafsAtStart, "model visibility leaf count");
 
     /* remove the headnode padding */
     for (size_t i = 0; i < 3; i++) {
@@ -348,7 +568,6 @@ void BeginBSPFile()
 static void WriteExtendedTexinfoFlags()
 {
     auto file = fs::path(qbsp_options.bsp_path).replace_extension("texinfo.json");
-    bool needwrite = false;
 
     if (fs::exists(file)) {
         fs::remove(file);
@@ -372,7 +591,15 @@ static void WriteExtendedTexinfoFlags()
         texinfofile[std::to_string(*tx.outputnum)].swap(t);
     }
 
-    std::ofstream(file, std::ios_base::out | std::ios_base::binary) << texinfofile;
+    std::ofstream stream(file, std::ios_base::out | std::ios_base::binary);
+    if (!stream) {
+        FError("couldn't open {} for writing", file);
+    }
+    stream << texinfofile;
+    stream.close();
+    if (!stream) {
+        FError("error writing {}", file);
+    }
 }
 
 static void WriteExtendedContentFlags()
@@ -394,7 +621,15 @@ static void WriteExtendedContentFlags()
         jsonfile.append(flags.to_json());
     }
 
-    std::ofstream(file, std::ios_base::out | std::ios_base::binary) << jsonfile;
+    std::ofstream stream(file, std::ios_base::out | std::ios_base::binary);
+    if (!stream) {
+        FError("couldn't open {} for writing", file);
+    }
+    stream << jsonfile;
+    stream.close();
+    if (!stream) {
+        FError("error writing {}", file);
+    }
 }
 
 static bool Is16BitMarkfsurfaceFormat(const bspversion_t *version)
@@ -442,7 +677,10 @@ static void WriteBSPFile()
         logging::print("NOTE: limits exceeded for {} - switching to {}\n", qbsp_options.target_version->name,
             extendedLimitsFormat->name);
 
-        Q_assert(ConvertBSPFormat(&bspdata, extendedLimitsFormat));
+        if (!ConvertBSPFormat(&bspdata, extendedLimitsFormat)) {
+            FError("Limits exceeded for both {} and its extended format {}", qbsp_options.target_version->name,
+                extendedLimitsFormat->name);
+        }
     }
 
     // Formats with 16-bit marksurfaces/leaffaces have two subformats:
@@ -505,7 +743,9 @@ void UpdateBSPFileEntitiesLump()
 
     bspdata.version->game->init_filesystem(qbsp_options.bsp_path, qbsp_options);
 
-    ConvertBSPFormat(&bspdata, &bspver_generic);
+    if (!ConvertBSPFormat(&bspdata, &bspver_generic)) {
+        FError("couldn't convert {} to the generic BSP representation", qbsp_options.bsp_path);
+    }
 
     mbsp_t &bsp = std::get<mbsp_t>(bspdata.bsp);
 
@@ -513,7 +753,9 @@ void UpdateBSPFileEntitiesLump()
     bsp.dentdata = std::move(map.bsp.dentdata);
 
     // write the .bsp back to disk
-    ConvertBSPFormat(&bspdata, bspdata.loadversion);
+    if (!ConvertBSPFormat(&bspdata, bspdata.loadversion)) {
+        FError("couldn't convert {} back to its loaded BSP format", qbsp_options.bsp_path);
+    }
     WriteBSPFile(qbsp_options.bsp_path, &bspdata);
 
     logging::print("Wrote {}\n", qbsp_options.bsp_path);

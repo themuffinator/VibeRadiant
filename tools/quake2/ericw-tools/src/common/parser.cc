@@ -60,11 +60,19 @@ parser_source_location parser_source_location::on_line(size_t new_line) const
 
 // parser_t
 
+namespace
+{
+constexpr char empty_parser_buffer = '\0';
+}
+
 parser_t::parser_t(const void *start, size_t length, parser_source_location base_location)
     : parser_base_t(base_location.on_line(1)),
-      pos(reinterpret_cast<const char *>(start)),
-      end(reinterpret_cast<const char *>(start) + length)
+      pos(start ? reinterpret_cast<const char *>(start) : &empty_parser_buffer),
+      end(start ? reinterpret_cast<const char *>(start) + length : &empty_parser_buffer)
 {
+    if (!start && length != 0) {
+        FError("null parser input with non-zero length");
+    }
 }
 
 parser_t::parser_t(std::string_view view, parser_source_location base_location)
@@ -73,12 +81,15 @@ parser_t::parser_t(std::string_view view, parser_source_location base_location)
 }
 
 parser_t::parser_t(const fs::data &data, parser_source_location base_location)
-    : parser_t(data.value().data(), data.value().size(), base_location)
+    : parser_t(data ? data->data() : nullptr, data ? data->size() : 0, base_location)
 {
+    if (!data) {
+        FError("missing parser input data");
+    }
 }
 
 parser_t::parser_t(const char *str, parser_source_location base_location)
-    : parser_t(str, strlen(str), base_location)
+    : parser_t(str, str ? strlen(str) : 0, base_location)
 {
 }
 
@@ -98,28 +109,39 @@ bool parser_t::parse_token(parseflags flags)
 
 skipspace:
     /* skip space */
-    while (at_end() || *pos <= 32) {
-        if (at_end() || !*pos) {
+    while (!at_end() && static_cast<unsigned char>(*pos) <= 32) {
+        if (!*pos) {
             if (flags & PARSE_OPTIONAL)
                 return false;
             if (flags & PARSE_SAMELINE)
                 FError("{}: Line is incomplete", location);
             return false;
         }
-        if (*pos == '\n') {
+        if (*pos == '\r' || *pos == '\n') {
             if (flags & PARSE_OPTIONAL)
                 return false;
             if (flags & PARSE_SAMELINE)
                 FError("{}: Line is incomplete", location);
-            location.line_number.value()++;
+            if (*pos == '\n' || (*pos == '\r' && (pos + 1 == end || pos[1] != '\n'))) {
+                location.line_number.value()++;
+            }
         }
         pos++;
     }
 
+    if (at_end()) {
+        if (flags & PARSE_OPTIONAL)
+            return false;
+        if (flags & PARSE_SAMELINE)
+            FError("{}: Line is incomplete", location);
+        return false;
+    }
+
     /* comment field */
-    if ((pos[0] == '/' && pos[1] == '/') || pos[0] == ';') { // quark writes ; comments in q2 maps
+    const bool slash_comment = pos[0] == '/' && (end - pos) >= 2 && pos[1] == '/';
+    if (slash_comment || pos[0] == ';') { // quark writes ; comments in q2 maps
         if (flags & PARSE_COMMENT) {
-            while (*pos && *pos != '\n') {
+            while (!at_end() && *pos && *pos != '\r' && *pos != '\n') {
                 *token_p++ = *pos++;
             }
             goto out;
@@ -128,14 +150,23 @@ skipspace:
             return false;
         if (flags & PARSE_SAMELINE)
             FError("{}: Line is incomplete", location);
-        while (*pos++ != '\n') {
-            if (!*pos) {
-                if (flags & PARSE_SAMELINE)
-                    FError("{}: Line is incomplete", location);
-                return false;
-            }
+
+        while (!at_end() && *pos && *pos != '\r' && *pos != '\n') {
+            ++pos;
         }
-        location.line_number.value()++; // count the \n the preceding while() loop just consumed
+        if (at_end() || !*pos) {
+            return false;
+        }
+
+        if (*pos == '\r') {
+            ++pos;
+            if (!at_end() && *pos == '\n') {
+                ++pos;
+            }
+        } else {
+            ++pos;
+        }
+        location.line_number.value()++;
         goto skipspace;
     }
     if (flags & PARSE_COMMENT)
@@ -146,10 +177,14 @@ skipspace:
     if (*pos == '"') {
         was_quoted = true;
         pos++;
-        while (*pos != '"') {
+        while (!at_end() && *pos != '"') {
             if (!*pos)
                 FError("{}: EOF inside quoted token", location);
             if (*pos == '\\') {
+                if ((end - pos) < 2 || !pos[1]) {
+                    FError("{}: EOF inside quoted token", location);
+                }
+
                 // small note. the vanilla quake engine just parses the "foo" stuff then goes and looks for \n
                 // explicitly within strings. this means ONLY \n works, and double-quotes cannot be used either in maps
                 // _NOR SAVED GAMES_. certain editors can write "wad" "c:\foo\" which is completely fucked. so lets try
@@ -177,7 +212,7 @@ skipspace:
                     case '9': // too lazy to validate these. doesn't break stuff.
                         break;
                     case '\"':
-                        if (pos[2] == '\r' || pos[2] == '\n') {
+                        if ((end - pos) >= 3 && (pos[2] == '\r' || pos[2] == '\n')) {
                             logging::print("WARNING: {}: escaped double-quote at end of string\n", location);
                         } else {
                             *token_p++ = *pos++;
@@ -190,9 +225,14 @@ skipspace:
             }
             *token_p++ = *pos++;
         }
+
+        if (at_end()) {
+            FError("{}: EOF inside quoted token", location);
+        }
+
         pos++;
     } else {
-        while (*pos > 32) {
+        while (!at_end() && *pos && static_cast<unsigned char>(*pos) > 32) {
             *token_p++ = *pos++;
         }
     }
@@ -218,6 +258,10 @@ void parser_t::push_state()
 
 void parser_t::pop_state()
 {
+    if (_states.empty()) {
+        FError("parser state stack underflow");
+    }
+
     state() = _states.back();
     _states.pop_back();
 }
@@ -225,9 +269,19 @@ void parser_t::pop_state()
 // token_parser_t
 
 token_parser_t::token_parser_t(int argc, const char **args, parser_source_location base_location)
-    : parser_base_t(base_location),
-      tokens(args, args + argc)
+    : parser_base_t(base_location)
 {
+    if (argc < 0 || (argc > 0 && !args)) {
+        FError("invalid command-line token range");
+    }
+
+    tokens.reserve(static_cast<size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+        if (!args[i]) {
+            FError("null command-line token at index {}", i);
+        }
+        tokens.emplace_back(args[i]);
+    }
 }
 
 token_parser_t::state_type token_parser_t::state()
@@ -254,7 +308,7 @@ bool token_parser_t::parse_token(parseflags flags)
 
     token = tokens[cur++];
 
-    was_quoted = std::any_of(token.begin(), token.end(), isspace);
+    was_quoted = std::any_of(token.begin(), token.end(), [](unsigned char c) { return std::isspace(c) != 0; });
 
     return true;
 }
@@ -271,6 +325,10 @@ void token_parser_t::push_state()
 
 void token_parser_t::pop_state()
 {
+    if (_states.empty()) {
+        FError("parser state stack underflow");
+    }
+
     state() = _states.back();
     _states.pop_back();
 }

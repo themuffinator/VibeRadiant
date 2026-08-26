@@ -30,7 +30,7 @@ StatsPanel::StatsPanel(QWidget *parent)
     layout->setContentsMargins(0, 0, 0, 0);
 }
 
-void StatsPanel::addStat(const QString &str, int value)
+void StatsPanel::addStat(const QString &str, qulonglong value)
 {
     // add a row
     int currentRow = m_table->rowCount();
@@ -56,33 +56,33 @@ void StatsPanel::updateWithBSP(const mbsp_t *bsp, const bspxentries_t &entries)
         return;
     }
 
-    addStat(QStringLiteral("models"), bsp->dmodels.size());
-    addStat(QStringLiteral("nodes"), bsp->dnodes.size());
-    addStat(QStringLiteral("leafs"), bsp->dleafs.size());
-    addStat(QStringLiteral("clipnodes"), bsp->dclipnodes.size());
-    addStat(QStringLiteral("planes"), bsp->dplanes.size());
-    addStat(QStringLiteral("vertexes"), bsp->dvertexes.size());
-    addStat(QStringLiteral("faces"), bsp->dfaces.size());
-    addStat(QStringLiteral("surfedges"), bsp->dsurfedges.size());
-    addStat(QStringLiteral("edges"), bsp->dedges.size());
-    addStat(QStringLiteral("leaffaces"), bsp->dleaffaces.size());
-    addStat(QStringLiteral("leafbrushes"), bsp->dleafbrushes.size());
+    addStat(QStringLiteral("models"), static_cast<qulonglong>(bsp->dmodels.size()));
+    addStat(QStringLiteral("nodes"), static_cast<qulonglong>(bsp->dnodes.size()));
+    addStat(QStringLiteral("leafs"), static_cast<qulonglong>(bsp->dleafs.size()));
+    addStat(QStringLiteral("clipnodes"), static_cast<qulonglong>(bsp->dclipnodes.size()));
+    addStat(QStringLiteral("planes"), static_cast<qulonglong>(bsp->dplanes.size()));
+    addStat(QStringLiteral("vertexes"), static_cast<qulonglong>(bsp->dvertexes.size()));
+    addStat(QStringLiteral("faces"), static_cast<qulonglong>(bsp->dfaces.size()));
+    addStat(QStringLiteral("surfedges"), static_cast<qulonglong>(bsp->dsurfedges.size()));
+    addStat(QStringLiteral("edges"), static_cast<qulonglong>(bsp->dedges.size()));
+    addStat(QStringLiteral("leaffaces"), static_cast<qulonglong>(bsp->dleaffaces.size()));
+    addStat(QStringLiteral("leafbrushes"), static_cast<qulonglong>(bsp->dleafbrushes.size()));
 
-    addStat(QStringLiteral("areas"), bsp->dareas.size());
-    addStat(QStringLiteral("areaportals"), bsp->dareaportals.size());
+    addStat(QStringLiteral("areas"), static_cast<qulonglong>(bsp->dareas.size()));
+    addStat(QStringLiteral("areaportals"), static_cast<qulonglong>(bsp->dareaportals.size()));
 
-    addStat(QStringLiteral("brushes"), bsp->dbrushes.size());
-    addStat(QStringLiteral("brushsides"), bsp->dbrushsides.size());
+    addStat(QStringLiteral("brushes"), static_cast<qulonglong>(bsp->dbrushes.size()));
+    addStat(QStringLiteral("brushsides"), static_cast<qulonglong>(bsp->dbrushsides.size()));
 
-    addStat(QStringLiteral("texinfos"), bsp->texinfo.size());
-    addStat(QStringLiteral("textures"), bsp->dtex.textures.size());
+    addStat(QStringLiteral("texinfos"), static_cast<qulonglong>(bsp->texinfo.size()));
+    addStat(QStringLiteral("textures"), static_cast<qulonglong>(bsp->dtex.textures.size()));
 
-    addStat(QStringLiteral("visdata bytes"), bsp->dvis.bits.size());
-    addStat(QStringLiteral("lightdata bytes"), bsp->dlightdata.size());
-    addStat(QStringLiteral("entdata bytes"), bsp->dentdata.size());
+    addStat(QStringLiteral("visdata bytes"), static_cast<qulonglong>(bsp->dvis.bits.size()));
+    addStat(QStringLiteral("lightdata bytes"), static_cast<qulonglong>(bsp->dlightdata.size()));
+    addStat(QStringLiteral("entdata bytes"), static_cast<qulonglong>(bsp->dentdata.size()));
 
     // bspx lumps
     for (const auto &[lumpname, data] : entries) {
-        addStat(QStringLiteral("%1 bytes").arg(lumpname.c_str()), data.size());
+        addStat(QStringLiteral("%1 bytes").arg(lumpname.c_str()), static_cast<qulonglong>(data.size()));
     }
 }

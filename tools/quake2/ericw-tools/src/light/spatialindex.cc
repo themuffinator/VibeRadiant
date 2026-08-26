@@ -26,10 +26,11 @@ spatialindex_t::~spatialindex_t()
 
 spatialindex_t::spatialindex_t() { }
 
-static void FilterFunc(const RTCFilterFunctionNArguments *args)
+void spatialindex_t::FilterFunc(const RTCFilterFunctionNArguments *args)
 {
     constexpr int VALID = -1;
     constexpr int REJECT = 0;
+    const auto *spatialindex = static_cast<const spatialindex_t *>(args->geometryUserPtr);
 
     for (unsigned int i = 0; i < args->N; ++i) {
         if (args->valid[i] != VALID) {
@@ -45,6 +46,13 @@ static void FilterFunc(const RTCFilterFunctionNArguments *args)
 
         if (qv::dot(geom_normal, ray_normal) > 0) {
             // backface cull
+            args->valid[i] = REJECT;
+        }
+
+        const uint32_t ray_mask = RTCRayN_mask(args->ray, args->N, i);
+        const uint32_t primitive_id = RTCHitN_primID(args->hit, args->N, i);
+        if (!spatialindex || primitive_id >= spatialindex->geom_masks_per_tri.size() ||
+            !(spatialindex->geom_masks_per_tri[primitive_id] & ray_mask)) {
             args->valid[i] = REJECT;
         }
     }
@@ -66,6 +74,10 @@ void spatialindex_t::commit()
     rtcSetSharedGeometryBuffer(
         geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, indices.data(), 0, sizeof(tri_t), indices.size());
     rtcSetGeometryIntersectFilterFunction(geom, FilterFunc);
+    rtcSetGeometryUserData(geom, this);
+    // Per-triangle masks are evaluated by FilterFunc so all rays must reach
+    // this single shared Embree geometry.
+    rtcSetGeometryMask(geom, 0xff'ff'ff'ff);
     rtcCommitGeometry(geom);
 
     rtcAttachGeometry(scene, geom);
@@ -76,7 +88,7 @@ void spatialindex_t::commit()
     state = state_t::tracing;
 }
 
-void spatialindex_t::add_poly(const polylib::winding_t &winding, std::any payload)
+void spatialindex_t::add_poly(const polylib::winding_t &winding, std::any payload, uint32_t geom_mask)
 {
     assert(state == state_t::filling_geom);
 
@@ -94,6 +106,7 @@ void spatialindex_t::add_poly(const polylib::winding_t &winding, std::any payloa
     for (int i = 2; i < winding.size(); ++i) {
         indices.push_back({start_vertex, start_vertex + i - 1, start_vertex + i});
         payloads_per_tri.push_back(payload);
+        geom_masks_per_tri.push_back(geom_mask);
     }
 }
 
@@ -114,9 +127,10 @@ void spatialindex_t::clear()
     vertices.clear();
     indices.clear();
     payloads_per_tri.clear();
+    geom_masks_per_tri.clear();
 }
 
-hitresult_t spatialindex_t::trace_ray(const qvec3f &origin, const qvec3f &direction)
+hitresult_t spatialindex_t::trace_ray(const qvec3f &origin, const qvec3f &direction, uint32_t ray_mask)
 {
     assert(state == state_t::tracing);
 
@@ -129,7 +143,7 @@ hitresult_t spatialindex_t::trace_ray(const qvec3f &origin, const qvec3f &direct
     rayhit.ray.dir_z = direction[2];
     rayhit.ray.tnear = 0;
     rayhit.ray.tfar = std::numeric_limits<float>::infinity();
-    rayhit.ray.mask = 0xff'ff'ff'ff;
+    rayhit.ray.mask = ray_mask;
     rayhit.ray.flags = 0;
     rayhit.ray.time = 0;
     rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;

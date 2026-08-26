@@ -19,6 +19,10 @@
 
 #include <common/bspfile.hh>
 #include <common/cmdlib.hh>
+#include <common/log.hh>
+
+#include <algorithm>
+#include <limits>
 
 // dmodelh2_t
 
@@ -36,17 +40,49 @@ void dmodelh2_t::stream_read(std::istream &s)
 
 size_t mvis_t::header_offset() const
 {
-    return sizeof(int32_t) + (sizeof(int32_t) * bit_offsets.size() * 2);
+    constexpr size_t fixed_size = sizeof(int32_t);
+    constexpr size_t entry_size = sizeof(int32_t) * 2;
+    if (bit_offsets.size() > (std::numeric_limits<size_t>::max() - fixed_size) / entry_size) {
+        FError("visibility header size overflow ({} clusters)", bit_offsets.size());
+    }
+    return fixed_size + (entry_size * bit_offsets.size());
 }
 
 void mvis_t::set_bit_offset(vistype_t type, size_t cluster, size_t offset)
 {
-    bit_offsets[cluster][type] = offset + header_offset();
+    const size_t type_index = static_cast<size_t>(type);
+    if (cluster >= bit_offsets.size() || type_index >= bit_offsets.front().size()) {
+        FError("invalid visibility offset target (type {}, cluster {})", type_index, cluster);
+    }
+
+    const size_t header_size = header_offset();
+    constexpr size_t max_offset = static_cast<size_t>(std::numeric_limits<int32_t>::max());
+    if (header_size > max_offset || offset > max_offset - header_size) {
+        FError("visibility data offset exceeds the signed BSP offset limit");
+    }
+
+    bit_offsets[cluster][type_index] = static_cast<int32_t>(header_size + offset);
 }
 
 int32_t mvis_t::get_bit_offset(vistype_t type, size_t cluster) const
 {
-    return bit_offsets[cluster][type] - header_offset();
+    const size_t type_index = static_cast<size_t>(type);
+    if (cluster >= bit_offsets.size() || type_index >= bit_offsets.front().size()) {
+        FError("invalid visibility offset lookup (type {}, cluster {})", type_index, cluster);
+    }
+
+    const int32_t stored_offset = bit_offsets[cluster][type_index];
+    if (stored_offset < 0) {
+        return stored_offset;
+    }
+
+    const size_t header_size = header_offset();
+    if (header_size > static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+        static_cast<size_t>(stored_offset) < header_size) {
+        return -1;
+    }
+
+    return stored_offset - static_cast<int32_t>(header_size);
 }
 
 void mvis_t::resize(size_t numclusters)
@@ -56,37 +92,104 @@ void mvis_t::resize(size_t numclusters)
 
 void mvis_t::stream_read(std::istream &stream, const lump_t &lump)
 {
-    int32_t numclusters;
+    constexpr size_t count_size = sizeof(int32_t);
+    constexpr size_t offsets_per_cluster_size = sizeof(int32_t) * 2;
+
+    if (lump.filelen < static_cast<int32_t>(count_size)) {
+        FError("visibility lump is too small to contain a cluster count ({} bytes)", lump.filelen);
+    }
+
+    int32_t numclusters = 0;
 
     stream >= numclusters;
+    if (!stream) {
+        FError("unable to read visibility cluster count");
+    }
 
-    resize(numclusters);
+    if (numclusters < 0) {
+        FError("visibility lump has a negative cluster count ({})", numclusters);
+    }
 
-    // read cluster -> offset tables
-    for (auto &bit_offset : bit_offsets)
+    const size_t lump_size = static_cast<size_t>(lump.filelen);
+    const size_t cluster_count = static_cast<size_t>(numclusters);
+    const size_t max_clusters = (lump_size - count_size) / offsets_per_cluster_size;
+    if (cluster_count > max_clusters) {
+        FError("visibility lump cluster table is truncated ({} clusters, {} byte lump)", cluster_count, lump_size);
+    }
+
+    const size_t header_size = count_size + (cluster_count * offsets_per_cluster_size);
+    std::vector<std::array<int32_t, 2>> parsed_offsets(cluster_count);
+
+    for (auto &bit_offset : parsed_offsets) {
         stream >= bit_offset;
+        if (!stream) {
+            FError("unable to read visibility cluster offsets");
+        }
 
-    // pull in final bit set
-    auto remaining = lump.filelen - (static_cast<int32_t>(stream.tellg()) - lump.fileofs);
-    bits.resize(remaining);
-    stream.read(reinterpret_cast<char *>(bits.data()), remaining);
+        for (const int32_t offset : bit_offset) {
+            if (offset == -1) {
+                continue;
+            }
+            if (offset < 0 || static_cast<size_t>(offset) < header_size || static_cast<size_t>(offset) >= lump_size) {
+                FError("visibility lump contains an invalid data offset ({})", offset);
+            }
+        }
+    }
+
+    const size_t remaining = lump_size - header_size;
+    std::vector<uint8_t> parsed_bits(remaining);
+    if (remaining != 0) {
+        stream.read(reinterpret_cast<char *>(parsed_bits.data()), static_cast<std::streamsize>(remaining));
+        if (!stream || stream.gcount() != static_cast<std::streamsize>(remaining)) {
+            FError("visibility lump data is truncated");
+        }
+    }
+
+    bit_offsets = std::move(parsed_offsets);
+    bits = std::move(parsed_bits);
 }
 
 void mvis_t::stream_write(std::ostream &stream) const
 {
     // no vis data
-    if (!bit_offsets.size()) {
+    if (bit_offsets.empty()) {
         return;
+    }
+
+    if (bit_offsets.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        FError("visibility cluster count {} exceeds the signed BSP limit", bit_offsets.size());
+    }
+
+    const size_t header_size = header_offset();
+    constexpr size_t max_lump_size = static_cast<size_t>(std::numeric_limits<int32_t>::max());
+    if (header_size > max_lump_size || bits.size() > max_lump_size - header_size) {
+        FError("visibility lump exceeds the signed BSP size limit");
+    }
+    if (bits.size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max())) {
+        FError("visibility bitset is too large for the output stream ({} bytes)", bits.size());
+    }
+    const size_t total_size = header_size + bits.size();
+    for (const auto &bit_offset : bit_offsets) {
+        for (const int32_t offset : bit_offset) {
+            if (offset != -1 && (offset < 0 || static_cast<size_t>(offset) < header_size ||
+                                    static_cast<size_t>(offset) >= total_size)) {
+                FError("visibility lump contains an invalid serialized data offset ({})", offset);
+            }
+        }
     }
 
     stream <= static_cast<int32_t>(bit_offsets.size());
 
     // write cluster -> offset tables
-    for (auto &bit_offset : bit_offsets)
+    for (const auto &bit_offset : bit_offsets) {
         stream <= bit_offset;
+    }
 
     // write bitset
-    stream.write(reinterpret_cast<const char *>(bits.data()), bits.size());
+    stream.write(reinterpret_cast<const char *>(bits.data()), static_cast<std::streamsize>(bits.size()));
+    if (!stream) {
+        FError("unable to write visibility lump");
+    }
 }
 
 // dmiptex_t
@@ -110,44 +213,124 @@ size_t miptex_t::stream_size() const
 
 void miptex_t::stream_read(std::istream &stream, size_t len)
 {
-    data.resize(len);
-    stream.read(reinterpret_cast<char *>(data.data()), len);
+    constexpr size_t serialized_header_size = 16 + (sizeof(uint32_t) * 2) + (sizeof(int32_t) * MIPLEVELS);
+    if (len < serialized_header_size) {
+        FError("texture record is too small to contain a miptex header ({} bytes)", len);
+    }
+    if (len > static_cast<size_t>(std::numeric_limits<std::streamsize>::max())) {
+        FError("texture record is too large to read ({} bytes)", len);
+    }
 
-    imemstream miptex_stream(data.data(), len);
+    std::vector<uint8_t> parsed_data(len);
+    stream.read(reinterpret_cast<char *>(parsed_data.data()), static_cast<std::streamsize>(len));
+    if (!stream || stream.gcount() != static_cast<std::streamsize>(len)) {
+        FError("texture record is truncated (expected {} bytes)", len);
+    }
 
-    dmiptex_t dtex;
+    imemstream miptex_stream(parsed_data.data(), parsed_data.size());
+    miptex_stream >> endianness<std::endian::little>;
+
+    dmiptex_t dtex{};
     miptex_stream >= dtex;
+    if (!miptex_stream) {
+        FError("unable to read texture header");
+    }
 
-    name = dtex.name.data();
+    for (size_t level = 0; level < dtex.offsets.size(); ++level) {
+        const int32_t offset = dtex.offsets[level];
+        if (offset <= 0) {
+            continue;
+        }
+
+        const uint64_t mip_width = static_cast<uint64_t>(dtex.width >> level);
+        const uint64_t mip_height = static_cast<uint64_t>(dtex.height >> level);
+        const uint64_t mip_size = mip_width * mip_height;
+        const size_t offset_value = static_cast<size_t>(offset);
+        if (offset_value < serialized_header_size || offset_value > len || mip_size > len - offset_value) {
+            FError("texture mip level {} exceeds its {} byte record", level, len);
+        }
+    }
+
+    const auto name_end = std::find(dtex.name.begin(), dtex.name.end(), '\0');
+    name.assign(dtex.name.begin(), name_end);
     width = dtex.width;
     height = dtex.height;
     offsets = dtex.offsets;
+    data = std::move(parsed_data);
+    null_texture = false;
 }
 
 void miptex_t::stream_write(std::ostream &stream) const
 {
-    stream.write(reinterpret_cast<const char *>(data.data()), data.size());
+    if (data.size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max())) {
+        FError("texture record is too large to serialize ({} bytes)", data.size());
+    }
+    stream.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size()));
+    if (!stream) {
+        FError("unable to write texture record");
+    }
 }
 
 // dmiptexlump_t
 
 void dmiptexlump_t::stream_read(std::istream &stream, const lump_t &lump)
 {
-    int32_t nummiptex;
-    stream >= nummiptex;
+    constexpr size_t count_size = sizeof(int32_t);
+    constexpr size_t offset_size = sizeof(int32_t);
+    constexpr size_t serialized_miptex_header_size = 16 + (sizeof(uint32_t) * 2) + (sizeof(int32_t) * MIPLEVELS);
 
-    // load in all of the offsets, we need them
-    // to calculate individual data sizes
-    std::vector<int32_t> offsets(nummiptex);
-
-    for (size_t i = 0; i < nummiptex; i++) {
-        stream >= offsets[i];
+    if (lump.filelen < static_cast<int32_t>(count_size)) {
+        FError("texture lump is too small to contain a texture count ({} bytes)", lump.filelen);
     }
 
-    for (size_t i = 0; i < nummiptex; i++) {
-        miptex_t &tex = textures.emplace_back();
+    int32_t nummiptex = 0;
+    stream >= nummiptex;
+    if (!stream) {
+        FError("unable to read texture count");
+    }
 
-        int32_t offset = offsets[i];
+    if (nummiptex < 0) {
+        FError("texture lump has a negative texture count ({})", nummiptex);
+    }
+
+    const size_t lump_size = static_cast<size_t>(lump.filelen);
+    const size_t texture_count = static_cast<size_t>(nummiptex);
+    const size_t max_textures = (lump_size - count_size) / offset_size;
+    if (texture_count > max_textures) {
+        FError("texture lump offset table is truncated ({} textures, {} byte lump)", texture_count, lump_size);
+    }
+
+    const size_t header_size = count_size + (texture_count * offset_size);
+
+    // load in all of the offsets, we need them
+    // to calculate individual data sizes.
+    std::vector<int32_t> parsed_offsets(texture_count);
+
+    for (int32_t &offset : parsed_offsets) {
+        stream >= offset;
+        if (!stream) {
+            FError("unable to read texture lump offsets");
+        }
+
+        if (offset < 0) {
+            // Negative offsets are the traditional marker for an omitted
+            // texture. Preserve compatibility with maps that use values
+            // other than exactly -1 for that marker.
+            continue;
+        }
+
+        if (static_cast<size_t>(offset) < header_size || static_cast<size_t>(offset) >= lump_size) {
+            FError("texture lump contains an invalid texture offset ({})", offset);
+        }
+    }
+
+    std::vector<miptex_t> parsed_textures;
+    parsed_textures.reserve(texture_count);
+
+    for (size_t i = 0; i < texture_count; ++i) {
+        miptex_t &tex = parsed_textures.emplace_back();
+
+        const int32_t offset = parsed_offsets[i];
 
         // dummy texture?
         if (offset < 0) {
@@ -158,68 +341,115 @@ void dmiptexlump_t::stream_read(std::istream &stream, const lump_t &lump)
         // move to miptex position (technically required
         // because there might be dummy data between the offsets
         // and the mip textures themselves...)
-        stream.seekg(lump.fileofs + offset);
+        const auto absolute_offset = static_cast<std::streamoff>(lump.fileofs) + static_cast<std::streamoff>(offset);
+        stream.seekg(absolute_offset);
+        if (!stream) {
+            FError("unable to seek to texture {} at lump offset {}", i, offset);
+        }
 
-        // calculate the length of the data used for the individual miptex.
-        int32_t next_offset = -1;
-
-        // scan forward (skipping -1's) to find the next valid offset
-        for (int j = i + 1; j < nummiptex; ++j) {
-            // valid?
-            if (offsets[j] >= 0) {
-                next_offset = offsets[j];
-                break;
+        // Find the next texture in physical file order. Valid BSPs normally
+        // list textures in order, but using the nearest greater offset also
+        // handles reordered tables without reading across lump boundaries.
+        size_t next_offset = lump_size;
+        for (const int32_t candidate : parsed_offsets) {
+            if (candidate > offset) {
+                next_offset = std::min(next_offset, static_cast<size_t>(candidate));
             }
         }
-        if (next_offset == -1) {
-            // the remainder of the texures are missing, so read to the end
-            // of the overall lump
-            next_offset = lump.filelen;
-        }
 
-        if (next_offset > offset) {
-            tex.stream_read(stream, next_offset - offset);
+        const size_t texture_size = next_offset - static_cast<size_t>(offset);
+        if (texture_size < serialized_miptex_header_size) {
+            FError("texture {} record is too small ({} bytes)", i, texture_size);
         }
+        tex.stream_read(stream, texture_size);
     }
+
+    textures = std::move(parsed_textures);
 }
 
 void dmiptexlump_t::stream_write(std::ostream &stream) const
 {
-    auto p = (size_t)stream.tellp();
+    constexpr size_t count_size = sizeof(int32_t);
+    constexpr size_t offset_size = sizeof(int32_t);
+    constexpr size_t serialized_miptex_header_size = 16 + (sizeof(uint32_t) * 2) + (sizeof(int32_t) * MIPLEVELS);
+    constexpr size_t max_lump_size = static_cast<size_t>(std::numeric_limits<int32_t>::max());
 
-    stream <= static_cast<int32_t>(textures.size());
+    const std::streampos start_position = stream.tellp();
+    if (start_position == std::streampos(-1)) {
+        FError("unable to determine texture lump output position");
+    }
+    const std::streamoff start_offset = static_cast<std::streamoff>(start_position);
+    if (start_offset < 0) {
+        FError("texture lump output position is negative");
+    }
 
-    const size_t header_size = sizeof(int32_t) + (sizeof(int32_t) * textures.size());
+    if (textures.size() > (max_lump_size - count_size) / offset_size) {
+        FError("texture count {} exceeds the signed BSP texture lump limit", textures.size());
+    }
+    const int32_t texture_count = static_cast<int32_t>(textures.size());
+    const size_t header_size = count_size + (offset_size * textures.size());
 
-    size_t miptex_offset = 0;
+    std::vector<int32_t> offsets;
+    offsets.reserve(textures.size());
+    std::vector<uint8_t> padding_before(textures.size(), 0);
+    size_t relative_position = header_size;
+    const size_t start_alignment = static_cast<size_t>(start_offset % 4);
 
-    // write out the miptex offsets
-    for (auto &texture : textures) {
+    for (size_t i = 0; i < textures.size(); ++i) {
+        const auto &texture = textures[i];
         if (texture.null_texture) {
-            // dummy texture
-            stream <= static_cast<int32_t>(-1);
+            offsets.push_back(-1);
             continue;
         }
 
-        stream <= static_cast<int32_t>(header_size + miptex_offset);
-
-        miptex_offset += texture.stream_size();
-
-        // Half Life requires the padding, but it's also a good idea
-        // in general to keep them padded to 4s
-        if ((p + miptex_offset) % 4) {
-            miptex_offset += 4 - ((p + miptex_offset) % 4);
+        if (texture.stream_size() < serialized_miptex_header_size) {
+            FError("texture {} record is too small to serialize ({} bytes)", i, texture.stream_size());
         }
+        if (texture.stream_size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max())) {
+            FError("texture {} record is too large to serialize ({} bytes)", i, texture.stream_size());
+        }
+
+        const size_t absolute_alignment = (start_alignment + (relative_position % 4)) % 4;
+        const size_t padding = (4 - absolute_alignment) % 4;
+        if (padding > max_lump_size - relative_position) {
+            FError("texture lump padding exceeds the signed BSP texture lump limit");
+        }
+        relative_position += padding;
+        padding_before[i] = static_cast<uint8_t>(padding);
+
+        offsets.push_back(static_cast<int32_t>(relative_position));
+        if (texture.stream_size() > max_lump_size - relative_position) {
+            FError("texture {} data exceeds the signed BSP texture lump limit", i);
+        }
+        relative_position += texture.stream_size();
     }
 
-    for (auto &texture : textures) {
+    const auto max_stream_offset = static_cast<uintmax_t>(std::numeric_limits<std::streamoff>::max());
+    if (relative_position > max_stream_offset ||
+        static_cast<uintmax_t>(start_offset) > max_stream_offset - relative_position) {
+        FError("texture lump output position exceeds the stream position limit");
+    }
+
+    stream <= texture_count;
+    for (const int32_t offset : offsets) {
+        stream <= offset;
+    }
+    if (!stream) {
+        FError("unable to write texture lump metadata");
+    }
+
+    constexpr char zero_padding[4]{};
+    for (size_t i = 0; i < textures.size(); ++i) {
+        const auto &texture = textures[i];
         if (!texture.null_texture) {
-            // fix up the padding to match the above conditions
-            if (stream.tellp() % 4) {
-                constexpr const char pad[4]{};
-                stream.write(pad, 4 - (stream.tellp() % 4));
+            const auto padding = static_cast<std::streamsize>(padding_before[i]);
+            if (padding != 0) {
+                stream.write(zero_padding, padding);
             }
             texture.stream_write(stream);
+            if (!stream) {
+                FError("unable to write texture {} data", i);
+            }
         }
     }
 }
@@ -335,9 +565,15 @@ void q2_dbrushside_qbism_t::stream_read(std::istream &s)
 
 // mbsp_t
 
-int mbsp_t::lightsamples() const
+size_t mbsp_t::lightsamples() const
 {
+    if (!loadversion || !loadversion->game) {
+        FError("light sample count requires a valid BSP version");
+    }
     if (loadversion->game->has_rgb_lightmap) {
+        if (dlightdata.size() % 3 != 0) {
+            FError("RGB light data size {} is not sample-aligned", dlightdata.size());
+        }
         return dlightdata.size() / 3;
     } else {
         return dlightdata.size();

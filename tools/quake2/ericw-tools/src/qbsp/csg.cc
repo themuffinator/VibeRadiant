@@ -131,14 +131,6 @@ Moves from `in`. Returns {front, back}
 */
 std::tuple<std::optional<side_t>, std::optional<side_t>> SplitFace(side_t &in, const qplane3d &split)
 {
-    // fixme-brushbsp: restore fast test
-    double dot = split.distance_to(in.origin);
-    if (dot > in.radius) {
-        return {in.clone(), std::nullopt};
-    } else if (dot < -in.radius) {
-        return {std::nullopt, in.clone()};
-    }
-
     auto [front, back] = in.w.clip(split, qbsp_options.epsilon.value(), false);
 
     // Plane doesn't split this face after all
@@ -151,11 +143,9 @@ std::tuple<std::optional<side_t>, std::optional<side_t>> SplitFace(side_t &in, c
 
     side_t front_side = in.clone_non_winding_data();
     front_side.w = std::move(front.value());
-    front_side.update_radius();
 
     side_t back_side = in.clone_non_winding_data();
     back_side.w = std::move(back.value());
-    back_side.update_radius();
 
     return {std::move(front_side), std::move(back_side)};
 }

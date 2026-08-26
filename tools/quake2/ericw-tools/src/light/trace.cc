@@ -22,6 +22,8 @@
 #include <common/imglib.hh>
 #include <common/bsputils.hh>
 
+#include <limits>
+
 /*
 ==============
 Light_PointInLeaf
@@ -45,19 +47,24 @@ const mleaf_t *Light_PointInLeaf(const mbsp_t *bsp, const qvec3f &point)
  */
 uint32_t clamp_texcoord(float in, uint32_t width)
 {
-    if (in >= 0.0f) {
-        return (uint32_t)in % width;
-    } else {
-        float in_abs = ceil(fabs(in));
-        uint32_t in_abs_mod = (uint32_t)in_abs % width;
-        return (width - in_abs_mod) % width;
+    if (!width || !std::isfinite(in)) {
+        return 0;
     }
+
+    const double wrapped = std::fmod(std::floor(static_cast<double>(in)), static_cast<double>(width));
+    return static_cast<uint32_t>(wrapped < 0.0 ? wrapped + width : wrapped);
 }
 
 qvec4b SampleTexture(
     const mface_t *face, const mtexinfo_t *tex, const img::texture *texture, const mbsp_t *bsp, const qvec3f &point)
 {
-    if (texture == nullptr || !texture->width) {
+    if (tex == nullptr || texture == nullptr || !texture->width || !texture->height) {
+        return {};
+    }
+
+    const uint64_t pixel_count = static_cast<uint64_t>(texture->width) * static_cast<uint64_t>(texture->height);
+    if (pixel_count > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
+        texture->pixels.size() < static_cast<size_t>(pixel_count)) {
         return {};
     }
 
@@ -66,5 +73,6 @@ qvec4b SampleTexture(
     const uint32_t x = clamp_texcoord(texcoord[0] * texture->width_scale, texture->width);
     const uint32_t y = clamp_texcoord(texcoord[1] * texture->height_scale, texture->height);
 
-    return texture->pixels[(texture->width * y) + x];
+    const uint64_t pixel_index = static_cast<uint64_t>(texture->width) * y + x;
+    return texture->pixels[static_cast<size_t>(pixel_index)];
 }

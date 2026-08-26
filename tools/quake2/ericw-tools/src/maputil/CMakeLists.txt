@@ -10,6 +10,8 @@ add_library(libmaputil STATIC ${MAPUTIL_SOURCES})
 target_link_libraries(libmaputil common TBB::tbb TBB::tbbmalloc fmt::fmt)
 
 if (LUA_LIBRARIES)
+	message(STATUS "Found Lua")
+	set(VMT_MAPUTIL_HAS_LUA TRUE PARENT_SCOPE)
 	target_link_libraries(libmaputil ${LUA_LIBRARIES})
 	target_include_directories(libmaputil PRIVATE ${LUA_INCLUDE_DIR})
 endif()

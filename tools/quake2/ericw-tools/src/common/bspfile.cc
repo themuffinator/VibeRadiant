@@ -26,9 +26,13 @@
 #include <common/settings.hh>
 #include <common/numeric_cast.hh>
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <limits.h>
+#include <string_view>
 #include <system_error>
+#include <utility>
 
 #include <fmt/core.h>
 
@@ -182,8 +186,6 @@ template<gameid_t ID>
 struct gamedef_q1_like_t : public gamedef_t
 {
 public:
-    bool allows_hl_contents = false;
-
     explicit gamedef_q1_like_t(const char *friendly_name = "quake", const char *base_dir = "ID1")
         : gamedef_t(friendly_name, base_dir)
     {
@@ -317,14 +319,19 @@ public:
          *
          * Normally solid leafs are not written and just referenced as leaf 0.
          */
-        if (contents.is_detail_fence() || contents.is_detail_wall()) {
-            return contentflags_t::make(EWT_VISCONTENTS_SOLID);
+        if (contents.flags & EWT_VISCONTENTS_WINDOW) {
+            // Q1 represents detail fences as solid leaves with visible faces.
+            // Preserve any other representable contents carried by the leaf.
+            contents = contentflags_t::make((contents.flags & ~EWT_VISCONTENTS_WINDOW) | EWT_VISCONTENTS_SOLID);
+        }
+        if (contents.flags & EWT_VISCONTENTS_DETAIL_WALL) {
+            contents = contentflags_t::make((contents.flags & ~EWT_VISCONTENTS_DETAIL_WALL) | EWT_VISCONTENTS_SOLID);
         }
 
-        if (contents.flags & EWT_VISCONTENTS_MIST) {
-            // clear mist. detail_illusionary on its own becomes CONTENTS_EMPTY,
+        if (contents.flags & (EWT_VISCONTENTS_MIST | EWT_VISCONTENTS_AUX)) {
+            // Clear Q2-only mist and aux. detail_illusionary on its own becomes CONTENTS_EMPTY,
             // detail_illusionary in water becomes CONTENTS_WATER, etc.
-            contents = contentflags_t::make(contents.flags & ~EWT_VISCONTENTS_MIST);
+            contents = contentflags_t::make(contents.flags & ~(EWT_VISCONTENTS_MIST | EWT_VISCONTENTS_AUX));
         }
         if (contents.flags & EWT_VISCONTENTS_ILLUSIONARY_VISBLOCKER) {
             // this exports as empty
@@ -352,7 +359,7 @@ public:
             return contentflags_t::make(EWT_VISCONTENTS_EMPTY);
         } else if (!Q_strcasecmp(texname.data(), "clip")) {
             return contentflags_t::make(EWT_INVISCONTENTS_PLAYERCLIP);
-        } else if ((texname[0] == '*') || (texname[0] == '!')) {
+        } else if ((texname[0] == '*') || (texname[0] == '!' && allows_hl_contents)) {
             // non-Q2: -transwater implies liquids are detail and translucent
             contents_int_t liquid_flags = 0;
             if (transwater) {
@@ -416,7 +423,7 @@ public:
             fs::addArchive(map_or_bsp_dir);
         }
 
-        img::init_palette(this);
+        img::init_palette(this, options.filepriority.value() == settings::search_priority_t::LOOSE);
     }
 
     const std::vector<qvec3b> &get_default_palette() const override
@@ -881,7 +888,10 @@ public:
     inline void addArchive(const fs::path &path) const
     {
         fs::addArchive(path, true);
-        discoverArchives(path);
+
+        if (fs::is_directory(path)) {
+            discoverArchives(path);
+        }
     }
 
     void init_filesystem(const fs::path &source, const settings::common_settings &options) const override
@@ -989,7 +999,7 @@ public:
         }
 
         // load palette
-        img::init_palette(this);
+        img::init_palette(this, options.filepriority.value() == settings::search_priority_t::LOOSE);
     }
 
     const std::vector<qvec3b> &get_default_palette() const override
@@ -1393,6 +1403,10 @@ inline T ConvertGenericToQ2BSP(mbsp_t &mbsp, const bspversion_t *to_version)
  */
 bool ConvertBSPFormat(bspdata_t *bspdata, const bspversion_t *to_version)
 {
+    if (!bspdata || !bspdata->version || !to_version) {
+        return false;
+    }
+
     if (bspdata->version == to_version)
         return true;
 
@@ -1439,7 +1453,7 @@ bool ConvertBSPFormat(bspdata_t *bspdata, const bspversion_t *to_version)
             } else {
                 return false;
             }
-        } catch (std::overflow_error e) {
+        } catch (const std::overflow_error &e) {
             logging::print("LIMITS EXCEEDED ON {}\n", e.what());
             return false;
         }
@@ -1451,13 +1465,22 @@ bool ConvertBSPFormat(bspdata_t *bspdata, const bspversion_t *to_version)
     return false;
 }
 
-static bool isHexen2(const dheader_t *header, const bspversion_t *bspversion)
+static bool isHexen2(
+    const std::vector<uint8_t> &file_data, const std::vector<lump_t> &lumps, const bspversion_t *bspversion)
 {
-    if (0 != (header->lumps[LUMP_MODELS].filelen % sizeof(dmodelh2_t))) {
+    const lump_t &models_lump = lumps[LUMP_MODELS];
+
+    // With no models there is no Hexen II-only structure to distinguish.
+    // Preserve the declared Quake format instead of guessing.
+    if (models_lump.filelen == 0) {
+        return false;
+    }
+
+    if (0 != (models_lump.filelen % sizeof(dmodelh2_t))) {
         // definitely not H2
         return false;
     }
-    if (0 != (header->lumps[LUMP_MODELS].filelen % sizeof(dmodelq1_t))) {
+    if (0 != (models_lump.filelen % sizeof(dmodelq1_t))) {
         // definitely not Q1
         return true;
     }
@@ -1469,39 +1492,42 @@ static bool isHexen2(const dheader_t *header, const bspversion_t *bspversion)
     const int bytes_per_leaf = bspversion->lumps.begin()[LUMP_LEAFS].size;
     const int bytes_per_clipnode = bspversion->lumps.begin()[LUMP_CLIPNODES].size;
 
-    const int faces_count = header->lumps[LUMP_FACES].filelen / bytes_per_face;
-    const int nodes_count = header->lumps[LUMP_NODES].filelen / bytes_per_node;
-    const int leafs_count = header->lumps[LUMP_LEAFS].filelen / bytes_per_leaf;
-    const int clipnodes_count = header->lumps[LUMP_CLIPNODES].filelen / bytes_per_clipnode;
+    const int faces_count = lumps[LUMP_FACES].filelen / bytes_per_face;
+    const int nodes_count = lumps[LUMP_NODES].filelen / bytes_per_node;
+    const int leafs_count = lumps[LUMP_LEAFS].filelen / bytes_per_leaf;
+    const int clipnodes_count = lumps[LUMP_CLIPNODES].filelen / bytes_per_clipnode;
 
     // assume H2, and do some basic validation
-    // FIXME: this potentially does unaligned reads, convert to using streams like the rest of the loading code
-
-    const dmodelh2_t *models_h2 = (const dmodelh2_t *)((const uint8_t *)header + header->lumps[LUMP_MODELS].fileofs);
-    const int models_h2_count = header->lumps[LUMP_MODELS].filelen / sizeof(dmodelh2_t);
+    const int models_h2_count = models_lump.filelen / sizeof(dmodelh2_t);
+    imemstream models_stream(file_data.data() + models_lump.fileofs, models_lump.filelen);
+    models_stream >> endianness<std::endian::little>;
 
     for (int i = 0; i < models_h2_count; ++i) {
-        const dmodelh2_t *model = &models_h2[i];
+        dmodelh2_t model;
+        models_stream >= model;
+        if (!models_stream) {
+            return false;
+        }
 
         // visleafs
-        if (model->visleafs < 0 || model->visleafs > leafs_count)
+        if (model.visleafs < 0 || model.visleafs > leafs_count)
             return false;
 
         // numfaces, firstface
-        if (model->numfaces < 0)
+        if (model.numfaces < 0)
             return false;
-        if (model->firstface < 0)
+        if (model.firstface < 0 || model.firstface > faces_count)
             return false;
-        if (model->firstface + model->numfaces > faces_count)
+        if (model.numfaces > faces_count - model.firstface)
             return false;
 
         // headnode[0]
-        if (model->headnode[0] >= nodes_count)
+        if (model.headnode[0] >= nodes_count)
             return false;
 
         // clipnode headnodes
         for (int j = 1; j < 8; ++j) {
-            if (model->headnode[j] >= clipnodes_count)
+            if (model.headnode[j] >= clipnodes_count)
                 return false;
         }
     }
@@ -1542,17 +1568,25 @@ struct lump_reader
             return;
 
         s.seekg(lump.fileofs);
+        if (!s) {
+            FError("unable to seek to {} lump at offset {}", lumpspec.name, lump.fileofs);
+        }
 
         if (lumpspec.size > 1) {
             for (size_t i = 0; i < length; i++) {
                 T &val = buffer.emplace_back();
                 s >= val;
+                if (!s) {
+                    FError("{} lump is truncated at entry {} of {}", lumpspec.name, i, length);
+                }
             }
         } else {
-            s.read(reinterpret_cast<char *>(buffer.data()), length);
+            const auto requested = static_cast<std::streamsize>(length);
+            s.read(reinterpret_cast<char *>(buffer.data()), requested);
+            if (!s || s.gcount() != requested) {
+                FError("{} lump is truncated (expected {} bytes)", lumpspec.name, length);
+            }
         }
-
-        Q_assert((bool)s);
     }
 
     // read string from stream
@@ -1571,8 +1605,15 @@ struct lump_reader
             return;
 
         s.seekg(lump.fileofs);
+        if (!s) {
+            FError("unable to seek to {} lump at offset {}", lumpspec.name, lump.fileofs);
+        }
 
-        s.read(reinterpret_cast<char *>(buffer.data()), lump.filelen);
+        const auto requested = static_cast<std::streamsize>(lump.filelen);
+        s.read(reinterpret_cast<char *>(buffer.data()), requested);
+        if (!s || s.gcount() != requested) {
+            FError("{} lump is truncated (expected {} bytes)", lumpspec.name, lump.filelen);
+        }
 
         // the last byte is required to be '\0' which was added when the .bsp was
         // written. chop it off now, since we want the std::string to
@@ -1581,8 +1622,6 @@ struct lump_reader
             buffer.resize(lump.filelen - 1);
         }
         // TODO: warn about bad .bsp if missing \0?
-
-        Q_assert((bool)s);
     }
 
     // read structured lump data from stream into struct
@@ -1599,10 +1638,14 @@ struct lump_reader
         Q_assert(lumpspec.size == 1);
 
         s.seekg(lump.fileofs);
+        if (!s) {
+            FError("unable to seek to {} lump at offset {}", lumpspec.name, lump.fileofs);
+        }
 
         buffer.stream_read(s, lump);
-
-        Q_assert((bool)s);
+        if (!s) {
+            FError("{} lump is malformed or truncated", lumpspec.name);
+        }
     }
 };
 
@@ -1653,14 +1696,41 @@ inline void ReadQ2BSP(lump_reader &reader, T &bsp)
     reader.read(Q2_LUMP_AREAPORTALS, bsp.dareaportals);
 }
 
-void bspdata_t::bspxentries::transfer(const char *xname, std::vector<uint8_t> &xdata)
+void bspdata_t::bspxentries::transfer(std::string_view xname, std::vector<uint8_t> &xdata)
 {
-    entries.insert_or_assign(xname, std::move(xdata));
+    entries.insert_or_assign(std::string(xname), std::move(xdata));
 }
 
-void bspdata_t::bspxentries::transfer(const char *xname, std::vector<uint8_t> &&xdata)
+void bspdata_t::bspxentries::transfer(std::string_view xname, std::vector<uint8_t> &&xdata)
 {
-    entries.insert_or_assign(xname, xdata);
+    entries.insert_or_assign(std::string(xname), std::move(xdata));
+}
+
+static bool byte_range_within_file(size_t offset, size_t length, size_t file_size)
+{
+    return offset <= file_size && length <= file_size - offset;
+}
+
+static void validate_bsp_lumps(const std::vector<lump_t> &lumps, const bspversion_t *version, size_t file_size)
+{
+    if (lumps.size() != version->lumps.size()) {
+        FError("header contains {} lumps, expected {}", lumps.size(), version->lumps.size());
+    }
+
+    for (size_t i = 0; i < lumps.size(); ++i) {
+        const lump_t &lump = lumps[i];
+        const lumpspec_t &spec = version->lumps.begin()[i];
+
+        if (lump.fileofs < 0 || lump.filelen < 0) {
+            FError("invalid {} lump range: offset {}, length {}", spec.name, lump.fileofs, lump.filelen);
+        }
+
+        const auto offset = static_cast<size_t>(lump.fileofs);
+        const auto length = static_cast<size_t>(lump.filelen);
+        if (!byte_range_within_file(offset, length, file_size)) {
+            FError("{} lump range (offset {}, length {}) exceeds {} byte file", spec.name, offset, length, file_size);
+        }
+    }
 }
 
 /*
@@ -1670,17 +1740,28 @@ void bspdata_t::bspxentries::transfer(const char *xname, std::vector<uint8_t> &&
  */
 void LoadBSPFile(fs::path &filename, bspdata_t *bspdata)
 {
+    if (!bspdata) {
+        FError("LoadBSPFile requires a valid output object");
+    }
+
     int i;
 
     logging::funcprint("'{}'\n", filename);
 
-    bspdata->file = filename;
+    const fs::path requested_filename = filename;
 
     /* load the file header */
     fs::data file_data = fs::load(filename);
 
     if (!file_data) {
         FError("Unable to load \"{}\"\n", filename);
+    }
+
+    constexpr size_t q1_header_size = sizeof(int32_t) * (1 + (BSP_LUMPS * 2));
+    constexpr size_t q2_header_size = sizeof(int32_t) * (2 + (Q2_HEADER_LUMPS * 2));
+
+    if (file_data->size() < sizeof(int32_t)) {
+        FError("BSP file is too small to contain a version identifier ({} bytes)", file_data->size());
     }
 
     filename = fs::resolveArchivePath(filename);
@@ -1695,70 +1776,111 @@ void LoadBSPFile(fs::path &filename, bspdata_t *bspdata)
     /* check for IBSP */
     bspversion_t temp_version{};
     stream >= temp_version.ident;
+    if (!stream) {
+        FError("unable to read BSP version identifier");
+    }
     stream.seekg(0);
 
     if (temp_version.ident == Q2_BSPIDENT || temp_version.ident == Q2_QBISMIDENT) {
+        if (file_data->size() < q2_header_size) {
+            FError("truncated Quake II BSP header ({} bytes, expected at least {})", file_data->size(), q2_header_size);
+        }
+
         q2_dheader_t q2header;
         stream >= q2header;
+
+        if (!stream) {
+            FError("unable to read Quake II BSP header");
+        }
 
         temp_version.version = q2header.version;
         std::copy(q2header.lumps.begin(), q2header.lumps.end(), std::back_inserter(lumps));
     } else {
+        if (file_data->size() < q1_header_size) {
+            FError("truncated Quake BSP header ({} bytes, expected at least {})", file_data->size(), q1_header_size);
+        }
+
         dheader_t q1header;
         stream >= q1header;
+
+        if (!stream) {
+            FError("unable to read Quake BSP header");
+        }
 
         temp_version.version = std::nullopt;
         std::copy(q1header.lumps.begin(), q1header.lumps.end(), std::back_inserter(lumps));
     }
 
     /* check the file version */
-    if (!BSPVersionSupported(temp_version.ident, temp_version.version, &bspdata->version)) {
+    const bspversion_t *detected_version = nullptr;
+    if (!BSPVersionSupported(temp_version.ident, temp_version.version, &detected_version)) {
         logging::print("BSP is version {}\n", temp_version);
         Error("Sorry, this bsp version is not supported.");
     } else {
+        validate_bsp_lumps(lumps, detected_version, file_data->size());
+
         // special case handling for Hexen II
-        if (bspdata->version->game->id == GAME_QUAKE && isHexen2((dheader_t *)file_data->data(), bspdata->version)) {
-            if (bspdata->version == &bspver_q1) {
-                bspdata->version = &bspver_h2;
-            } else if (bspdata->version == &bspver_bsp2) {
-                bspdata->version = &bspver_h2bsp2;
-            } else if (bspdata->version == &bspver_bsp2rmq) {
-                bspdata->version = &bspver_h2bsp2rmq;
+        if (detected_version->game->id == GAME_QUAKE && isHexen2(*file_data, lumps, detected_version)) {
+            if (detected_version == &bspver_q1) {
+                detected_version = &bspver_h2;
+            } else if (detected_version == &bspver_bsp2) {
+                detected_version = &bspver_h2bsp2;
+            } else if (detected_version == &bspver_bsp2rmq) {
+                detected_version = &bspver_h2bsp2rmq;
             }
         }
 
-        logging::print("BSP is version {}\n", *bspdata->version);
+        logging::print("BSP is version {}\n", *detected_version);
     }
 
-    lump_reader reader{stream, bspdata->version, lumps};
+    lump_reader reader{stream, detected_version, lumps};
+    decltype(bspdata->bsp) parsed_bsp;
 
     /* copy the data */
-    if (bspdata->version == &bspver_q2) {
-        ReadQ2BSP(reader, bspdata->bsp.emplace<q2bsp_t>());
-    } else if (bspdata->version == &bspver_qbism) {
-        ReadQ2BSP(reader, bspdata->bsp.emplace<q2bsp_qbism_t>());
-    } else if (bspdata->version == &bspver_q1 || bspdata->version == &bspver_h2 || bspdata->version == &bspver_hl) {
-        ReadQ1BSP(reader, bspdata->bsp.emplace<bsp29_t>());
-    } else if (bspdata->version == &bspver_bsp2rmq || bspdata->version == &bspver_h2bsp2rmq) {
-        ReadQ1BSP(reader, bspdata->bsp.emplace<bsp2rmq_t>());
-    } else if (bspdata->version == &bspver_bsp2 || bspdata->version == &bspver_h2bsp2) {
-        ReadQ1BSP(reader, bspdata->bsp.emplace<bsp2_t>());
+    if (detected_version == &bspver_q2) {
+        ReadQ2BSP(reader, parsed_bsp.emplace<q2bsp_t>());
+    } else if (detected_version == &bspver_qbism) {
+        ReadQ2BSP(reader, parsed_bsp.emplace<q2bsp_qbism_t>());
+    } else if (detected_version == &bspver_q1 || detected_version == &bspver_h2 || detected_version == &bspver_hl) {
+        ReadQ1BSP(reader, parsed_bsp.emplace<bsp29_t>());
+    } else if (detected_version == &bspver_bsp2rmq || detected_version == &bspver_h2bsp2rmq) {
+        ReadQ1BSP(reader, parsed_bsp.emplace<bsp2rmq_t>());
+    } else if (detected_version == &bspver_bsp2 || detected_version == &bspver_h2bsp2) {
+        ReadQ1BSP(reader, parsed_bsp.emplace<bsp2_t>());
     } else {
         FError("Unknown format");
     }
+
+    bspdata->file = requested_filename;
+    bspdata->version = detected_version;
+    bspdata->loadversion = nullptr;
+    bspdata->bsp = std::move(parsed_bsp);
+
+    // BSPX data is optional and belongs exclusively to the file just loaded.
+    // Clear entries from a previous use of this bspdata_t before probing, and
+    // stage any new entries so malformed metadata cannot leave a partial set.
+    bspdata->bspx.entries.clear();
+    bspdata_t::bspxentries parsed_bspx;
 
     size_t bspxofs;
 
     // detect BSPX
     /*bspx header is positioned exactly+4align at the end of the last lump position (regardless of order)*/
     for (i = 0, bspxofs = 0; i < lumps.size(); i++) {
-        bspxofs = std::max(bspxofs, static_cast<size_t>(lumps[i].fileofs + lumps[i].filelen));
+        const size_t lump_end = static_cast<size_t>(lumps[i].fileofs) + static_cast<size_t>(lumps[i].filelen);
+        bspxofs = std::max(bspxofs, lump_end);
     }
 
+    if (bspxofs > std::numeric_limits<size_t>::max() - 3) {
+        logging::print("WARNING: invalid BSPX offset\n");
+        return;
+    }
     bspxofs = (bspxofs + 3) & ~3;
 
     /*okay, so that's where it *should* be if it exists */
-    if (bspxofs + sizeof(bspx_header_t) <= file_data->size()) {
+    constexpr size_t bspx_header_size = sizeof(uint32_t) * 2;
+    constexpr size_t bspx_lump_size = 24 + (sizeof(uint32_t) * 2);
+    if (byte_range_within_file(bspxofs, bspx_header_size, file_data->size())) {
         stream.seekg(bspxofs);
 
         bspx_header_t bspx;
@@ -1766,6 +1888,14 @@ void LoadBSPFile(fs::path &filename, bspdata_t *bspdata)
 
         if (!stream || memcmp(bspx.id.data(), "BSPX", 4)) {
             logging::print("WARNING: invalid BSPX header\n");
+            return;
+        }
+
+        const size_t lump_headers_offset = bspxofs + bspx_header_size;
+        const size_t max_lump_headers = (file_data->size() - lump_headers_offset) / bspx_lump_size;
+        if (bspx.numlumps > max_lump_headers) {
+            logging::print(
+                "WARNING: invalid BSPX lump count {} (at most {} headers fit)\n", bspx.numlumps, max_lump_headers);
             return;
         }
 
@@ -1777,19 +1907,92 @@ void LoadBSPFile(fs::path &filename, bspdata_t *bspdata)
                 return;
             }
 
-            if (xlump.fileofs > file_data->size() || (xlump.fileofs + xlump.filelen) > file_data->size()) {
+            if (!byte_range_within_file(xlump.fileofs, xlump.filelen, file_data->size())) {
                 logging::print("WARNING: invalid BSPX lump at index {}\n", i);
                 return;
             }
 
-            bspdata->bspx.transfer(xlump.lumpname.data(), std::vector<uint8_t>(file_data->begin() + xlump.fileofs,
-                                                              file_data->begin() + xlump.fileofs + xlump.filelen));
+            const auto name_end = std::find(xlump.lumpname.begin(), xlump.lumpname.end(), '\0');
+            if (name_end == xlump.lumpname.end()) {
+                logging::print("WARNING: unterminated BSPX lump name at index {}\n", i);
+                return;
+            }
+            const std::string_view name(xlump.lumpname.data(), std::distance(xlump.lumpname.begin(), name_end));
+            if (name.empty() || parsed_bspx.entries.contains(std::string(name))) {
+                logging::print("WARNING: invalid or duplicate BSPX lump name at index {}\n", i);
+                return;
+            }
+            parsed_bspx.transfer(name, std::vector<uint8_t>(file_data->begin() + xlump.fileofs,
+                                           file_data->begin() + xlump.fileofs + xlump.filelen));
         }
+
+        bspdata->bspx.entries = std::move(parsed_bspx.entries);
     }
 }
 
 /* ========================================================================= */
 #include <fstream>
+
+static void validate_bspx_for_write(const bspdata_t &bspdata)
+{
+    if (bspdata.bspx.entries.size() > std::numeric_limits<uint32_t>::max()) {
+        FError("too many BSPX lumps ({})", bspdata.bspx.entries.size());
+    }
+
+    for (const auto &[name, data] : bspdata.bspx.entries) {
+        if (name.empty() || name.find('\0') != std::string::npos) {
+            FError("BSPX lump names must be non-empty strings without embedded nulls");
+        }
+        if (name.size() >= bspx_lump_t{}.lumpname.size()) {
+            FError("BSPX lump name '{}' is too long (maximum is 23 bytes)", name);
+        }
+        if (data.size() > std::numeric_limits<uint32_t>::max() ||
+            data.size() > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
+            FError("BSPX lump '{}' is too large ({} bytes)", name, data.size());
+        }
+    }
+}
+
+static void validate_bsp_for_write(const bspdata_t &bspdata)
+{
+    const bspversion_t *version = bspdata.version;
+    bool matches_version = false;
+
+    if (version == &bspver_q1 || version == &bspver_h2 || version == &bspver_hl) {
+        matches_version = std::holds_alternative<bsp29_t>(bspdata.bsp);
+    } else if (version == &bspver_bsp2rmq || version == &bspver_h2bsp2rmq) {
+        matches_version = std::holds_alternative<bsp2rmq_t>(bspdata.bsp);
+    } else if (version == &bspver_bsp2 || version == &bspver_h2bsp2) {
+        matches_version = std::holds_alternative<bsp2_t>(bspdata.bsp);
+    } else if (version == &bspver_q2) {
+        matches_version = std::holds_alternative<q2bsp_t>(bspdata.bsp);
+    } else if (version == &bspver_qbism) {
+        matches_version = std::holds_alternative<q2bsp_qbism_t>(bspdata.bsp);
+    }
+
+    if (!matches_version) {
+        FError("BSP data does not match the requested output format '{}'", version->short_name);
+    }
+
+    const bool expects_hexen2_models = version->game->id == GAME_HEXEN_II;
+    const auto validate_q1_models = [&](const auto &bsp) {
+        const bool has_expected_models = expects_hexen2_models ? std::holds_alternative<dmodelh2_vector>(bsp.dmodels)
+                                                               : std::holds_alternative<dmodelq1_vector>(bsp.dmodels);
+        if (!has_expected_models) {
+            FError("BSP model layout does not match the requested output format '{}'", version->short_name);
+        }
+    };
+
+    if (const auto *bsp = std::get_if<bsp29_t>(&bspdata.bsp)) {
+        validate_q1_models(*bsp);
+    } else if (const auto *bsp = std::get_if<bsp2rmq_t>(&bspdata.bsp)) {
+        validate_q1_models(*bsp);
+    } else if (const auto *bsp = std::get_if<bsp2_t>(&bspdata.bsp)) {
+        validate_q1_models(*bsp);
+    }
+
+    validate_bspx_for_write(bspdata);
+}
 
 struct bspfile_t
 {
@@ -1805,6 +2008,61 @@ struct bspfile_t
     std::ofstream stream;
 
 private:
+    int32_t checked_official_position(std::string_view context)
+    {
+        const std::streampos position = stream.tellp();
+        if (position == std::streampos(-1)) {
+            FError("unable to determine output position while writing {}", context);
+        }
+
+        const std::streamoff offset = static_cast<std::streamoff>(position);
+        if (offset < 0 || static_cast<uint64_t>(offset) > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+            FError("{} exceeds the 2 GiB official BSP file limit", context);
+        }
+
+        return static_cast<int32_t>(offset);
+    }
+
+    uint32_t checked_bspx_position(std::string_view context)
+    {
+        const std::streampos position = stream.tellp();
+        if (position == std::streampos(-1)) {
+            FError("unable to determine output position while writing {}", context);
+        }
+
+        const std::streamoff offset = static_cast<std::streamoff>(position);
+        if (offset < 0 || static_cast<uint64_t>(offset) > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            FError("{} exceeds the 4 GiB BSPX file limit", context);
+        }
+
+        return static_cast<uint32_t>(offset);
+    }
+
+    void finish_official_lump(lump_t &lump, int32_t start, std::string_view name)
+    {
+        if (!stream) {
+            FError("error writing {} lump", name);
+        }
+
+        const int32_t end = checked_official_position(fmt::format("{} lump", name));
+        if (end < start) {
+            FError("output position moved backwards while writing {} lump", name);
+        }
+        lump.fileofs = start;
+        lump.filelen = end - start;
+
+        if (lump.filelen % 4) {
+            const int32_t padding = 4 - (lump.filelen % 4);
+            if (end > std::numeric_limits<int32_t>::max() - padding) {
+                FError("padding {} lump would exceed the 2 GiB official BSP file limit", name);
+            }
+            stream <= padding_n(padding);
+            if (!stream) {
+                FError("error padding {} lump", name);
+            }
+        }
+    }
+
     // write structured lump data from vector
     template<typename T>
     inline void write_lump(size_t lump_num, const std::vector<T> &data)
@@ -1821,20 +2079,22 @@ private:
 
         lump_t &lump = lumps[lump_num];
 
-        lump.fileofs = stream.tellp();
+        if (lumpspec.size != 0 &&
+            data.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()) / lumpspec.size) {
+            FError("{} lump is too large ({} entries)", lumpspec.name, data.size());
+        }
+
+        const size_t expected_size = lumpspec.size * data.size();
+        const int32_t start = checked_official_position(fmt::format("{} lump", lumpspec.name));
 
         for (auto &v : data)
             stream <= v;
 
-        auto written = static_cast<int32_t>(stream.tellp()) - lump.fileofs;
+        finish_official_lump(lump, start, lumpspec.name);
 
-        if (sizeof(T) == 1 || lumpspec.size > 1)
-            Q_assert(written == (lumpspec.size * data.size()));
-
-        lump.filelen = written;
-
-        if (written % 4)
-            stream <= padding_n(4 - (written % 4));
+        if (static_cast<size_t>(lump.filelen) != expected_size) {
+            FError("{} lump serialized to {} bytes, expected {}", lumpspec.name, lump.filelen, expected_size);
+        }
     }
 
     // this is only here to satisfy std::visit
@@ -1857,18 +2117,21 @@ private:
 
         lump_t &lump = lumps[lump_num];
 
-        lump.fileofs = stream.tellp();
+        if (data.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()) - 1 ||
+            data.size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()) - 1) {
+            FError("{} lump is too large ({} bytes)", lumpspec.name, data.size());
+        }
 
-        stream.write(data.c_str(), data.size() + 1); // null terminator
+        const int32_t start = checked_official_position(fmt::format("{} lump", lumpspec.name));
 
-        auto written = static_cast<int32_t>(stream.tellp()) - lump.fileofs;
+        stream.write(data.data(), static_cast<std::streamsize>(data.size()));
+        stream.put('\0');
 
-        Q_assert(written == data.size() + 1);
+        finish_official_lump(lump, start, lumpspec.name);
 
-        lump.filelen = written;
-
-        if (written % 4)
-            stream <= padding_n(4 - (written % 4));
+        if (static_cast<size_t>(lump.filelen) != data.size() + 1) {
+            FError("{} lump serialized to {} bytes, expected {}", lumpspec.name, lump.filelen, data.size() + 1);
+        }
     }
 
     // write structured lump data
@@ -1888,16 +2151,11 @@ private:
 
         lump_t &lump = lumps[lump_num];
 
-        lump.fileofs = stream.tellp();
+        const int32_t start = checked_official_position(fmt::format("{} lump", lumpspec.name));
 
         data.stream_write(stream);
 
-        auto written = static_cast<int32_t>(stream.tellp()) - lump.fileofs;
-
-        lump.filelen = written;
-
-        if (written % 4)
-            stream <= padding_n(4 - (written % 4));
+        finish_official_lump(lump, start, lumpspec.name);
     }
 
 public:
@@ -1954,10 +2212,19 @@ public:
         if (!bspdata.bspx.entries.size())
             return;
 
-        if (stream.tellp() & 3)
+        const uint32_t bspx_start = checked_bspx_position("BSPX header");
+        if ((bspx_start % 4) != 0) {
             FError("BSPX header is misaligned");
+        }
+        constexpr uint64_t bspx_header_size = sizeof(uint32_t) * 2;
+        constexpr uint64_t bspx_lump_header_size = 24 + (sizeof(uint32_t) * 2);
+        const uint64_t header_table_size =
+            bspx_header_size + static_cast<uint64_t>(bspdata.bspx.entries.size()) * bspx_lump_header_size;
+        if (header_table_size > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - bspx_start) {
+            FError("BSPX lump table exceeds the 4 GiB BSPX file limit");
+        }
 
-        stream <= bspx_header_t(bspdata.bspx.entries.size());
+        stream <= bspx_header_t(static_cast<uint32_t>(bspdata.bspx.entries.size()));
 
         auto bspxheader = stream.tellp();
 
@@ -1965,28 +2232,129 @@ public:
         for ([[maybe_unused]] auto &_ : bspdata.bspx.entries) {
             stream <= bspx_lump_t{};
         }
+        if (!stream) {
+            FError("unable to write BSPX lump table");
+        }
 
         std::vector<bspx_lump_t> xlumps;
         xlumps.reserve(bspdata.bspx.entries.size());
 
         for (auto &x : bspdata.bspx.entries) {
             bspx_lump_t &lump = xlumps.emplace_back();
-            lump.filelen = x.second.size();
-            lump.fileofs = stream.tellp();
-            memcpy(lump.lumpname.data(), x.first.c_str(), std::min(x.first.size(), lump.lumpname.size() - 1));
+            const uint32_t offset = checked_bspx_position(fmt::format("BSPX lump '{}'", x.first));
+            const size_t padding = (4 - (x.second.size() % 4)) % 4;
+            if (x.second.size() > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - offset ||
+                padding > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - offset - x.second.size()) {
+                FError("BSPX lump '{}' exceeds the 4 GiB BSPX file limit", x.first);
+            }
 
-            stream.write(reinterpret_cast<const char *>(x.second.data()), x.second.size());
+            lump.filelen = static_cast<uint32_t>(x.second.size());
+            lump.fileofs = static_cast<uint32_t>(offset);
+            memcpy(lump.lumpname.data(), x.first.data(), x.first.size());
 
-            if (x.second.size() % 4)
-                stream <= padding_n(4 - (x.second.size() % 4));
+            stream.write(
+                reinterpret_cast<const char *>(x.second.data()), static_cast<std::streamsize>(x.second.size()));
+            if (!stream) {
+                FError("unable to write BSPX lump '{}'", x.first);
+            }
+
+            if (padding) {
+                stream <= padding_n(padding);
+                if (!stream) {
+                    FError("unable to pad BSPX lump '{}'", x.first);
+                }
+            }
         }
 
         stream.seekp(bspxheader);
+        if (!stream) {
+            FError("unable to seek to BSPX lump headers");
+        }
 
         for (auto &lump : xlumps)
             stream <= lump;
+
+        if (!stream) {
+            FError("unable to finalize BSPX lump headers");
+        }
     }
 };
+
+namespace
+{
+struct staged_bsp_cleanup_t
+{
+    explicit staged_bsp_cleanup_t(fs::path path)
+        : path(std::move(path))
+    {
+    }
+
+    ~staged_bsp_cleanup_t()
+    {
+        if (active) {
+            std::error_code ignored;
+            if (fs::remove(path, ignored) || !ignored) {
+                return;
+            }
+
+            // The staged file may already have inherited read-only
+            // destination permissions when a later rename fails. Restore
+            // owner-write on this private file so Windows can remove it and a
+            // handled failure does not permanently block the next attempt.
+            ignored.clear();
+            fs::permissions(path, fs::perms::owner_write, fs::perm_options::add, ignored);
+            if (!ignored) {
+                fs::remove(path, ignored);
+            }
+        }
+    }
+
+    void release() noexcept { active = false; }
+
+    fs::path path;
+    bool active = true;
+};
+
+static fs::file_status checked_output_status(const fs::path &path, std::string_view description)
+{
+    std::error_code error;
+    const fs::file_status status = fs::symlink_status(path, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
+        FError("unable to inspect {} {}: {}", description, path, error.message());
+    }
+    return status;
+}
+
+static void ensure_output_path_available(const fs::path &path, std::string_view description)
+{
+    if (fs::exists(checked_output_status(path, description))) {
+        FError("{} {} already exists", description, path);
+    }
+}
+
+static void remove_bsp_backup(const fs::path &backup_path, const fs::path &output_path)
+{
+    std::error_code error;
+    if (fs::remove(backup_path, error) || !error) {
+        return;
+    }
+
+    // A replaced read-only file cannot be removed on Windows until its write
+    // permission is restored. This changes only the private backup, never the
+    // newly installed output.
+    std::error_code permission_error;
+    fs::permissions(backup_path, fs::perms::owner_write, fs::perm_options::add, permission_error);
+    if (!permission_error) {
+        error.clear();
+        if (fs::remove(backup_path, error) || !error) {
+            return;
+        }
+    }
+
+    FError("output {} was written, but its temporary backup {} could not be removed: {}", output_path, backup_path,
+        error.message());
+}
+} // namespace
 
 /*
  * =============
@@ -1996,6 +2364,30 @@ public:
  */
 void WriteBSPFile(const fs::path &filename, bspdata_t *bspdata)
 {
+    if (!bspdata || !bspdata->version) {
+        FError("WriteBSPFile requires BSP data with a valid format");
+    }
+
+    // Reject inconsistent in-memory metadata before truncating the destination
+    // or selecting a header union member from the wrong format family.
+    validate_bsp_for_write(*bspdata);
+
+    const fs::file_status destination_status = checked_output_status(filename, "output path");
+    const bool destination_exists = fs::exists(destination_status);
+    if (destination_exists && !fs::is_regular_file(destination_status)) {
+        FError("output path {} exists and is not a regular file", filename);
+    }
+
+    fs::path temporary_path = filename;
+    temporary_path += ".tmp";
+    ensure_output_path_available(temporary_path, "temporary output path");
+
+    fs::path backup_path = filename;
+    backup_path += ".previous.tmp";
+    ensure_output_path_available(backup_path, "backup output path");
+
+    staged_bsp_cleanup_t staged_cleanup(temporary_path);
+
     bspfile_t bspfile{};
 
     bspfile.version = bspdata->version;
@@ -2008,10 +2400,18 @@ void WriteBSPFile(const fs::path &filename, bspdata_t *bspdata)
     }
 
     logging::print("Writing {} as {}\n", filename, *bspdata->version);
-    bspfile.stream.open(filename, std::ios_base::out | std::ios_base::trunc | std::ios_base::binary);
+    bspfile.stream.open(temporary_path, std::ios_base::out | std::ios_base::trunc | std::ios_base::binary);
 
     if (!bspfile.stream)
-        FError("unable to open {} for writing", filename);
+        FError("unable to open {} for writing", temporary_path);
+
+    if (destination_exists && destination_status.permissions() != fs::perms::unknown) {
+        std::error_code error;
+        fs::permissions(temporary_path, destination_status.permissions(), fs::perm_options::replace, error);
+        if (error) {
+            FError("unable to preserve permissions for {}: {}", filename, error.message());
+        }
+    }
 
     bspfile.stream << endianness<std::endian::little>;
 
@@ -2020,6 +2420,9 @@ void WriteBSPFile(const fs::path &filename, bspdata_t *bspdata)
         bspfile.stream <= bspfile.q2header;
     } else {
         bspfile.stream <= bspfile.q1header;
+    }
+    if (!bspfile.stream) {
+        FError("unable to reserve BSP header in {}", temporary_path);
     }
 
     std::visit([&bspfile](auto &&arg) { bspfile.write_bsp(arg); }, bspdata->bsp);
@@ -2034,6 +2437,45 @@ void WriteBSPFile(const fs::path &filename, bspdata_t *bspdata)
         bspfile.stream <= bspfile.q2header;
     } else {
         bspfile.stream <= bspfile.q1header;
+    }
+
+    bspfile.stream.flush();
+    if (!bspfile.stream) {
+        FError("error finalizing BSP file {}", temporary_path);
+    }
+
+    bspfile.stream.close();
+    if (!bspfile.stream) {
+        FError("error closing BSP file {}", temporary_path);
+    }
+
+    std::error_code error;
+    if (destination_exists) {
+        fs::rename(filename, backup_path, error);
+        if (error) {
+            FError("unable to preserve existing output {}: {}", filename, error.message());
+        }
+    }
+
+    fs::rename(temporary_path, filename, error);
+    if (error) {
+        const std::error_code promotion_error = error;
+
+        if (destination_exists) {
+            std::error_code rollback_error;
+            fs::rename(backup_path, filename, rollback_error);
+            if (rollback_error) {
+                FError("unable to install output {}: {}; restoring the previous output also failed: {}", filename,
+                    promotion_error.message(), rollback_error.message());
+            }
+        }
+        FError("unable to install output {}: {}", filename, promotion_error.message());
+    }
+
+    staged_cleanup.release();
+
+    if (destination_exists) {
+        remove_bsp_backup(backup_path, filename);
     }
 }
 

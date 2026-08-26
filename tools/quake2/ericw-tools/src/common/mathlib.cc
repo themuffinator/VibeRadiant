@@ -94,34 +94,68 @@ double Random()
 
 static std::vector<float> NormalizePDF(const std::vector<float> &pdf)
 {
-    float pdfSum = 0.0f;
-    for (float val : pdf) {
-        pdfSum += val;
+    if (pdf.empty()) {
+        return {};
     }
 
-    std::vector<float> normalizedPdf;
-    normalizedPdf.reserve(pdf.size());
-    for (float val : pdf) {
-        normalizedPdf.push_back(val / pdfSum);
+    // Negative and non-finite weights cannot represent probabilities. Treat
+    // them as zero so a single bad input cannot poison the whole CDF with NaN.
+    std::vector<float> normalizedPdf(pdf.size(), 0.0f);
+    double pdfSum = 0.0;
+    for (size_t i = 0; i < pdf.size(); ++i) {
+        if (std::isfinite(pdf[i]) && pdf[i] > 0.0f) {
+            normalizedPdf[i] = pdf[i];
+            pdfSum += pdf[i];
+        }
+    }
+
+    if (!(pdfSum > 0.0) || !std::isfinite(pdfSum)) {
+        // A zero-area polygon still needs a deterministic, usable
+        // distribution. Giving every entry equal weight avoids division by
+        // zero and lets callers fall back to sampling its degenerate faces.
+        const float uniformWeight = 1.0f / static_cast<float>(pdf.size());
+        std::fill(normalizedPdf.begin(), normalizedPdf.end(), uniformWeight);
+        return normalizedPdf;
+    }
+
+    for (float &val : normalizedPdf) {
+        val = static_cast<float>(static_cast<double>(val) / pdfSum);
     }
     return normalizedPdf;
 }
 
 std::vector<float> MakeCDF(const std::vector<float> &pdf)
 {
-    const std::vector<float> normzliedPdf = NormalizePDF(pdf);
+    const std::vector<float> normalizedPdf = NormalizePDF(pdf);
     std::vector<float> cdf;
-    cdf.reserve(normzliedPdf.size());
+    cdf.reserve(normalizedPdf.size());
     float cdfSum = 0.0f;
-    for (float val : normzliedPdf) {
+    for (float val : normalizedPdf) {
         cdfSum += val;
         cdf.push_back(cdfSum);
     }
+
+    // Accumulation can finish a few ULPs either side of one. Pinning the final
+    // bucket keeps samples at exactly 1.0 valid and provides a safe fallback
+    // for round-off in SampleCDF.
+    if (!cdf.empty()) {
+        cdf.back() = 1.0f;
+    }
+
     return cdf;
 }
 
 int SampleCDF(const std::vector<float> &cdf, float sample)
 {
+    if (cdf.empty()) {
+        return -1;
+    }
+
+    if (!std::isfinite(sample)) {
+        sample = 0.0f;
+    }
+    sample = std::clamp(sample, 0.0f, 1.0f);
+
     const size_t size = cdf.size();
     for (size_t i = 0; i < size; i++) {
         float cdfVal = cdf.at(i);
@@ -129,8 +163,9 @@ int SampleCDF(const std::vector<float> &cdf, float sample)
             return i;
         }
     }
-    Q_assert_unreachable();
-    return 0;
+
+    // Be tolerant of caller-provided CDFs whose final value is just below one.
+    return static_cast<int>(size - 1);
 }
 
 static float Gaussian1D(float width, float x, float alpha)
@@ -285,20 +320,21 @@ qvec3f ProjectPointOntoPlane(const qvec4f &plane, const qvec3f &point)
 
 poly_random_point_state_t PolyRandomPoint_Setup(const std::vector<qvec3f> &points)
 {
-    Q_assert(points.size() >= 3);
-
     std::vector<float> triareas;
-    triareas.reserve(points.size() - 2);
+    if (points.size() >= 3) {
+        triareas.reserve(points.size() - 2);
+    }
 
-    const qvec3f &v0 = points.at(0);
-    for (int i = 2; i < points.size(); i++) {
-        const qvec3f &v1 = points.at(i - 1);
-        const qvec3f &v2 = points.at(i);
+    if (!points.empty()) {
+        const qvec3f &v0 = points.front();
+        for (size_t i = 2; i < points.size(); ++i) {
+            const qvec3f &v1 = points.at(i - 1);
+            const qvec3f &v2 = points.at(i);
 
-        const float triarea = qv::TriangleArea(v0, v1, v2);
-        Q_assert(triarea >= 0.0f);
+            const float triarea = qv::TriangleArea(v0, v1, v2);
 
-        triareas.push_back(triarea);
+            triareas.push_back(triarea);
+        }
     }
     const std::vector<float> cdf = MakeCDF(triareas);
 
@@ -312,16 +348,31 @@ poly_random_point_state_t PolyRandomPoint_Setup(const std::vector<qvec3f> &point
 // r1, r2, r3 must be in [0, 1]
 qvec3f PolyRandomPoint(const poly_random_point_state_t &state, float r1, float r2, float r3)
 {
+    if (state.points.empty()) {
+        return {};
+    }
+    if (state.points.size() < 3) {
+        return state.points.front();
+    }
+
     // Pick a random triangle, with probability proportional to triangle area
     const float uniformRandom = r1;
     const int whichTri = SampleCDF(state.triareas_cdf, uniformRandom);
 
-    Q_assert(whichTri >= 0 && whichTri < state.triareas.size());
+    if (whichTri < 0) {
+        return state.points.front();
+    }
+    const size_t whichTriIndex = static_cast<size_t>(whichTri);
+    if (whichTriIndex >= state.triareas.size() || whichTriIndex > state.points.size() - 3) {
+        return state.points.front();
+    }
 
     // Pick random barycentric coords.
+    r2 = std::isfinite(r2) ? std::clamp(r2, 0.0f, 1.0f) : 0.0f;
+    r3 = std::isfinite(r3) ? std::clamp(r3, 0.0f, 1.0f) : 0.0f;
     const qvec3f bary = qv::Barycentric_Random(r2, r3);
-    const qvec3f point =
-        qv::Barycentric_ToPoint(bary, state.points.at(0), state.points.at(1 + whichTri), state.points.at(2 + whichTri));
+    const qvec3f point = qv::Barycentric_ToPoint(
+        bary, state.points.at(0), state.points.at(1 + whichTriIndex), state.points.at(2 + whichTriIndex));
 
     return point;
 }

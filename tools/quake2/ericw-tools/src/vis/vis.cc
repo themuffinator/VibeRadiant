@@ -7,9 +7,12 @@
 #include <common/parallel.hh>
 
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <bit> // for std::countr_zero
+#include <functional>
 #include <numeric> // for std::accumulate
+#include <type_traits>
 
 #include <fmt/chrono.h>
 
@@ -50,8 +53,8 @@ void vis_settings::initialize(int argc, const char **argv)
     try {
         common_settings::initialize(argc - 1, argv + 1);
 
-        if (remainder.size() <= 0 || remainder.size() > 2) {
-            print_help(true);
+        if (remainder.empty() || remainder.size() > 2) {
+            throw parse_exception("expected one or two positional arguments");
         }
 
         sourceMap = DefaultExtension(remainder[0], "bsp");
@@ -60,7 +63,7 @@ void vis_settings::initialize(int argc, const char **argv)
         logging::print("ERROR OCCURRED WHEN TRYING TO PARSE ARGUMENTS:\n");
         logging::print(ex.what());
         logging::print("\n\n");
-        throw settings::quit_after_help_exception();
+        throw settings::quit_after_help_exception(1);
     }
 }
 } // namespace settings
@@ -68,6 +71,52 @@ void vis_settings::initialize(int argc, const char **argv)
 settings::vis_settings vis_options;
 
 fs::path portalfile, statefile, statetmpfile;
+uint64_t portal_topology_digest = 0;
+
+namespace
+{
+void DigestByte(uint64_t &digest, uint8_t value)
+{
+    constexpr uint64_t FNV_PRIME = 1099511628211ull;
+    digest ^= value;
+    digest *= FNV_PRIME;
+}
+
+template<typename T>
+void DigestInteger(uint64_t &digest, T value)
+{
+    using unsigned_t = std::make_unsigned_t<T>;
+    unsigned_t bits = static_cast<unsigned_t>(value);
+    for (size_t i = 0; i < sizeof(bits); ++i) {
+        DigestByte(digest, static_cast<uint8_t>(bits & 0xffu));
+        bits >>= 8;
+    }
+}
+
+} // namespace
+
+uint64_t prt_topology_digest(const prtfile_t &prtfile)
+{
+    uint64_t digest = 14695981039346656037ull;
+    DigestInteger(digest, static_cast<int32_t>(prtfile.portalleafs));
+    DigestInteger(digest, static_cast<int32_t>(prtfile.portalleafs_real));
+    DigestInteger(digest, static_cast<uint64_t>(prtfile.portals.size()));
+    for (const prtfile_portal_t &portal : prtfile.portals) {
+        DigestInteger(digest, static_cast<int32_t>(portal.leafnums[0]));
+        DigestInteger(digest, static_cast<int32_t>(portal.leafnums[1]));
+        DigestInteger(digest, static_cast<uint64_t>(portal.winding.size()));
+        for (const qvec3d &point : portal.winding) {
+            for (size_t component = 0; component < 3; ++component) {
+                DigestInteger(digest, std::bit_cast<uint64_t>(point[component]));
+            }
+        }
+    }
+    DigestInteger(digest, static_cast<uint64_t>(prtfile.dleafinfos.size()));
+    for (const prtfile_dleafinfo_t &leaf : prtfile.dleafinfos) {
+        DigestInteger(digest, static_cast<int32_t>(leaf.cluster));
+    }
+    return digest;
+}
 
 /*
   ==================
@@ -100,7 +149,17 @@ viswinding_t *AllocStackWinding(pstack_t &stack)
 */
 void FreeStackWinding(viswinding_t *&w, pstack_t &stack)
 {
-    if (w >= stack.windings && w <= &stack.windings[STACK_WINDINGS]) {
+    if (!w) {
+        return;
+    }
+
+    viswinding_t *const begin = stack.windings;
+    viswinding_t *const end = begin + STACK_WINDINGS;
+    const std::less<viswinding_t *> less;
+
+    // std::less provides a strict total order for unrelated pointers. Built-in
+    // relational comparisons do not, and the end pointer is not an element.
+    if (!less(w, begin) && less(w, end)) {
         size_t i = w - stack.windings;
         if (!stack.windings_used[i])
             FError("winding already freed");
@@ -225,9 +284,139 @@ noclip:
 //============================================================================
 
 #include <mutex>
+#include <shared_mutex>
 
-static std::mutex portal_mutex;
-static std::atomic_int64_t portalIndex;
+static std::shared_mutex portal_mutex;
+static constexpr size_t INVALID_HEAP_POSITION = std::numeric_limits<size_t>::max();
+static std::vector<size_t> portal_heap;
+static std::vector<size_t> portal_heap_positions;
+
+size_t CheckedPortalIndex(const visportal_t *portal)
+{
+    if (portal == nullptr || portals.empty()) {
+        FError("invalid portal reference");
+    }
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(portals.data());
+    const uintptr_t address = reinterpret_cast<uintptr_t>(portal);
+    if (portals.size() > (std::numeric_limits<uintptr_t>::max() - base) / sizeof(visportal_t)) {
+        FError("portal storage exceeds the addressable range");
+    }
+    const uintptr_t end = base + portals.size() * sizeof(visportal_t);
+    if (address < base || address >= end || (address - base) % sizeof(visportal_t) != 0) {
+        FError("invalid portal reference");
+    }
+    return static_cast<size_t>((address - base) / sizeof(visportal_t));
+}
+
+portal_visibility_intersection_t IntersectPortalVisibility(const visportal_t &portal,
+    const leafbits_t &previous_mightsee, const leafbits_t &already_visible, leafbits_t &intersection)
+{
+    if (portalleafs < 0 || previous_mightsee.size() != static_cast<size_t>(portalleafs) ||
+        already_visible.size() != static_cast<size_t>(portalleafs) ||
+        intersection.size() != static_cast<size_t>(portalleafs)) {
+        FError("portal visibility intersection has inconsistent dimensions");
+    }
+
+    std::shared_lock lock(portal_mutex);
+    if (portal.status != pstat_none && portal.status != pstat_working && portal.status != pstat_done) {
+        FError("portal has invalid visibility status {}", static_cast<int>(portal.status));
+    }
+    const bool exact = portal.status == pstat_done;
+    const leafbits_t &source = exact ? portal.visbits : portal.mightsee;
+    if (source.size() != static_cast<size_t>(portalleafs)) {
+        FError("portal visibility source has an inconsistent size");
+    }
+
+    uint32_t more = 0;
+    const size_t numblocks = (static_cast<size_t>(portalleafs) + leafbits_t::mask) >> leafbits_t::shift;
+    for (size_t block = 0; block < numblocks; ++block) {
+        intersection.data()[block] = previous_mightsee.data()[block] & source.data()[block];
+        more |= intersection.data()[block] & ~already_visible.data()[block];
+    }
+    return {more, exact};
+}
+
+static bool PortalPriorityLess(size_t lhs, size_t rhs)
+{
+    const visportal_t &left = portals[lhs];
+    const visportal_t &right = portals[rhs];
+    return left.nummightsee < right.nummightsee || (left.nummightsee == right.nummightsee && lhs < rhs);
+}
+
+static void PortalHeapSwap(size_t lhs, size_t rhs)
+{
+    std::swap(portal_heap[lhs], portal_heap[rhs]);
+    portal_heap_positions[portal_heap[lhs]] = lhs;
+    portal_heap_positions[portal_heap[rhs]] = rhs;
+}
+
+static void PortalHeapSiftUp(size_t position)
+{
+    while (position) {
+        const size_t parent = (position - 1) / 2;
+        if (!PortalPriorityLess(portal_heap[position], portal_heap[parent])) {
+            break;
+        }
+        PortalHeapSwap(position, parent);
+        position = parent;
+    }
+}
+
+static void PortalHeapSiftDown(size_t position)
+{
+    while (position < portal_heap.size()) {
+        const size_t left = position * 2 + 1;
+        if (left >= portal_heap.size()) {
+            break;
+        }
+        const size_t right = left + 1;
+        size_t best = left;
+        if (right < portal_heap.size() && PortalPriorityLess(portal_heap[right], portal_heap[left])) {
+            best = right;
+        }
+        if (!PortalPriorityLess(portal_heap[best], portal_heap[position])) {
+            break;
+        }
+        PortalHeapSwap(position, best);
+        position = best;
+    }
+}
+
+static void InitializePortalHeap()
+{
+    portal_heap.clear();
+    portal_heap.reserve(portals.size());
+    portal_heap_positions.assign(portals.size(), INVALID_HEAP_POSITION);
+
+    for (size_t i = 0; i < portals.size(); ++i) {
+        if (portals[i].status != pstat_none) {
+            continue;
+        }
+        if (portals[i].nummightsee < 0) {
+            FError("portal {} has an invalid might-see count {}", i, portals[i].nummightsee);
+        }
+        portal_heap_positions[i] = portal_heap.size();
+        portal_heap.push_back(i);
+    }
+
+    for (size_t position = portal_heap.size() / 2; position-- > 0;) {
+        PortalHeapSiftDown(position);
+    }
+}
+
+static void PortalHeapPriorityDecreased(visportal_t *portal)
+{
+    const size_t portal_index = CheckedPortalIndex(portal);
+    if (portal_index >= portal_heap_positions.size()) {
+        FError("invalid portal priority update");
+    }
+    const size_t position = portal_heap_positions[portal_index];
+    if (position == INVALID_HEAP_POSITION || position >= portal_heap.size()) {
+        FError("portal priority update references a non-pending portal");
+    }
+    PortalHeapSiftUp(position);
+}
 
 /*
   =============
@@ -240,25 +429,26 @@ static std::atomic_int64_t portalIndex;
 */
 visportal_t *GetNextPortal()
 {
-    visportal_t *ret = nullptr;
-    uint32_t min = INT_MAX;
-
-    portal_mutex.lock();
-
-    for (auto &p : portals) {
-        if (p.nummightsee < min && p.status == pstat_none) {
-            min = p.nummightsee;
-            ret = &p;
-        }
+    std::scoped_lock lock(portal_mutex);
+    if (portal_heap.empty()) {
+        return nullptr;
     }
 
-    if (ret) {
-        ret->status = pstat_working;
+    const size_t portal_index = portal_heap.front();
+    const size_t last = portal_heap.size() - 1;
+    PortalHeapSwap(0, last);
+    portal_heap.pop_back();
+    portal_heap_positions[portal_index] = INVALID_HEAP_POSITION;
+    if (!portal_heap.empty()) {
+        PortalHeapSiftDown(0);
     }
 
-    portal_mutex.unlock();
-
-    return ret;
+    visportal_t &result = portals[portal_index];
+    if (result.status != pstat_none) {
+        FError("portal work heap contains a non-pending portal");
+    }
+    result.status = pstat_working;
+    return &result;
 }
 
 /*
@@ -282,7 +472,11 @@ static void UpdateMightsee(visstats_t &stats, const leaf_t &source, const leaf_t
         }
         if (p->mightsee[leafnum]) {
             p->mightsee[leafnum] = false;
+            if (p->nummightsee <= 0) {
+                FError("portal might-see count underflow");
+            }
             p->nummightsee--;
+            PortalHeapPriorityDecreased(p);
             stats.c_mightseeupdate++;
         }
     }
@@ -300,9 +494,13 @@ static void UpdateMightsee(visstats_t &stats, const leaf_t &source, const leaf_t
 */
 static void PortalCompleted(visstats_t &stats, visportal_t *completed)
 {
-    portal_mutex.lock();
+    std::scoped_lock lock(portal_mutex);
 
     completed->status = pstat_done;
+
+    if (completed->leaf < 0 || static_cast<size_t>(completed->leaf) >= leafs.size()) {
+        FError("completed portal references invalid leaf {}", completed->leaf);
+    }
 
     /*
      * For each portal on the leaf, check the leafs we eliminated from
@@ -316,8 +514,9 @@ static void PortalCompleted(visstats_t &stats, visportal_t *completed)
 
         auto might = p->mightsee.data();
         auto vis = p->visbits.data();
-        int numblocks = (portalleafs + leafbits_t::mask) >> leafbits_t::shift;
-        for (int j = 0; j < numblocks; j++) {
+        const size_t numblocks = (static_cast<size_t>(portalleafs) >> leafbits_t::shift) +
+                                 ((static_cast<size_t>(portalleafs) & leafbits_t::mask) != 0);
+        for (size_t j = 0; j < numblocks; j++) {
             uint32_t changed = might[j] & ~vis[j];
             if (!changed)
                 continue;
@@ -344,13 +543,14 @@ static void PortalCompleted(visstats_t &stats, visportal_t *completed)
             while (changed) {
                 int bit = std::countr_zero(changed);
                 changed &= ~nth_bit(bit);
-                int leafnum = (j << leafbits_t::shift) + bit;
+                const size_t leafnum = (j << leafbits_t::shift) + static_cast<size_t>(bit);
+                if (leafnum >= leafs.size()) {
+                    FError("portal visibility contains an out-of-range padding bit");
+                }
                 UpdateMightsee(stats, leafs[leafnum], myleaf);
             }
         }
     }
-
-    portal_mutex.unlock();
 }
 
 qtime_point starttime, endtime, statetime;
@@ -363,14 +563,15 @@ static duration stateinterval;
 */
 static visstats_t LeafThread()
 {
-    portal_mutex.lock();
-    /* Save state if sufficient time has elapsed */
-    auto now = I_FloatTime();
-    if (now > statetime + stateinterval) {
-        statetime = now;
-        SaveVisState();
+    {
+        std::scoped_lock lock(portal_mutex);
+        /* Save state if sufficient time has elapsed */
+        auto now = I_FloatTime();
+        if (now > statetime + stateinterval) {
+            statetime = now;
+            SaveVisState();
+        }
     }
-    portal_mutex.unlock();
 
     visportal_t *p = GetNextPortal();
     if (!p)
@@ -397,17 +598,45 @@ int64_t totalvis;
 
 static std::vector<uint8_t> compressed;
 
-static void ClusterFlow(int clusternum, leafbits_t &buffer, mbsp_t *bsp)
+static size_t CheckedVisHeaderSize(const mvis_t &vis)
+{
+    constexpr size_t fixed_header_size = sizeof(int32_t);
+    constexpr size_t cluster_header_size = sizeof(int32_t) * 2;
+    if (vis.bit_offsets.size() >
+        (static_cast<size_t>(std::numeric_limits<int32_t>::max()) - fixed_header_size) / cluster_header_size) {
+        FError("visibility header exceeds the BSP offset limit");
+    }
+    return fixed_header_size + vis.bit_offsets.size() * cluster_header_size;
+}
+
+static uint32_t CheckedOriginalVisMapSize(size_t leaf_count)
+{
+    if (leaf_count > std::numeric_limits<size_t>::max() - 7) {
+        FError("uncompressed visibility row size overflows this platform");
+    }
+    const size_t row_size = (leaf_count + 7) / 8;
+    if (row_size && leaf_count > std::numeric_limits<size_t>::max() / row_size) {
+        FError("uncompressed visibility data size overflows this platform");
+    }
+    const size_t total_size = leaf_count * row_size;
+    if (total_size > std::numeric_limits<uint32_t>::max()) {
+        FError("uncompressed visibility data is too large");
+    }
+    return static_cast<uint32_t>(total_size);
+}
+
+static int ClusterFlow(int clusternum, leafbits_t &buffer, mbsp_t *bsp)
 {
     /*
      * Collect visible bits from all portals into buffer
      */
     leaf_t *leaf = &leafs[clusternum];
-    int numblocks = (portalleafs + leafbits_t::mask) >> leafbits_t::shift;
+    const size_t numblocks = (static_cast<size_t>(portalleafs) >> leafbits_t::shift) +
+                             ((static_cast<size_t>(portalleafs) & leafbits_t::mask) != 0);
     for (const visportal_t *p : leaf->portals) {
         if (p->status != pstat_done)
             FError("portal not done");
-        for (int j = 0; j < numblocks; j++)
+        for (size_t j = 0; j < numblocks; j++)
             buffer.data()[j] |= p->visbits.data()[j];
     }
 
@@ -464,13 +693,19 @@ static void ClusterFlow(int clusternum, leafbits_t &buffer, mbsp_t *bsp)
 
     /* Allocate for worst case where RLE might grow the data (unlikely) */
     if (bsp->loadversion->game->id == GAME_QUAKE_II) {
-        CompressRow(outbuffer, (portalleafs + 7) >> 3, std::back_inserter(compressed));
+        CompressRow(outbuffer, (static_cast<size_t>(portalleafs) + 7) >> 3, std::back_inserter(compressed));
     } else {
-        CompressRow(outbuffer, (portalleafs_real + 7) >> 3, std::back_inserter(compressed));
+        CompressRow(outbuffer, (static_cast<size_t>(portalleafs_real) + 7) >> 3, std::back_inserter(compressed));
     }
 
     /* leaf 0 is a common solid */
-    int32_t visofs = vismap.size();
+    const size_t vis_header_size = CheckedVisHeaderSize(bsp->dvis);
+    if (vismap.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()) - vis_header_size ||
+        compressed.size() >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max()) - vis_header_size - vismap.size()) {
+        FError("compressed visibility data exceeds the BSP offset limit");
+    }
+    const int32_t visofs = static_cast<int32_t>(vismap.size());
 
     bsp->dvis.set_bit_offset(VIS_PVS, clusternum, visofs);
 
@@ -484,6 +719,52 @@ static void ClusterFlow(int clusternum, leafbits_t &buffer, mbsp_t *bsp)
     }
 
     std::copy(compressed.begin(), compressed.end(), std::back_inserter(vismap));
+
+    return numvis;
+}
+
+visibility_summary_t summarize_visibility(std::span<const int> visible_counts, int possible_count)
+{
+    visibility_summary_t summary;
+    if (visible_counts.empty() || possible_count <= 0) {
+        return summary;
+    }
+
+    summary.rows = visible_counts.size();
+    summary.minimum = visible_counts.front();
+    summary.maximum = visible_counts.front();
+
+    double sum = 0;
+    for (const int count : visible_counts) {
+        summary.minimum = std::min(summary.minimum, count);
+        summary.maximum = std::max(summary.maximum, count);
+        sum += count;
+    }
+
+    summary.mean = sum / static_cast<double>(summary.rows);
+    double squared_deviation_sum = 0;
+    for (const int count : visible_counts) {
+        const double deviation = count - summary.mean;
+        squared_deviation_sum += deviation * deviation;
+    }
+    summary.standard_deviation = std::sqrt(squared_deviation_sum / static_cast<double>(summary.rows));
+    summary.percentage = (summary.mean * 100.0) / possible_count;
+    return summary;
+}
+
+std::vector<int> expand_leaf_visibility_counts(
+    std::span<const int> cluster_visible_counts, std::span<const mleaf_t> real_leaves)
+{
+    std::vector<int> result;
+    result.reserve(real_leaves.size());
+    for (size_t leafnum = 0; leafnum < real_leaves.size(); ++leafnum) {
+        const int cluster = real_leaves[leafnum].cluster;
+        if (cluster < 0 || static_cast<size_t>(cluster) >= cluster_visible_counts.size()) {
+            FError("real leaf {} references invalid visibility cluster {}", leafnum + 1, cluster);
+        }
+        result.push_back(cluster_visible_counts[cluster]);
+    }
+    return result;
 }
 
 /*
@@ -505,19 +786,19 @@ visstats_t CalcPortalVis(const mbsp_t *bsp)
     /*
      * Count the already completed portals in case we loaded previous state
      */
-    int32_t startcount = 0;
+    size_t startcount = 0;
     for (auto &p : portals) {
         if (p.status == pstat_done) {
             startcount++;
         }
     }
 
-    portalIndex = startcount;
+    InitializePortalHeap();
 
     std::vector<visstats_t> stats_perportal;
-    stats_perportal.resize(numportals * 2);
+    stats_perportal.resize(portals.size());
 
-    logging::parallel_for(startcount, numportals * 2, [&](size_t i) { stats_perportal[i] = LeafThread(); });
+    logging::parallel_for(startcount, portals.size(), [&](size_t i) { stats_perportal[i] = LeafThread(); });
 
     const visstats_t stats = std::accumulate(stats_perportal.begin(), stats_perportal.end(), visstats_t{});
 
@@ -554,9 +835,23 @@ visstats_t CalcVis(mbsp_t *bsp)
     //
     logging::print("Expanding clusters...\n");
     leafbits_t buffer(portalleafs);
+    std::vector<int> cluster_visible_counts(static_cast<size_t>(portalleafs));
     for (int i = 0; i < portalleafs; i++) {
-        ClusterFlow(i, buffer, bsp);
+        cluster_visible_counts[i] = ClusterFlow(i, buffer, bsp);
         buffer.clear();
+    }
+
+    std::vector<int> visible_counts;
+    if (bsp->loadversion->game->id == GAME_QUAKE_II) {
+        visible_counts = std::move(cluster_visible_counts);
+    } else {
+        if (portalleafs_real < 0 || bsp->dleafs.empty() ||
+            static_cast<size_t>(portalleafs_real) > bsp->dleafs.size() - 1) {
+            FError("portal file real-leaf count {} exceeds BSP leaf count {}", portalleafs_real,
+                bsp->dleafs.empty() ? 0 : bsp->dleafs.size() - 1);
+        }
+        visible_counts = expand_leaf_visibility_counts(cluster_visible_counts,
+            std::span<const mleaf_t>(bsp->dleafs).subspan(1, static_cast<size_t>(portalleafs_real)));
     }
 
     int64_t avg = totalvis;
@@ -571,6 +866,14 @@ visstats_t CalcVis(mbsp_t *bsp)
         logging::print("average leafs visible: {}\n", avg);
     }
 
+    const int possible_count = bsp->loadversion->game->id == GAME_QUAKE_II ? portalleafs : portalleafs_real;
+    const visibility_summary_t summary = summarize_visibility(visible_counts, possible_count);
+    if (summary.rows != static_cast<size_t>(possible_count)) {
+        FError("visibility summary has {} rows, expected {}", summary.rows, possible_count);
+    }
+    logging::print("visibility distribution: min {}, max {}, stddev {:.2f}, mean {:.2f}%\n", summary.minimum,
+        summary.maximum, summary.standard_deviation, summary.percentage);
+
     return stats;
 }
 
@@ -578,6 +881,32 @@ visstats_t CalcVis(mbsp_t *bsp)
 
 #include <fstream>
 #include <common/prtfile.hh>
+
+void validate_prt_leaf_mapping_cardinality(const prtfile_t &prtfile, const mbsp_t &bsp)
+{
+    // Q2 BSPs store cluster membership natively; their PRT1 count is a
+    // cluster count rather than a world-model leaf count.
+    if (bsp.loadversion->game->id == GAME_QUAKE_II) {
+        return;
+    }
+
+    if (bsp.dmodels.empty() || bsp.dmodels[0].visleafs < 0) {
+        FError("BSP contains an invalid world-model visibility leaf count");
+    }
+
+    const size_t expected_real_leafs = static_cast<size_t>(bsp.dmodels[0].visleafs);
+    if (static_cast<size_t>(prtfile.portalleafs_real) != expected_real_leafs ||
+        prtfile.dleafinfos.size() != expected_real_leafs + 1) {
+        FError("portal file describes {} real leaves, but the BSP world model has {}", prtfile.portalleafs_real,
+            expected_real_leafs);
+    }
+
+    // Inline models may legitimately append more BSP leaves. Only the world
+    // model's leaf prefix is represented by the portal file.
+    if (bsp.dleafs.empty() || expected_real_leafs > bsp.dleafs.size() - 1) {
+        FError("BSP has too few leaf records for its world-model visibility leaf count");
+    }
+}
 
 /*
   ============
@@ -588,17 +917,30 @@ static void LoadPortals(const fs::path &name, mbsp_t *bsp)
 {
     const prtfile_t prtfile = LoadPrtFile(name, bsp->loadversion);
 
+    portal_topology_digest = prt_topology_digest(prtfile);
+
     portalleafs = prtfile.portalleafs;
     portalleafs_real = prtfile.portalleafs_real;
 
-    /* Allocate for worst case where RLE might grow the data (unlikely) */
-    if (bsp->loadversion->game->id == GAME_QUAKE_II) {
-        compressed.reserve(std::max(1, (portalleafs * 2) / 8));
-    } else {
-        compressed.reserve(std::max(1, (portalleafs_real * 2) / 8));
+    if (portalleafs <= 0) {
+        FError("portal file contains no clusters");
+    }
+    if (bsp->loadversion->game->id != GAME_QUAKE_II && portalleafs_real <= 0) {
+        FError("portal file contains no real leaves");
+    }
+    validate_prt_leaf_mapping_cardinality(prtfile, *bsp);
+    if (prtfile.portals.size() > static_cast<size_t>(std::numeric_limits<int>::max() / 2)) {
+        FError("portal file contains too many portals");
     }
 
-    numportals = prtfile.portals.size();
+    /* Allocate for worst case where RLE might grow the data (unlikely) */
+    if (bsp->loadversion->game->id == GAME_QUAKE_II) {
+        compressed.reserve(std::max<size_t>(1, static_cast<size_t>(portalleafs) / 4));
+    } else {
+        compressed.reserve(std::max<size_t>(1, static_cast<size_t>(portalleafs_real) / 4));
+    }
+
+    numportals = static_cast<int>(prtfile.portals.size());
 
     if (bsp->loadversion->game->id != GAME_QUAKE_II) {
         // since q2bsp has native cluster support, we shouldn't look at portalleafs_real at all.
@@ -607,32 +949,50 @@ static void LoadPortals(const fs::path &name, mbsp_t *bsp)
     logging::print("{:6} clusters\n", portalleafs);
     logging::print("{:6} portals\n", numportals);
 
-    leafbytes = ((portalleafs + 63) & ~63) >> 3;
+    const auto padded_leaf_bytes = [](int count) -> int {
+        const size_t bytes = ((static_cast<size_t>(count) + 63) & ~size_t{63}) >> 3;
+        if (bytes > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            FError("portal file contains too many leaves");
+        }
+        return static_cast<int>(bytes);
+    };
+
+    leafbytes = padded_leaf_bytes(portalleafs);
     leaflongs = leafbytes / sizeof(long);
     if (bsp->loadversion->game->id == GAME_QUAKE_II) {
         // not used in Q2
         leafbytes_real = 0;
     } else {
-        leafbytes_real = ((portalleafs_real + 63) & ~63) >> 3;
+        leafbytes_real = padded_leaf_bytes(portalleafs_real);
     }
 
     // each file portal is split into two memory portals
     portals.resize(numportals * 2);
     leafs.resize(portalleafs);
 
-    if (bsp->loadversion->game->id == GAME_QUAKE_II) {
-        originalvismapsize = portalleafs * ((portalleafs + 7) / 8);
-    } else {
-        originalvismapsize = portalleafs_real * ((portalleafs_real + 7) / 8);
-    }
+    const size_t original_leaf_count = bsp->loadversion->game->id == GAME_QUAKE_II
+                                           ? static_cast<size_t>(portalleafs)
+                                           : static_cast<size_t>(portalleafs_real);
+    originalvismapsize = CheckedOriginalVisMapSize(original_leaf_count);
 
     bsp->dvis.resize(portalleafs);
 
-    vismap.reserve(originalvismapsize * 2);
+    if (static_cast<size_t>(originalvismapsize) <=
+        std::min(vismap.max_size(), static_cast<size_t>(std::numeric_limits<int32_t>::max())) / 2) {
+        vismap.reserve(static_cast<size_t>(originalvismapsize) * 2);
+    }
 
     auto dest_portal_it = portals.begin();
 
     for (const auto &sourceportal : prtfile.portals) {
+        if (sourceportal.leafnums[0] < 0 || sourceportal.leafnums[0] >= portalleafs || sourceportal.leafnums[1] < 0 ||
+            sourceportal.leafnums[1] >= portalleafs) {
+            FError("portal references an out-of-range cluster");
+        }
+        if (sourceportal.winding.size() < 3 || sourceportal.winding.size() > MAX_WINDING) {
+            FError("portal has invalid winding point count {}", sourceportal.winding.size());
+        }
+
         qplane3d plane;
 
         {
@@ -674,6 +1034,9 @@ static void LoadPortals(const fs::path &name, mbsp_t *bsp)
 
     // Copy cluster mapping from .prt file
     for (int i = 1; i < prtfile.dleafinfos.size(); ++i) {
+        if (prtfile.dleafinfos[i].cluster < 0 || prtfile.dleafinfos[i].cluster >= portalleafs) {
+            FError("portal leaf {} references out-of-range cluster {}", i, prtfile.dleafinfos[i].cluster);
+        }
         bsp->dleafs[i].cluster = prtfile.dleafinfos[i].cluster;
     }
 }
@@ -702,8 +1065,10 @@ void vis_reset()
     portalfile = fs::path();
     statefile = fs::path();
     statetmpfile = fs::path();
+    portal_topology_digest = 0;
 
-    portalIndex = 0;
+    portal_heap.clear();
+    portal_heap_positions.clear();
 
     starttime = {};
     endtime = {};
@@ -717,7 +1082,7 @@ void vis_reset()
     vis::extended_texinfo_flags.clear();
 }
 
-int vis_main(int argc, const char **argv)
+static int vis_main_impl(int argc, const char **argv)
 {
     vis_reset();
 
@@ -745,7 +1110,9 @@ int vis_main(int argc, const char **argv)
     bspdata.version->game->init_filesystem(vis_options.sourceMap, vis_options);
 
     loadversion = bspdata.version;
-    ConvertBSPFormat(&bspdata, &bspver_generic);
+    if (!ConvertBSPFormat(&bspdata, &bspver_generic)) {
+        FError("couldn't convert {} to the generic BSP representation", vis_options.sourceMap);
+    }
 
     mbsp_t &bsp = std::get<mbsp_t>(bspdata.bsp);
 
@@ -756,13 +1123,15 @@ int vis_main(int argc, const char **argv)
             FError("need a Q2-esque BSP for -phsonly");
         }
 
-        portalleafs = bsp.dvis.bit_offsets.size();
+        if (bsp.dvis.bit_offsets.empty() ||
+            bsp.dvis.bit_offsets.size() > static_cast<size_t>(std::numeric_limits<int>::max() - 63)) {
+            FError("BSP contains an invalid visibility cluster count");
+        }
+        portalleafs = static_cast<int>(bsp.dvis.bit_offsets.size());
         leafbytes = ((portalleafs + 63) & ~63) >> 3;
         leaflongs = leafbytes / sizeof(long);
 
-        if (bsp.loadversion->game->id == GAME_QUAKE_II) {
-            originalvismapsize = portalleafs * ((portalleafs + 7) / 8);
-        }
+        originalvismapsize = CheckedOriginalVisMapSize(static_cast<size_t>(portalleafs));
     } else {
         portalfile = fs::path(vis_options.sourceMap).replace_extension("prt");
         LoadPortals(portalfile, &bsp);
@@ -771,9 +1140,9 @@ int vis_main(int argc, const char **argv)
         statetmpfile = fs::path(vis_options.sourceMap).replace_extension("vi0");
 
         if (bsp.loadversion->game->id != GAME_QUAKE_II) {
-            uncompressed.resize(portalleafs * leafbytes_real);
+            uncompressed.resize(static_cast<size_t>(portalleafs) * static_cast<size_t>(leafbytes_real));
         } else {
-            uncompressed.resize(portalleafs * leafbytes);
+            uncompressed.resize(static_cast<size_t>(portalleafs) * static_cast<size_t>(leafbytes));
         }
 
         auto stats = CalcVis(&bsp);
@@ -790,11 +1159,17 @@ int vis_main(int argc, const char **argv)
     if (bsp.loadversion->game->id != GAME_QUAKE_II) {
         CalcAmbientSounds(&bsp);
     } else {
-        CalcPHS(&bsp);
+        if (vis_options.phsonly.value()) {
+            CalcPHS(&bsp);
+        } else {
+            CalcPHS(&bsp, uncompressed, static_cast<size_t>(leafbytes));
+        }
     }
 
     /* Convert data format back if necessary */
-    ConvertBSPFormat(&bspdata, loadversion);
+    if (!ConvertBSPFormat(&bspdata, loadversion)) {
+        FError("couldn't convert {} back to {}", vis_options.sourceMap, loadversion->short_name);
+    }
 
     WriteBSPFile(vis_options.sourceMap, &bspdata);
 
@@ -808,6 +1183,17 @@ int vis_main(int argc, const char **argv)
     logging::close();
 
     return 0;
+}
+
+int vis_main(int argc, const char **argv)
+{
+    const int result = vis_main_impl(argc, argv);
+    if (result == 0) {
+        // Check only after the implementation has returned, so all workers
+        // and local diagnostic/stat objects have finished emitting warnings.
+        logging::fail_if_warnings();
+    }
+    return result;
 }
 
 int vis_main(const std::vector<std::string> &args)

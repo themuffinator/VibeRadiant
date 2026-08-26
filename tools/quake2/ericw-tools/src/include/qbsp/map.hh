@@ -215,6 +215,7 @@ struct mapdata_t
     const qbsp_plane_t &get_plane(size_t pnum);
 
     std::vector<maptexdata_t> miptex;
+    std::unordered_multimap<std::string, size_t, case_insensitive_hash, case_insensitive_equal> miptex_lookup;
     std::vector<maptexinfo_t> mtexinfos;
 
     /* quick lookup for texinfo */
@@ -255,7 +256,8 @@ struct mapdata_t
     // running total
     uint32_t brush_offset = 0;
     // Small cache for image meta in the current map
-    std::unordered_map<std::string, std::optional<img::texture_meta>> meta_cache;
+    std::unordered_map<std::string, std::optional<img::texture_meta>, case_insensitive_hash, case_insensitive_equal>
+        meta_cache;
     // load or fetch image meta associated with the specified name
     const std::optional<img::texture_meta> &load_image_meta(std::string_view name);
     // whether we had attempted loading texture stuff
@@ -313,6 +315,7 @@ void ParseEntity(const mapfile::map_entity_t &in_entity, mapentity_t &entity, te
 
 void ProcessExternalMapEntity(mapentity_t &entity);
 void ProcessAreaPortal(mapentity_t &entity);
+bool MapBrush_IsIncludedByRegion(const mapbrush_t &brush);
 bool IsWorldBrushEntity(const mapentity_t &entity);
 bool IsNonRemoveWorldBrushEntity(const mapentity_t &entity);
 void LoadMapFile();

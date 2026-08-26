@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <set>
 #include <common/imglib.hh> // for img::find
 #include <common/log.hh>
 #include <common/cmdlib.hh>
@@ -44,6 +45,7 @@ static std::vector<std::unique_ptr<light_t>> surfacelight_templates;
 static std::ofstream surflights_dump_file;
 static fs::path surflights_dump_filename;
 static std::map<std::string, light_t *> lights_by_switchableshadow_target;
+static std::set<std::string, std::less<>> missing_suntextures_warned;
 
 /**
  * Resets global data in this file
@@ -61,6 +63,7 @@ void ResetLightEntities()
     surflights_dump_file = {};
     surflights_dump_filename.clear();
     lights_by_switchableshadow_target.clear();
+    missing_suntextures_warned.clear();
 }
 
 std::vector<std::unique_ptr<light_t>> &GetLights()
@@ -256,6 +259,156 @@ static std::string EntDict_PrettyDescription(const mbsp_t *bsp, const entdict_t 
     return fmt::format("entity at ({}) ({})", entity.get("origin"), entity.get("classname"));
 }
 
+static bool IsLightClassname(std::string_view classname)
+{
+    return classname.size() >= std::string_view("light").size() && string_istarts_with(classname, "light");
+}
+
+static bool IsGoldSrcLightClass(const mbsp_t *bsp, const light_t &entity, std::string_view classname)
+{
+    return bsp->loadversion->game->id == GAME_HALF_LIFE && string_iequals(entity.classname(), classname);
+}
+
+static std::optional<float> ParseEntityScalar(const entdict_t &entity, std::string_view key)
+{
+    const std::string &value = entity.get(key);
+    if (value.empty()) {
+        return std::nullopt;
+    }
+
+    return settings::detail::parse_number<float>(value);
+}
+
+static std::optional<qvec3f> ParseEntityVector(const entdict_t &entity, std::string_view key)
+{
+    const std::string &value = entity.get(key);
+    if (value.empty()) {
+        return std::nullopt;
+    }
+
+    parser_t parser(value, {});
+    qvec3f result;
+    for (float &component : result) {
+        if (!parser.parse_token()) {
+            return std::nullopt;
+        }
+
+        const auto parsed = settings::detail::parse_number<float>(parser.token);
+        if (!parsed) {
+            return std::nullopt;
+        }
+        component = *parsed;
+    }
+
+    if (parser.parse_token()) {
+        return std::nullopt;
+    }
+    return result;
+}
+
+static qvec3f GoldSrcLightMangle(const mbsp_t *bsp, const entdict_t &entity)
+{
+    qvec3f angles{};
+    if (entity.has("angles")) {
+        if (const auto parsed = ParseEntityVector(entity, "angles")) {
+            angles = *parsed;
+        } else {
+            logging::print("WARNING: invalid GoldSrc angles on {}\n", EntDict_PrettyDescription(bsp, entity));
+        }
+    }
+
+    // GoldSrc `angles` stores pitch/yaw/roll and positive pitch points down.
+    // VMT's mangle stores yaw/pitch/roll and positive pitch points up.
+    qvec3f mangle{angles[1], -angles[0], angles[2]};
+
+    if (entity.has("angle")) {
+        if (const auto angle = ParseEntityScalar(entity, "angle")) {
+            if (*angle != 0.0f) {
+                mangle[0] = *angle;
+            }
+        } else {
+            logging::print("WARNING: invalid GoldSrc angle on {}\n", EntDict_PrettyDescription(bsp, entity));
+        }
+    }
+
+    if (entity.has("pitch")) {
+        if (const auto pitch = ParseEntityScalar(entity, "pitch")) {
+            if (*pitch != 0.0f) {
+                // The dedicated pitch override uses the opposite convention to
+                // the pitch component of `angles`: -90 points straight down.
+                mangle[1] = *pitch;
+            }
+        } else {
+            logging::print("WARNING: invalid GoldSrc pitch on {}\n", EntDict_PrettyDescription(bsp, entity));
+        }
+    }
+
+    return mangle;
+}
+
+static float GoldSrcSpotCone(const mbsp_t *bsp, const entdict_t &entity, std::string_view key, float fallback)
+{
+    if (!entity.has(key)) {
+        return fallback;
+    }
+
+    const auto parsed = ParseEntityScalar(entity, key);
+    if (!parsed) {
+        logging::print("WARNING: invalid GoldSrc {} on {}; using {} degrees\n", key,
+            EntDict_PrettyDescription(bsp, entity), fallback);
+        return fallback;
+    }
+
+    if (*parsed < 0.0f || *parsed > 180.0f) {
+        const float clamped = std::clamp(*parsed, 0.0f, 180.0f);
+        logging::print("WARNING: GoldSrc {} on {} is outside [0, 180]; clamping to {} degrees\n", key,
+            EntDict_PrettyDescription(bsp, entity), clamped);
+        return clamped;
+    }
+    return *parsed;
+}
+
+static void ApplyGoldSrcLightSemantics(const mbsp_t *bsp, light_t &entity)
+{
+    if (bsp->loadversion->game->id != GAME_HALF_LIFE) {
+        return;
+    }
+
+    const bool environment = string_iequals(entity.classname(), "light_environment");
+    const bool spotlight = string_iequals(entity.classname(), "light_spot");
+    if (!environment && !spotlight) {
+        return;
+    }
+
+    // Keep VMT's explicit mangle extension authoritative. Otherwise translate
+    // stock GoldSrc direction fields into VMT's common directional-light form.
+    if (!entity.mangle.is_changed()) {
+        entity.mangle.set_value(GoldSrcLightMangle(bsp, *entity.epairs), settings::source::MAP);
+    }
+
+    if (environment) {
+        entity.sun.set_value(true, settings::source::MAP);
+        return;
+    }
+
+    entity.spotlight = true;
+    entity.spotvec = qv::vec_from_mangle(entity.mangle.value());
+
+    constexpr float default_cone = 10.0f;
+    const float inner_cone = GoldSrcSpotCone(bsp, *entity.epairs, "_cone", default_cone);
+    float outer_cone = GoldSrcSpotCone(bsp, *entity.epairs, "_cone2", inner_cone);
+    if (outer_cone < inner_cone) {
+        logging::print("WARNING: GoldSrc _cone2 on {} is narrower than _cone; using {} degrees\n",
+            EntDict_PrettyDescription(bsp, *entity.epairs), inner_cone);
+        outer_cone = inner_cone;
+    }
+
+    // Spotlight contribution compares the negated cosine because its sample
+    // direction points back from the surface to the light.
+    entity.spotfalloff = -std::cos(DEG2RAD(outer_cone));
+    entity.spotfalloff2 = -std::cos(DEG2RAD(inner_cone));
+}
+
 bool EntDict_CheckNoEmptyValues(const mbsp_t *bsp, const entdict_t &entdict)
 {
     bool ok = true;
@@ -273,40 +426,45 @@ bool EntDict_CheckNoEmptyValues(const mbsp_t *bsp, const entdict_t &entdict)
 static void SetupSpotlights(const mbsp_t *bsp, const settings::worldspawn_keys &cfg)
 {
     for (auto &entity : all_lights) {
+        const bool goldsrc_spotlight = IsGoldSrcLightClass(bsp, *entity, "light_spot");
         float targetdist = 0.0; // mxd
         if (entity->targetent) {
             qvec3f targetOrigin;
             entity->targetent->get_vector("origin", targetOrigin);
             entity->spotvec = targetOrigin - entity->origin.value();
             targetdist = qv::normalizeInPlace(entity->spotvec); // mxd
-            entity->spotlight = true;
+            entity->spotlight = !entity->sun.value();
         }
         if (entity->spotlight) {
-            float base_angle = 0.0; // spotlight cone "diameter" in degrees
-
-            if (entity->cone.is_changed()) {
-                // q2 style: "_cone" key specifies cone radius in degrees
-                base_angle = entity->cone.value() * 2.f;
-            } else if (entity->spotangle.is_changed()) {
-                // q1 style: "angle" key specifies cone diameter in degrees
-                base_angle = entity->spotangle.value();
-            }
-
-            if (!base_angle) {
-                // if we don't have a valid cone angle, the default depends on the target game
-                if (bsp->loadversion->game->id == GAME_QUAKE_II) {
-                    base_angle = entity->cone.default_value() * 2.f;
-                } else {
-                    base_angle = entity->spotangle.default_value();
+            float base_angle = 0.0f; // spotlight cone diameter in degrees
+            if (!goldsrc_spotlight) {
+                if (entity->cone.is_changed()) {
+                    // q2 style: "_cone" key specifies cone radius in degrees
+                    base_angle = entity->cone.value() * 2.f;
+                } else if (entity->spotangle.is_changed()) {
+                    // q1 style: "angle" key specifies cone diameter in degrees
+                    base_angle = entity->spotangle.value();
                 }
+
+                if (!base_angle) {
+                    // if we don't have a valid cone angle, the default depends on the target game
+                    if (bsp->loadversion->game->id == GAME_QUAKE_II) {
+                        base_angle = entity->cone.default_value() * 2.f;
+                    } else {
+                        base_angle = entity->spotangle.default_value();
+                    }
+                }
+
+                entity->spotfalloff = -cos(base_angle / 2 * Q_PI / 180);
+
+                float angle2 = entity->spotangle2.value();
+                if (angle2 <= 0 || angle2 > base_angle)
+                    angle2 = base_angle;
+                entity->spotfalloff2 = -cos(angle2 / 2 * Q_PI / 180);
+            } else {
+                const float outer_cosine = std::clamp(-entity->spotfalloff, -1.0f, 1.0f);
+                base_angle = std::acos(outer_cosine) * 360.0f / Q_PI;
             }
-
-            entity->spotfalloff = -cos(base_angle / 2 * Q_PI / 180);
-
-            float angle2 = entity->spotangle2.value();
-            if (angle2 <= 0 || angle2 > base_angle)
-                angle2 = base_angle;
-            entity->spotfalloff2 = -cos(angle2 / 2 * Q_PI / 180);
 
             // mxd. Apply autofalloff?
             if (targetdist > 0.0f && entity->falloff.value() == 0 && cfg.spotlightautofalloff.value()) {
@@ -354,10 +512,17 @@ static void CheckEntityFields(const mbsp_t *bsp, const settings::worldspawn_keys
 
     /* For most formulas, we need to divide the light value by the number of
        samples (jittering) to keep the brightness approximately the same. */
-    if (entity->getFormula() == LF_INVERSE || entity->getFormula() == LF_INVERSE2 ||
-        entity->getFormula() == LF_INFINITE || (entity->getFormula() == LF_LOCALMIN && cfg.addminlight.value()) ||
-        entity->getFormula() == LF_INVERSE2A) {
+    if (!entity->sun.value() &&
+        (entity->getFormula() == LF_INVERSE || entity->getFormula() == LF_INVERSE2 ||
+            entity->getFormula() == LF_INFINITE || (entity->getFormula() == LF_LOCALMIN && cfg.addminlight.value()) ||
+            entity->getFormula() == LF_INVERSE2A)) {
         entity->light.set_value(entity->light.value() / entity->samples.value(), settings::source::MAP);
+    }
+
+    if (entity->sun.value() && ((entity->formula.is_changed() && entity->getFormula() != LF_LINEAR) ||
+                                   entity->atten.is_changed() || entity->falloff.is_changed())) {
+        logging::print("WARNING: point-light attenuation keys are ignored on {} with _sun 1 at [{}]\n",
+            entity->classname(), entity->origin.value());
     }
 
     // shadow_channel_mask defaults to light_channel_mask
@@ -419,10 +584,15 @@ static void AddSun(const settings::worldspawn_keys &cfg, const qvec3f &sunvec, f
     sun.dirt = Dirt_ResolveFlag(cfg, dirtInt);
     sun.style = style;
     sun.suntexture = suntexture;
-    if (!suntexture.empty())
+    if (!suntexture.empty()) {
         sun.suntexture_value = img::find(suntexture);
-    else
+        if (sun.suntexture_value == nullptr && missing_suntextures_warned.emplace(suntexture).second) {
+            logging::print(
+                "WARNING: sunlight texture '{}' was not found; this sun will emit from no sky surfaces\n", suntexture);
+        }
+    } else {
         sun.suntexture_value = nullptr;
+    }
     // fmt::print( "sun is using vector {} {} {} light {} color {} {} {} anglescale {} dirt {} resolved to {}\n",
     //  sun->sunvec[0], sun->sunvec[1], sun->sunvec[2], sun->sunlight.light,
     //  sun->sunlight.color[0], sun->sunlight.color[1], sun->sunlight.color[2],
@@ -501,7 +671,7 @@ static void SetupSuns(const settings::worldspawn_keys &cfg)
                 qvec3f target_pos;
                 entity->targetent->get_vector("origin", target_pos);
                 sunvec = target_pos - entity->origin.value();
-            } else if (qv::length2(entity->mangle.value()) > 0) {
+            } else if (entity->mangle.is_changed()) {
                 sunvec = qv::vec_from_mangle(entity->mangle.value());
             } else { // Use { 0, 0, 0 } as sun target...
                 logging::print("WARNING: sun missing target, entity origin used.\n");
@@ -949,6 +1119,7 @@ void LoadEntities(const settings::worldspawn_keys &cfg, const mbsp_t *bsp)
 
     // First pass: make permanent changes to the bsp entdata that we will write out
     // at the end of the light process.
+    std::map<std::string, int, std::less<>> original_style_for_targetname;
     for (auto &entdict : entdicts) {
 
         // fix "lightmap_scale"
@@ -964,9 +1135,26 @@ void LoadEntities(const settings::worldspawn_keys &cfg, const mbsp_t *bsp)
         // setup light styles for switchable lights
         // NOTE: this also handles "_sun" "1" entities without any extra work.
         const std::string &classname = entdict.get("classname");
-        if (classname.find("light") == 0) {
+        if (IsLightClassname(classname)) {
             const std::string &targetname = entdict.get("targetname");
             if (!targetname.empty()) {
+                const std::string &original_style = entdict.get("style");
+                if (!original_style.empty()) {
+                    if (entdict.get("oldstyle").empty()) {
+                        entdict.set("oldstyle", original_style);
+                    }
+
+                    const int original_style_number = entdict.get_int("style");
+                    const auto [existing, inserted] =
+                        original_style_for_targetname.try_emplace(targetname, original_style_number);
+                    if (!inserted && existing->second != original_style_number) {
+                        logging::print(
+                            "WARNING: switchable lights with targetname '{}' use inconsistent original styles "
+                            "({} and {})\n",
+                            targetname, existing->second, original_style_number);
+                    }
+                }
+
                 const int style = LightStyleForTargetname(cfg, targetname);
                 entdict.set("style", std::to_string(style));
             }
@@ -998,7 +1186,7 @@ void LoadEntities(const settings::worldspawn_keys &cfg, const mbsp_t *bsp)
         /*
          * Check light entity fields and any global settings in worldspawn.
          */
-        if (entdict.get("classname").find("light") == 0) {
+        if (IsLightClassname(entdict.get("classname"))) {
             // mxd. Convert some Arghrad3 settings...
             if (light_options.arghradcompat.value()) {
                 entdict.rename("_falloff", "delay"); // _falloff -> delay
@@ -1031,9 +1219,11 @@ void LoadEntities(const settings::worldspawn_keys &cfg, const mbsp_t *bsp)
             // populate settings
             entity->set_settings(*entity->epairs, settings::source::MAP);
 
+            ApplyGoldSrcLightSemantics(bsp, *entity);
+
             if (entity->mangle.is_changed()) {
                 entity->spotvec = qv::vec_from_mangle(entity->mangle.value());
-                entity->spotlight = true;
+                entity->spotlight = !entity->sun.value();
 
                 if (!entity->projangle.is_changed()) {
                     // copy from mangle

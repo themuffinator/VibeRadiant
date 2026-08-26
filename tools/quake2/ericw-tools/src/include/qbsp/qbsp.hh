@@ -140,7 +140,7 @@ public:
 class setting_blocksize : public setting_value<qvec3i>
 {
 public:
-    inline setting_blocksize(setting_container *dictionary, const nameset &names, qvec3i val,
+    setting_blocksize(setting_container *dictionary, const nameset &names, qvec3i val,
         const setting_group *group = nullptr, const char *description = "");
     bool parse(const std::string &setting_name, parser_base_t &parser, source source) override;
     std::string string_value() const override;
@@ -150,8 +150,8 @@ public:
 class setting_debugexpand : public setting_value<std::variant<uint8_t, aabb3d>>
 {
 public:
-    inline setting_debugexpand(setting_container *dictionary, const nameset &names,
-        const setting_group *group = nullptr, const char *description = "");
+    setting_debugexpand(setting_container *dictionary, const nameset &names, const setting_group *group = nullptr,
+        const char *description = "");
     bool parse(const std::string &setting_name, parser_base_t &parser, source source) override;
     std::string string_value() const override;
     std::string format() const override;
@@ -191,7 +191,6 @@ public:
     setting_enum<conversion_t> convertmapformat;
     setting_invertible_bool oldaxis;
     setting_bool forcegoodtree;
-    setting_scalar midsplitsurffraction;
     setting_int32 maxnodesize;
     setting_bool oldrottex;
     setting_scalar epsilon;
@@ -235,7 +234,6 @@ public:
     setting_bool logbmodels;
     setting_bool debug_missing_portal_sides;
     setting_bool fixupdetailfence;
-    setting_bool tjunc_detail;
 
     void set_parameters(int argc, const char **argv) override;
     void initialize(int argc, const char **argv) override;
@@ -364,7 +362,7 @@ template<>
 struct fmt::formatter<qbsp_plane_t> : formatter<qplane3d>
 {
     template<typename FormatContext>
-    auto format(const qbsp_plane_t &p, FormatContext &ctx) -> decltype(ctx.out())
+    auto format(const qbsp_plane_t &p, FormatContext &ctx) const -> decltype(ctx.out())
     {
         fmt::format_to(ctx.out(), "<");
         fmt::formatter<qplane3d>::format(p.get_plane(), ctx);
@@ -459,6 +457,7 @@ struct node_t
 
 void InitQBSP(int argc, const char **argv);
 void InitQBSP(const std::vector<std::string> &args);
+void ExportBrushList(node_t *node);
 void CountLeafs(node_t *headnode);
 void ProcessFile();
 

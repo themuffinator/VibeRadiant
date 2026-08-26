@@ -20,6 +20,7 @@
 #pragma once
 
 #include <span>
+#include <string_view>
 
 #include <common/settings.hh>
 #include <common/bsputils.hh> // for faceextents_t
@@ -32,10 +33,14 @@ struct texture;
 }
 struct mbsp_t;
 struct mface_t;
+struct bspdata_t;
 
 constexpr float LIGHT_ON_EPSILON = 0.1f;
 constexpr float LIGHT_ANGLE_EPSILON = 0.01f;
 constexpr float LIGHT_EQUAL_EPSILON = 0.001f;
+// BoxBlurImage is quadratic in the kernel diameter. A radius of 32 already
+// visits up to 65x65 samples per output sample and is a practical hard limit.
+constexpr int32_t MAX_SOFT_RADIUS = 32;
 
 // FIXME: use maximum dimension of level
 constexpr float MAX_SKY_DIST = 1000000;
@@ -213,7 +218,6 @@ extern bool dirt_in_use; // should any dirtmapping take place? set in SetupDirt
 
 constexpr qvec3f vec3_white{255};
 
-
 constexpr int CHANNEL_MASK_DEFAULT = 1;
 
 class modelinfo_t : public settings::setting_container
@@ -302,6 +306,9 @@ public:
     setting_scalar lightmapgamma;
     setting_bool addminlight;
     setting_scalar minlight;
+    // Optional lightgrid-specific override. When left at its default source,
+    // lightgrids inherit `minlight` rather than this setting's numeric default.
+    setting_scalar minlight_grid;
     setting_scalar minlightMottle;
     setting_scalar maxlight;
     setting_color minlight_color;
@@ -371,6 +378,18 @@ extern setting_group experimental_group;
 class light_settings : public common_settings, public worldspawn_keys
 {
 public:
+    // Action settings normally discard whether they were invoked. Light keeps
+    // that provenance so embedded manifests can describe output/debug flags.
+    class setting_action : public setting_func
+    {
+    public:
+        using setting_func::setting_func;
+
+        void reset() override;
+        bool parse(const std::string &setting_name, parser_base_t &parser, source source) override;
+        std::string string_value() const override;
+    };
+
     // slight modification to setting_numeric that supports
     // a default value if a non-number is supplied after parsing
     class setting_soft : public setting_int32
@@ -378,7 +397,6 @@ public:
     public:
         using setting_int32::setting_int32;
 
-        bool parse(const std::string &setting_name, parser_base_t &parser, source source) override;
         std::string format() const override;
     };
 
@@ -410,18 +428,21 @@ public:
     setting_set radlights;
     setting_int32 lightmap_scale;
     setting_extra extra;
+    setting_int32 super;
     setting_enum<emissivequality_t> emissivequality;
     setting_enum<visapprox_t> visapprox;
-    setting_func lit;
-    setting_func lit2;
-    setting_func bspxlit;
-    setting_func lux;
-    setting_func bspxlux;
-    setting_func bspxonly;
-    setting_func bspx;
-    setting_func hdr;
-    setting_func bspxhdr;
+    setting_action lit;
+    setting_action lit2;
+    setting_action bspxlit;
+    setting_action lux;
+    setting_action bspxlux;
+    setting_action bspxonly;
+    setting_action bspx;
+    setting_action hdr;
+    setting_action bspxhdr;
     setting_scalar world_units_per_luxel;
+    setting_bool force_world_units_per_luxel;
+    setting_bool embedsettings;
     setting_bool litonly;
     setting_bool nolights;
     setting_int32 facestyles;
@@ -431,20 +452,15 @@ public:
     setting_vec3 lightgrid_dist;
     setting_enum<lightgrid_format_t> lightgrid_format;
 
-    setting_func dirtdebug;
-    setting_func bouncedebug;
-    setting_func bouncelightsdebug;
-    setting_func phongdebug;
-    setting_func phongdebug_obj;
-    setting_func debugoccluded;
-    setting_func debugneighbours;
-    setting_func debugmottle;
+    setting_action dirtdebug;
+    setting_action bouncedebug;
+    setting_action bouncelightsdebug;
+    setting_action phongdebug;
+    setting_action phongdebug_obj;
+    setting_action debugoccluded;
+    setting_action debugneighbours;
+    setting_action debugmottle;
     setting_bool debug_lightgrid_octree;
-
-    setting_bool incremental;
-    setting_bool denoise;
-    setting_bool gpu;
-    setting_bool stochastic;
 
     light_settings();
 
@@ -465,6 +481,12 @@ public:
 }; // namespace settings
 
 extern settings::light_settings light_options;
+
+inline constexpr std::string_view LIGHTING_SETTINGS_BSPX_LUMP = "LIGHTING_SETTINGS";
+
+// Preserve a pre-existing lump unless -embedsettings was explicitly enabled.
+// When enabled, build the complete JSON payload before replacing the entry.
+void UpdateEmbeddedLightingSettings(bspdata_t &bspdata, const settings::light_settings &options);
 
 const std::unordered_map<int, std::vector<uint8_t>> &UncompressedVis();
 

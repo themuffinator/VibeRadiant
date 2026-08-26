@@ -29,6 +29,7 @@
 #include <common/numeric_cast.hh>
 #include <common/json.hh>
 
+#include <algorithm>
 #include <fstream>
 #include <cstdint>
 #include <limits.h>
@@ -670,7 +671,7 @@ std::vector<surfflags_t> LoadExtendedTexinfoFlags(const fs::path &sourcefilename
 
         if (index >= bsp->texinfo.size()) {
             logging::print("WARNING: Extended texinfo flags in {} does not match bsp, ignoring\n", filename);
-            memset(result.data(), 0, bsp->texinfo.size() * sizeof(surfflags_t));
+            std::fill(result.begin(), result.end(), surfflags_t{});
             return result;
         }
 

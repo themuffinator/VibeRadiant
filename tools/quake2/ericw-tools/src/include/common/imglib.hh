@@ -42,6 +42,7 @@ extern std::vector<qvec3b> palette;
 
 // Palette
 void init_palette(const gamedef_t *game);
+void init_palette(const gamedef_t *game, bool prefer_loose);
 
 struct texture_meta
 {
@@ -88,6 +89,10 @@ extern std::unordered_map<std::string, texture, case_insensitive_hash, case_inse
 void clear();
 
 qvec3b calculate_average(const std::vector<qvec4b> &pixels);
+
+// Returns a more saturated color while preserving perceived luminance as
+// closely as 8-bit output permits.
+qvec3b increase_saturation(const qvec3b &color);
 
 const texture *find(std::string_view str);
 

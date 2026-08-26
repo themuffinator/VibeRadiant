@@ -55,7 +55,3 @@ compile_commands.json
 
 # temps
 /version
-
-# Bazel output paths
-/bazel-*
-/MODULE.bazel.lock

@@ -20,7 +20,11 @@ See file, 'COPYING', for details.
 #pragma once
 
 #include <QMainWindow>
+#include <QTemporaryDir>
 #include <QVBoxLayout>
+
+#include <atomic>
+#include <memory>
 
 #include <common/bspfile.hh>
 #include <common/settings.hh>
@@ -68,16 +72,30 @@ class MainWindow : public QMainWindow
     Q_OBJECT
 
 private:
+    struct compile_result_t
+    {
+        bspdata_t bspdata{};
+        std::vector<uint8_t> litdata;
+        std::vector<uint32_t> hdr_litdata;
+        fs::path preview_artifact_path;
+        std::unique_ptr<QTemporaryDir> temporary_directory;
+    };
+
     QFileSystemWatcher *m_watcher = nullptr;
     std::unique_ptr<QTimer> m_fileReloadTimer;
     bool m_fileWasReload = false;
+    bool m_reloadPending = false;
+    bool m_initialFileHandled = false;
     QString m_mapFile;
-    bspdata_t m_bspdata;
+    QString m_compileFile;
+    QString m_pendingFile;
+    std::shared_ptr<bspdata_t> m_bspdata;
     std::vector<uint8_t> m_litdata;
     std::vector<uint32_t> m_hdr_litdata;
+    std::unique_ptr<compile_result_t> m_compileResult;
     settings::common_settings render_settings;
     qint64 m_fileSize = -1;
-    ETLogTab m_activeLogTab = ETLogTab::TAB_hub;
+    std::atomic<ETLogTab> m_activeLogTab{ETLogTab::TAB_hub};
     QThread *m_compileThread = nullptr;
     QLabel *m_cameraStatus = nullptr;
     QLabel *m_selectionStatus = nullptr;
@@ -103,6 +121,7 @@ private:
     void createStatsSidebar();
     void hub_log_callback(logging::flag flags, const char *str);
     void hub_percent_callback(std::optional<uint32_t> percent, std::optional<duration> elapsed);
+    void appendLog(ETLogTab tab, const QString &text);
     void logWidgetSetText(ETLogTab tab, const std::string &str);
     void createStatusBar();
     void updateRecentsSubmenu(const QStringList &recents);
@@ -111,9 +130,11 @@ private:
     void fileOpen();
     void takeScreenshot();
     void fileReloadTimerExpired();
-    int compileMap(const QString &file, bool is_reload);
+    bool refreshWatcherPaths();
+    int compileMap(const QString &file, std::vector<std::string> common_args, std::vector<std::string> qbsp_args,
+        std::vector<std::string> vis_args, std::vector<std::string> light_args, bool run_vis, bool run_light);
     void compileThreadExited();
-    bspdata_t QbspVisLight_Common(const fs::path &name, std::vector<std::string> extra_common_args,
+    compile_result_t QbspVisLight_Common(const fs::path &name, std::vector<std::string> extra_common_args,
         std::vector<std::string> extra_qbsp_args, std::vector<std::string> extra_vis_args,
         std::vector<std::string> extra_light_args, bool run_vis, bool run_light);
 
@@ -178,4 +199,3 @@ private:
 
     ETLogWidget *m_outputLogWidget = nullptr;
 };
-

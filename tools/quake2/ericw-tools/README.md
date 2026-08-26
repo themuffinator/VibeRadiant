@@ -31,7 +31,7 @@ Formerly ericw-tools, now with extra sparkle ✨🎧🛠️
 </tr>
 <tr>
 <td><b>vmt-light</b></td>
-<td>Calculate lightmaps with GPU acceleration</td>
+<td>Calculate lightmaps with Embree CPU ray tracing</td>
 </tr>
 <tr>
 <td><b>vmt-bspinfo</b></td>
@@ -77,8 +77,8 @@ Same bones, new polish. If you used `qbsp/vis/light` before, your muscle memory 
 - `vmt-` prefix on every binary so ericw-tools can live side-by-side 🧹✨
 - Semantic versioning + tag-driven releases with CI-built packages 📦🚀
 - Build metadata + `version.hh` for scripting and diagnostics 🧾🛠️
-- Improved Half-Life support (updated behavior + smoother compatibility) ??
-- Numerous bug fixes and improvements across the toolchain ?????
+- Improved Half-Life support (updated behavior + smoother compatibility) 🎮✨
+- Numerous bug fixes and improvements across the toolchain 🧰🐛
 
 
 ## 🚀 Quick Start
@@ -89,17 +89,18 @@ vmt-bsp mymap.map
 vmt-vis mymap.bsp
 vmt-light mymap.bsp
 
-# High-quality with GPU acceleration (laser bounces 🔥)
-vmt-light -gpu -extra4 -bounce 2 -denoise mymap.bsp
+# High-quality lighting with extra samples and bounces 🔥
+vmt-light -extra4 -bounce 2 mymap.bsp
 ```
 
 ## 🌟 Key Features
 
-- 🧠 GPU raytracing via OptiX (`-gpu`) for modern lighting speed
-- 🤖 AI denoising with Intel OIDN (`-denoise`)
-- 🎛️ Stochastic sampling (`-stochastic`) for complex scenes
-- 🔁 Incremental lighting (`-incremental`) for fast iteration loops
+- 🧠 Fast CPU ray tracing via Embree
 - 🌈 HDR lightmaps (`-hdr`) for engines that support it
+- 📜 Opt-in, path-sanitized lighting manifests (`-embedsettings`) for reproducible relights
+- 🌤️ Stock GoldSrc `light_environment` and `light_spot` compatibility in Half-Life BSPs
+- 🗂️ Safe loose/PAK texture discovery with both traditional `textures/` and prefix-free layouts
+- 🖥️ A Qt-powered map build and preview workflow in `vmt-hub`
 
 ## 📦 Downloads
 
@@ -124,15 +125,13 @@ macOS 10.15+ prep: `brew install cmake embree tbb qt@6` (Qt6 only needed for `vm
 <details>
 <summary><b>Requirements</b></summary>
 
-- CMake 3.14+
-- C++20 compiler (MSVC 2019+, GCC 9+, Clang 10+)
+- CMake 3.16+
+- C++20 compiler (Visual Studio 2019 16.11+, GCC 10+, or Clang 12+ with a C++20 standard library)
 - macOS 10.15+ (Catalina) recommended for Apple builds
 - Embree 4.x + oneTBB (required for `vmt-light`)
 
 **Optional extras:**
 - Qt6 (for `vmt-hub`)
-- CUDA + OptiX SDK (GPU raytracing)
-- Intel OIDN (AI denoising)
 
 </details>
 
@@ -151,10 +150,25 @@ See [**BUILDING.md**](BUILDING.md) for detailed instructions.
 
 GPL v3 - See [COPYING](COPYING)
 
+### 🙌 Third-party attribution
+
+The BSP JSON texture exporter includes an adapted
+[Base64 encoder by tomykaira](https://gist.github.com/tomykaira/f0fd86b6c73063283afe550bc5d77594),
+used under the MIT License; its copyright and permission notice are retained in
+the source.
+
+The reproducible build and test stack uses pinned, MIT-compatible submodules:
+[{fmt}](https://github.com/fmtlib/fmt),
+[JsonCpp](https://github.com/open-source-parsers/jsoncpp),
+[nanobench](https://github.com/martinus/nanobench), and
+[pareto](https://github.com/alandefreitas/pareto). Their tested revisions are
+recorded as Git links so a recursive clone receives the same dependency set. 🔗
+
 <div align="center">
 <sub>
-Based on <a href="https://github.com/ericwa/ericw-tools">ericw-tools</a> by Eric Wasylishen
+Based on <a href="https://github.com/ericwa/ericw-tools">ericw-tools</a> by Eric Wasylishen;<br>
+selected compiler ideas are informed by
+<a href="https://github.com/xonotic/netradiant/tree/master/tools/quake3/q3map2">Xonotic NetRadiant's q3map2</a>.
 </sub>
 </div>
-
 

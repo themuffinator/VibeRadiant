@@ -28,6 +28,9 @@
 #ifdef min
 #undef min
 #endif
+#ifdef max
+#undef max
+#endif
 #endif
 
 #ifdef LINUX
@@ -39,6 +42,8 @@
 #include <cstdint>
 
 #include <algorithm>
+#include <limits>
+#include <optional>
 #include <string>
 
 char Q_tolower(char x)
@@ -103,27 +108,27 @@ string_iequals(std::string_view a, std::string_view b)
     if (b.size() != sz)
         return false;
     for (size_t i = 0; i < sz; ++i)
-        if (tolower(a[i]) != tolower(b[i]))
+        if (Q_tolower(a[i]) != Q_tolower(b[i]))
             return false;
     return true;
 }
 
-std::size_t case_insensitive_hash::operator()(const std::string &s) const noexcept
+std::size_t case_insensitive_hash::operator()(std::string_view s) const noexcept
 {
     std::size_t hash = 0x811c9dc5;
     constexpr std::size_t prime = 0x1000193;
 
     for (auto &c : s) {
-        hash ^= tolower(c);
+        hash ^= static_cast<unsigned char>(Q_tolower(c));
         hash *= prime;
     }
 
     return hash;
 }
 
-bool case_insensitive_equal::operator()(const std::string &l, const std::string &r) const noexcept
+bool case_insensitive_equal::operator()(std::string_view l, std::string_view r) const noexcept
 {
-    return Q_strcasecmp(l.c_str(), r.c_str()) == 0;
+    return Q_strcasecmp(l, r) == 0;
 }
 
 bool case_insensitive_less::operator()(const std::string &l, const std::string &r) const noexcept
@@ -137,12 +142,21 @@ membuf::membuf(void *base, size_t size, std::ios_base::openmode which)
 {
     auto cbase = reinterpret_cast<char *>(base);
 
+    if (!cbase && size != 0) {
+        throw std::invalid_argument("non-empty memory stream requires a buffer");
+    }
+    if (size > static_cast<size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+        throw std::length_error("memory stream buffer is too large");
+    }
+
+    char *const cend = size == 0 ? cbase : cbase + size;
+
     if (which & std::ios_base::in) {
-        this->setg(cbase, cbase, cbase + size);
+        this->setg(cbase, cbase, cend);
     }
 
     if (which & std::ios_base::out) {
-        this->setp(cbase, cbase + size);
+        this->setp(cbase, cend);
     }
 }
 
@@ -150,99 +164,176 @@ membuf::membuf(const void *base, size_t size, std::ios_base::openmode which)
 {
     auto cbase = const_cast<char *>(reinterpret_cast<const char *>(base));
 
+    if (!cbase && size != 0) {
+        throw std::invalid_argument("non-empty memory stream requires a buffer");
+    }
+    if (size > static_cast<size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+        throw std::length_error("memory stream buffer is too large");
+    }
+
+    char *const cend = size == 0 ? cbase : cbase + size;
+
     if (which & std::ios_base::in) {
-        this->setg(cbase, cbase, cbase + size);
+        this->setg(cbase, cbase, cend);
     }
 }
 
 void membuf::setpptrs(char *first, char *next, char *end)
 {
     setp(first, end);
-    pbump(next - first);
+    if (!first) {
+        return;
+    }
+
+    auto remaining = next - first;
+    while (remaining > 0) {
+        const auto step = static_cast<int>(
+            std::min<std::ptrdiff_t>(remaining, static_cast<std::ptrdiff_t>(std::numeric_limits<int>::max())));
+        pbump(step);
+        remaining -= step;
+    }
 }
 
 membuf::pos_type membuf::seekpos(pos_type off, std::ios_base::openmode which)
 {
+    const auto invalid = pos_type(off_type(-1));
+    const off_type requested = static_cast<off_type>(off);
+    if (requested < 0 || !(which & (std::ios_base::in | std::ios_base::out))) {
+        return invalid;
+    }
+
     if (which & std::ios_base::in) {
-        setg(eback(), eback() + off, egptr());
+        const off_type capacity = eback() ? static_cast<off_type>(egptr() - eback()) : 0;
+        if (!eback() && requested != 0) {
+            return invalid;
+        }
+        if (requested > capacity) {
+            return invalid;
+        }
+    }
+    if (which & std::ios_base::out) {
+        const off_type capacity = pbase() ? static_cast<off_type>(epptr() - pbase()) : 0;
+        if (!pbase() && requested != 0) {
+            return invalid;
+        }
+        if (requested > capacity) {
+            return invalid;
+        }
+    }
+
+    if (which & std::ios_base::in) {
+        setg(eback(), eback() ? eback() + requested : nullptr, egptr());
     }
 
     if (which & std::ios_base::out) {
-        setpptrs(pbase(), pbase() + off, epptr());
+        setpptrs(pbase(), pbase() ? pbase() + requested : nullptr, epptr());
     }
 
-    if (which & std::ios_base::in) {
-        return gptr() - eback();
-    } else {
-        return pptr() - pbase();
-    }
+    return pos_type(requested);
 }
 
 membuf::pos_type membuf::seekoff(off_type off, std::ios_base::seekdir dir, std::ios_base::openmode which)
 {
-    if (which & std::ios_base::in) {
-        if (dir == std::ios_base::cur)
-            gbump(off);
-        else if (dir == std::ios_base::end)
-            setg(eback(), egptr() + off, egptr());
-        else if (dir == std::ios_base::beg)
-            setg(eback(), eback() + off, egptr());
+    const auto invalid = pos_type(off_type(-1));
+    if (!(which & (std::ios_base::in | std::ios_base::out))) {
+        return invalid;
     }
 
+    const auto target_for = [off, dir](off_type current, off_type capacity) -> std::optional<off_type> {
+        off_type base = 0;
+        if (dir == std::ios_base::cur) {
+            base = current;
+        } else if (dir == std::ios_base::end) {
+            base = capacity;
+        } else if (dir != std::ios_base::beg) {
+            return std::nullopt;
+        }
+
+        if ((off > 0 && base > std::numeric_limits<off_type>::max() - off) ||
+            (off < 0 && base < std::numeric_limits<off_type>::lowest() - off)) {
+            return std::nullopt;
+        }
+
+        const off_type target = base + off;
+        if (target < 0 || target > capacity) {
+            return std::nullopt;
+        }
+        return target;
+    };
+
+    std::optional<off_type> input_target;
+    std::optional<off_type> output_target;
+    if (which & std::ios_base::in) {
+        const off_type current = eback() ? static_cast<off_type>(gptr() - eback()) : 0;
+        const off_type capacity = eback() ? static_cast<off_type>(egptr() - eback()) : 0;
+        input_target = target_for(current, capacity);
+        if (!input_target) {
+            return invalid;
+        }
+    }
     if (which & std::ios_base::out) {
-        if (dir == std::ios_base::cur)
-            pbump(off);
-        else if (dir == std::ios_base::end)
-            setpptrs(pbase(), epptr() + off, epptr());
-        else if (dir == std::ios_base::beg)
-            setpptrs(pbase(), pbase() + off, epptr());
+        const off_type current = pbase() ? static_cast<off_type>(pptr() - pbase()) : 0;
+        const off_type capacity = pbase() ? static_cast<off_type>(epptr() - pbase()) : 0;
+        output_target = target_for(current, capacity);
+        if (!output_target) {
+            return invalid;
+        }
+    }
+    if (input_target && output_target && *input_target != *output_target) {
+        return invalid;
     }
 
-    if (which & std::ios_base::in) {
-        return gptr() - eback();
-    } else {
-        return pptr() - pbase();
-    }
+    const off_type target = input_target ? *input_target : *output_target;
+    return seekpos(pos_type(target), which);
 }
 
 std::streamsize membuf::xsputn(const char_type *s, std::streamsize n)
 {
-    if (pptr() == epptr()) {
-        return traits_type::eof();
+    if (n <= 0 || !pptr() || pptr() == epptr()) {
+        return 0;
     }
 
-    std::streamsize free_space = epptr() - pptr();
-    std::streamsize num_write = std::min(free_space, n);
+    const std::streamsize free_space = epptr() - pptr();
+    const std::streamsize num_write = std::min(free_space, n);
 
-    memcpy(pptr(), s, n);
-    setpptrs(pbase(), pptr() + n, epptr());
+    memcpy(pptr(), s, static_cast<size_t>(num_write));
+    setpptrs(pbase(), pptr() + num_write, epptr());
 
     return num_write;
 }
 
 membuf::int_type membuf::overflow(int_type ch)
 {
-    return traits_type::eof();
+    if (traits_type::eq_int_type(ch, traits_type::eof())) {
+        return traits_type::not_eof(ch);
+    }
+    if (!pptr() || pptr() == epptr()) {
+        return traits_type::eof();
+    }
+
+    *pptr() = traits_type::to_char_type(ch);
+    setpptrs(pbase(), pptr() + 1, epptr());
+    return ch;
 }
 
 std::streamsize membuf::xsgetn(char_type *s, std::streamsize n)
 {
-    if (gptr() == egptr()) {
-        return traits_type::eof();
+    if (n <= 0 || !gptr() || gptr() == egptr()) {
+        return 0;
     }
 
-    std::streamsize free_space = egptr() - gptr();
-    std::streamsize num_read = std::min(free_space, n);
+    const std::streamsize free_space = egptr() - gptr();
+    const std::streamsize num_read = std::min(free_space, n);
 
-    memcpy(s, gptr(), n);
-    setg(eback(), gptr() + n, egptr());
+    memcpy(s, gptr(), static_cast<size_t>(num_read));
+    setg(eback(), gptr() + num_read, egptr());
 
     return num_read;
 }
 
 membuf::int_type membuf::underflow()
 {
-    return traits_type::eof();
+    return gptr() && gptr() != egptr() ? traits_type::to_int_type(*gptr()) : traits_type::eof();
 }
 
 // memstream
@@ -280,55 +371,68 @@ imemstream::imemstream(const void *base, size_t size, std::ios_base::openmode wh
 
 omemsizebuf::omemsizebuf(std::ios_base::openmode which)
 {
-    if (which & std::ios_base::in) {
+    if ((which & std::ios_base::in) || !(which & std::ios_base::out)) {
         throw std::invalid_argument("which");
     }
-
-    this->setp(nullptr, nullptr);
-}
-
-void omemsizebuf::setpptrs(char *first, char *next, char *end)
-{
-    setp(first, end);
-    pbump(next - first);
 }
 
 omemsizebuf::pos_type omemsizebuf::seekpos(pos_type off, std::ios_base::openmode which)
 {
-    setpptrs(pbase(), pbase() + off, epptr());
+    const off_type requested = static_cast<off_type>(off);
+    if (!(which & std::ios_base::out) || requested < 0 || requested > size_) {
+        return pos_type(off_type(-1));
+    }
 
-    return pptr() - pbase();
+    position_ = requested;
+    return pos_type(position_);
 }
 
 omemsizebuf::pos_type omemsizebuf::seekoff(off_type off, std::ios_base::seekdir dir, std::ios_base::openmode which)
 {
-    if (dir == std::ios_base::cur)
-        pbump(off);
-    else if (dir == std::ios_base::end)
-        setpptrs(pbase(), epptr() + off, epptr());
-    else if (dir == std::ios_base::beg)
-        setpptrs(pbase(), pbase() + off, epptr());
-
-    return pptr() - pbase();
-}
-
-std::streamsize omemsizebuf::xsputn(const char_type *s, std::streamsize n)
-{
-    if (pptr() == epptr()) {
-        setpptrs(pbase(), epptr(), epptr() + n);
+    if (!(which & std::ios_base::out)) {
+        return pos_type(off_type(-1));
     }
 
-    std::streamsize free_space = epptr() - pptr();
-    std::streamsize num_write = std::min(free_space, n);
+    off_type base = 0;
+    if (dir == std::ios_base::cur) {
+        base = position_;
+    } else if (dir == std::ios_base::end) {
+        base = size_;
+    } else if (dir != std::ios_base::beg) {
+        return pos_type(off_type(-1));
+    }
 
-    setpptrs(pbase(), pptr() + n, epptr());
+    if ((off > 0 && base > std::numeric_limits<off_type>::max() - off) ||
+        (off < 0 && base < std::numeric_limits<off_type>::lowest() - off)) {
+        return pos_type(off_type(-1));
+    }
 
-    return num_write;
+    return seekpos(pos_type(base + off), which);
+}
+
+std::streamsize omemsizebuf::xsputn(const char_type *, std::streamsize n)
+{
+    if (n <= 0 || position_ > std::numeric_limits<off_type>::max() - n) {
+        return 0;
+    }
+
+    position_ += n;
+    size_ = std::max(size_, position_);
+
+    return n;
 }
 
 omemsizebuf::int_type omemsizebuf::overflow(int_type ch)
 {
-    setpptrs(pbase(), epptr(), epptr() + 1);
+    if (traits_type::eq_int_type(ch, traits_type::eof())) {
+        return traits_type::not_eof(ch);
+    }
+    if (position_ == std::numeric_limits<off_type>::max()) {
+        return traits_type::eof();
+    }
+
+    ++position_;
+    size_ = std::max(size_, position_);
     return ch;
 }
 
@@ -432,7 +536,7 @@ inline bool t_digit(char c)
 
 inline char t_lower(char c)
 {
-    return std::tolower(c);
+    return Q_tolower(c);
 }
 
 int natstrcmp(const char *s1, const char *s2, bool case_sensitive)
@@ -682,7 +786,7 @@ bool natural_case_insensitive_less::operator()(const std::string &l, const std::
 std::string_view::const_iterator string_ifind(std::string_view haystack, std::string_view needle)
 {
     return std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(),
-        [](char a, char b) { return tolower(a) == tolower(b); });
+        [](char a, char b) { return Q_tolower(a) == Q_tolower(b); });
 }
 
 bool string_istarts_with(std::string_view haystack, std::string_view needle)
@@ -749,4 +853,23 @@ std::vector<uint8_t> StringToVector(const std::string &str)
 {
     std::vector<uint8_t> result(str.begin(), str.end());
     return result;
+}
+
+bool string_copy_to_array_z(std::string_view in, std::span<char> out)
+{
+    if (out.empty())
+        return false;
+
+    const size_t copy_size = std::min(in.size(), out.size() - 1);
+    std::copy_n(in.begin(), copy_size, out.begin());
+    std::fill(out.begin() + static_cast<std::ptrdiff_t>(copy_size), out.end(), '\0');
+
+    return in.size() < out.size();
+}
+
+std::string string_copy_from_array_z(std::span<const char> in, bool *success_out)
+{
+    const auto first_null = std::find(in.begin(), in.end(), '\0');
+    *success_out = first_null != in.end();
+    return std::string(in.begin(), first_null);
 }

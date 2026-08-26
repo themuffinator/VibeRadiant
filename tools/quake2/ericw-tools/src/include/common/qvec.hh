@@ -22,14 +22,18 @@
 #include <initializer_list>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <algorithm>
 #include <array>
+#include <iterator>
+#include <memory>
 #include <ostream>
 #include <fmt/core.h>
 #include <tuple>
 #include <functional>
+#include <type_traits>
 #include "common/mathlib.hh"
 
 template<class T, size_t N>
@@ -299,7 +303,7 @@ struct fmt::formatter<qvec<T, N>>
     constexpr auto parse(format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.end(); }
 
     template<typename FormatContext>
-    auto format(const qvec<T, N> &p, FormatContext &ctx) -> decltype(ctx.out())
+    auto format(const qvec<T, N> &p, FormatContext &ctx) const -> decltype(ctx.out())
     {
         for (size_t i = 0; i < N - 1; i++) {
             fmt::format_to(ctx.out(), "{}", p[i]);
@@ -814,7 +818,7 @@ template<class T>
 struct fmt::formatter<qplane3<T>> : formatter<qvec<T, 3>>
 {
     template<typename FormatContext>
-    auto format(const qplane3<T> &p, FormatContext &ctx) -> decltype(ctx.out())
+    auto format(const qplane3<T> &p, FormatContext &ctx) const -> decltype(ctx.out())
     {
         fmt::format_to(ctx.out(), "{{normal: ");
         fmt::formatter<qvec<T, 3>>::format(p.normal, ctx);
@@ -1019,7 +1023,7 @@ template<class T, size_t NRow, size_t NCol>
 struct fmt::formatter<qmat<T, NRow, NCol>> : formatter<qvec<T, NCol>>
 {
     template<typename FormatContext>
-    auto format(const qmat<T, NRow, NCol> &p, FormatContext &ctx) -> decltype(ctx.out())
+    auto format(const qmat<T, NRow, NCol> &p, FormatContext &ctx) const -> decltype(ctx.out())
     {
         for (size_t i = 0; i < NRow; i++) {
             fmt::format_to(ctx.out(), "[ ");
@@ -1184,6 +1188,131 @@ struct twosided
 {
     T front, back;
 
+    template<bool IsConst>
+    class basic_iterator
+    {
+        template<bool>
+        friend class basic_iterator;
+
+        using parent_type = std::conditional_t<IsConst, const twosided, twosided>;
+
+        parent_type *parent_ = nullptr;
+        std::ptrdiff_t index_ = 0;
+
+    public:
+        using value_type = T;
+        using difference_type = std::ptrdiff_t;
+        using reference = std::conditional_t<IsConst, const T &, T &>;
+        using pointer = std::conditional_t<IsConst, const T *, T *>;
+        using iterator_category = std::random_access_iterator_tag;
+        using iterator_concept = std::random_access_iterator_tag;
+
+        constexpr basic_iterator() = default;
+        constexpr basic_iterator(parent_type *parent, difference_type index)
+            : parent_(parent),
+              index_(index)
+        {
+        }
+
+        template<bool OtherConst>
+            requires(IsConst && !OtherConst)
+        constexpr basic_iterator(const basic_iterator<OtherConst> &other)
+            : parent_(other.parent_),
+              index_(other.index_)
+        {
+        }
+
+        constexpr reference operator*() const { return (*parent_)[static_cast<int32_t>(index_)]; }
+        constexpr pointer operator->() const { return std::addressof(operator*()); }
+        constexpr reference operator[](difference_type offset) const { return *(*this + offset); }
+
+        constexpr basic_iterator &operator++()
+        {
+            ++index_;
+            return *this;
+        }
+        constexpr basic_iterator operator++(int)
+        {
+            basic_iterator result = *this;
+            ++*this;
+            return result;
+        }
+        constexpr basic_iterator &operator--()
+        {
+            --index_;
+            return *this;
+        }
+        constexpr basic_iterator operator--(int)
+        {
+            basic_iterator result = *this;
+            --*this;
+            return result;
+        }
+        constexpr basic_iterator &operator+=(difference_type offset)
+        {
+            index_ += offset;
+            return *this;
+        }
+        constexpr basic_iterator &operator-=(difference_type offset)
+        {
+            index_ -= offset;
+            return *this;
+        }
+
+        friend constexpr basic_iterator operator+(basic_iterator iterator, difference_type offset)
+        {
+            iterator += offset;
+            return iterator;
+        }
+        friend constexpr basic_iterator operator+(difference_type offset, basic_iterator iterator)
+        {
+            iterator += offset;
+            return iterator;
+        }
+        friend constexpr basic_iterator operator-(basic_iterator iterator, difference_type offset)
+        {
+            iterator -= offset;
+            return iterator;
+        }
+
+        template<bool OtherConst>
+        constexpr difference_type operator-(const basic_iterator<OtherConst> &other) const
+        {
+            return index_ - other.index_;
+        }
+
+        template<bool OtherConst>
+        constexpr bool operator==(const basic_iterator<OtherConst> &other) const
+        {
+            return parent_ == other.parent_ && index_ == other.index_;
+        }
+        template<bool OtherConst>
+        constexpr bool operator<(const basic_iterator<OtherConst> &other) const
+        {
+            return index_ < other.index_;
+        }
+        template<bool OtherConst>
+        constexpr bool operator>(const basic_iterator<OtherConst> &other) const
+        {
+            return other < *this;
+        }
+        template<bool OtherConst>
+        constexpr bool operator<=(const basic_iterator<OtherConst> &other) const
+        {
+            return !(other < *this);
+        }
+        template<bool OtherConst>
+        constexpr bool operator>=(const basic_iterator<OtherConst> &other) const
+        {
+            return !(*this < other);
+        }
+    };
+
+    using iterator = basic_iterator<false>;
+    using const_iterator = basic_iterator<true>;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
     // 0 is front, 1 is back
     constexpr T &operator[](int32_t i)
     {
@@ -1206,11 +1335,20 @@ struct twosided
     }
 
     // iterator support
-    T *begin() { return &front; }
-    T *end() { return (&back) + 1; }
+    constexpr iterator begin() { return {this, 0}; }
+    constexpr iterator end() { return {this, 2}; }
 
-    const T *begin() const { return &front; }
-    const T *end() const { return (&back) + 1; }
+    constexpr const_iterator begin() const { return {this, 0}; }
+    constexpr const_iterator end() const { return {this, 2}; }
+    constexpr const_iterator cbegin() const { return begin(); }
+    constexpr const_iterator cend() const { return end(); }
+
+    constexpr reverse_iterator rbegin() { return reverse_iterator(end()); }
+    constexpr reverse_iterator rend() { return reverse_iterator(begin()); }
+    constexpr const_reverse_iterator rbegin() const { return const_reverse_iterator(end()); }
+    constexpr const_reverse_iterator rend() const { return const_reverse_iterator(begin()); }
+    constexpr const_reverse_iterator crbegin() const { return const_reverse_iterator(cend()); }
+    constexpr const_reverse_iterator crend() const { return const_reverse_iterator(cbegin()); }
 
     // swap the front and back values
     constexpr void swap() { std::swap(front, back); }

@@ -198,9 +198,9 @@ static unsigned TargetChecks(visstats_t &stats, const pstack_t *const head, cons
     leafbits_t &prevportalbits, leafbits_t &portalbits)
 {
     pstack_t stack;
-    visportal_t *p, *q;
+    visportal_t *q;
     qplane3d backplane;
-    int i, j, numchecks, numremain;
+    unsigned numchecks;
 
     if (prevstack->pass == NULL) {
         portalbits = std::move(prevportalbits);
@@ -208,7 +208,6 @@ static unsigned TargetChecks(visstats_t &stats, const pstack_t *const head, cons
     }
 
     numchecks = 0;
-    numremain = 0;
 
     stack.next = NULL;
     stack.leaf = NULL;
@@ -216,7 +215,7 @@ static unsigned TargetChecks(visstats_t &stats, const pstack_t *const head, cons
     stack.numseparators[0] = 0;
     stack.numseparators[1] = 0;
 
-    for (i = 0; i < STACK_WINDINGS; i++)
+    for (int i = 0; i < STACK_WINDINGS; i++)
         stack.windings_used[i] = false;
 
     leafbits_t local(portalleafs);
@@ -224,7 +223,8 @@ static unsigned TargetChecks(visstats_t &stats, const pstack_t *const head, cons
     stack.mightsee = &local;
 
     // check all portals for flowing into other leafs
-    for (i = 0, p = portals.data(); i < numportals * 2; i++, p++) {
+    for (size_t i = 0; i < portals.size(); ++i) {
+        visportal_t *p = &portals[i];
 
         if ((*stack.mightsee)[p->leaf])
             continue; // target check already done and passed
@@ -282,13 +282,12 @@ static unsigned TargetChecks(visstats_t &stats, const pstack_t *const head, cons
 
         // mark portal visible
         portalbits[i] = true;
-        numremain++;
 
         // inherit remaining portal visibilities
         leaf_t *l = &leafs[p->leaf];
-        for (int k = 0; k < l->portals.size(); k++) {
-            q = l->portals[k];
-            j = (q - portals.data()) ^ 1; // another portal leading into the same leaf
+        for (visportal_t *leaf_portal : l->portals) {
+            q = leaf_portal;
+            const size_t j = static_cast<size_t>(q - portals.data()) ^ 1; // opposite direction of the same portal
             if (i < j) // is it upcoming in iteration order?
                 portalbits[j] = bool(prevportalbits[j]);
         }
@@ -312,28 +311,29 @@ static unsigned TargetChecks(visstats_t &stats, const pstack_t *const head, cons
 */
 static unsigned IterativeTargetChecks(visstats_t &stats, pstack_t *const head)
 {
-    unsigned numchecks, numblocks;
+    unsigned numchecks;
 
     numchecks = 0;
-    numblocks = (portalleafs + leafbits_t::mask) >> leafbits_t::shift;
+    const size_t numblocks = (static_cast<size_t>(portalleafs) >> leafbits_t::shift) +
+                             ((static_cast<size_t>(portalleafs) & leafbits_t::mask) != 0);
 
-    leafbits_t portalbits(numportals * 2); // in contradiction to the typename, I know
+    leafbits_t portalbits(portals.size()); // in contradiction to the typename, I know
     portalbits.setall();
+    leafbits_t nextportalbits(portals.size());
 
     for (pstack_t *stack = head; stack; stack = stack->next) {
         if (stack->did_targetchecks)
             continue;
 
-        leafbits_t nextportalbits(numportals * 2);
-        nextportalbits.clear();
+        nextportalbits.resize(portals.size());
         numchecks += TargetChecks(stats, head, stack, portalbits, nextportalbits);
-        portalbits = std::move(nextportalbits);
+        std::swap(portalbits, nextportalbits);
 
         if (stack->next) {
             pstack_t *next = stack->next;
             uint32_t *nextsee = next->mightsee->data();
             uint32_t *mightsee = stack->mightsee->data();
-            for (int i = 0; i < numblocks; i++)
+            for (size_t i = 0; i < numblocks; i++)
                 nextsee[i] &= mightsee[i];
         }
 
@@ -399,8 +399,6 @@ static void RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t &prevs
     leafbits_t local(portalleafs);
     stack.mightsee = &local;
 
-    const auto vis = thread->leafvis.data();
-
     // check all portals for flowing into other leafs
     for (visportal_t *p : leaf->portals) {
         if (!(*prevstack.mightsee)[p->leaf]) {
@@ -408,26 +406,22 @@ static void RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t &prevs
             continue; // can't possibly see it
         }
 
-        uint32_t *test;
-
-        // if the portal can't see anything we haven't allready seen, skip it
-        if (p->status == pstat_done) {
+        // Portal completion publishes visbits, while completion propagation may
+        // still prune mightsee for portals that have not started. Take the
+        // intersection under the same lock as those writers so neither bitset
+        // is observed concurrently with mutation.
+        const portal_visibility_intersection_t visibility =
+            IntersectPortalVisibility(*p, *prevstack.mightsee, thread->leafvis, *stack.mightsee);
+        if (visibility.exact) {
             thread->stats.c_vistest++;
-            test = p->visbits.data();
         } else {
             thread->stats.c_mighttest++;
-            test = p->mightsee.data();
         }
-
+        const size_t numblocks = (static_cast<size_t>(portalleafs) >> leafbits_t::shift) +
+                                 ((static_cast<size_t>(portalleafs) & leafbits_t::mask) != 0);
         const auto might = stack.mightsee->data(); // buffer of stack.mightsee can change between iterations
-        uint32_t more = 0;
-        const int numblocks = (portalleafs + leafbits_t::mask) >> leafbits_t::shift;
-        for (int j = 0; j < numblocks; j++) {
-            might[j] = prevstack.mightsee->data()[j] & test[j];
-            more |= (might[j] & ~vis[j]);
-        }
 
-        if (!more) {
+        if (!visibility.more) {
             // can't see anything new
             thread->stats.c_portalskip++;
             continue;
@@ -439,7 +433,7 @@ static void RecursiveLeafFlow(int leafnum, threaddata_t *thread, pstack_t &prevs
         // calculate num_expected_targetchecks only if we're using it, since it's somewhat expensive to compute
         if (vis_options.targetratio.value() > 0.0) {
             int nummightsee = 0;
-            for (int j = 0; j < numblocks; j++) {
+            for (size_t j = 0; j < numblocks; j++) {
                 nummightsee += std::popcount(might[j]);
             }
             stack.num_expected_targetchecks = prevstack.num_expected_targetchecks + nummightsee;
@@ -544,18 +538,43 @@ visstats_t PortalFlow(visportal_t *p)
   ============================================================================
 */
 
-static void SimpleFlood(visportal_t &srcportal, int leafnum, const leafbits_t &portalsee)
+static void SimpleFlood(
+    visportal_t &srcportal, int start_leaf, const leafbits_t &portalsee, std::vector<int> &pending_leafs)
 {
-    if (srcportal.mightsee[leafnum])
+    pending_leafs.clear();
+    if (portalsee.size() != portals.size() || srcportal.mightsee.size() != leafs.size()) {
+        FError("portal flood has inconsistent visibility dimensions");
+    }
+    if (start_leaf < 0 || static_cast<size_t>(start_leaf) >= leafs.size()) {
+        FError("portal flood references invalid leaf {}", start_leaf);
+    }
+    if (srcportal.mightsee[start_leaf]) {
         return;
-
-    srcportal.mightsee[leafnum] = true;
+    }
+    srcportal.mightsee[start_leaf] = true;
     srcportal.nummightsee++;
+    pending_leafs.push_back(start_leaf);
 
-    leaf_t &leaf = leafs[leafnum];
-    for (const visportal_t *p : leaf.portals) {
-        if (portalsee[p - portals.data()]) {
-            SimpleFlood(srcportal, p->leaf, portalsee);
+    while (!pending_leafs.empty()) {
+        const int leafnum = pending_leafs.back();
+        pending_leafs.pop_back();
+
+        const leaf_t &leaf = leafs[leafnum];
+        for (auto portal = leaf.portals.rbegin(); portal != leaf.portals.rend(); ++portal) {
+            const size_t portal_index = CheckedPortalIndex(*portal);
+            if (!portalsee[portal_index]) {
+                continue;
+            }
+
+            const int next_leaf = (*portal)->leaf;
+            if (next_leaf < 0 || static_cast<size_t>(next_leaf) >= leafs.size()) {
+                FError("portal flood references invalid leaf {}", next_leaf);
+            }
+            if (!srcportal.mightsee[next_leaf]) {
+                srcportal.mightsee[next_leaf] = true;
+                srcportal.nummightsee++;
+                pending_leafs.push_back(next_leaf);
+            }
         }
     }
 }
@@ -567,14 +586,24 @@ static void SimpleFlood(visportal_t &srcportal, int leafnum, const leafbits_t &p
 */
 static void BasePortalThread(size_t portalnum)
 {
-    leafbits_t portalsee(numportals * 2);
+    struct base_portal_workspace_t
+    {
+        leafbits_t portalsee;
+        std::vector<int> pending_leafs;
+    };
+    thread_local base_portal_workspace_t workspace;
+
+    workspace.portalsee.resize(portals.size());
+    if (workspace.pending_leafs.capacity() < leafs.size()) {
+        workspace.pending_leafs.reserve(leafs.size());
+    }
 
     visportal_t &p = portals[portalnum];
     viswinding_t &w = *p.winding;
 
     p.mightsee.resize(portalleafs);
 
-    for (size_t i = 0; i < numportals * 2; i++) {
+    for (size_t i = 0; i < portals.size(); i++) {
         if (i == portalnum) {
             continue;
         }
@@ -630,13 +659,11 @@ static void BasePortalThread(size_t portalnum)
                 continue;
         }
 
-        portalsee[i] = 1;
+        workspace.portalsee[i] = true;
     }
 
     p.nummightsee = 0;
-    SimpleFlood(p, p.leaf, portalsee);
-
-    portalsee.clear();
+    SimpleFlood(p, p.leaf, workspace.portalsee, workspace.pending_leafs);
 }
 
 /*
@@ -646,5 +673,5 @@ static void BasePortalThread(size_t portalnum)
 */
 void BasePortalVis()
 {
-    logging::parallel_for(0, numportals * 2, BasePortalThread);
+    logging::parallel_for(size_t{0}, portals.size(), BasePortalThread);
 }

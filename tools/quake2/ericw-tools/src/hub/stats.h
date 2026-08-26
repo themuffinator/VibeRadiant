@@ -15,7 +15,7 @@ public:
     StatsPanel(QWidget *parent = nullptr);
 
 private:
-    void addStat(const QString &str, int value);
+    void addStat(const QString &str, qulonglong value);
 
 public:
     void updateWithBSP(const mbsp_t *bsp, const bspxentries_t &entries);

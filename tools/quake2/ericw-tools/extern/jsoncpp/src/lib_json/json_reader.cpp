@@ -16,7 +16,6 @@
 #include <cstring>
 #include <iostream>
 #include <istream>
-#include <iterator>
 #include <limits>
 #include <memory>
 #include <set>
@@ -24,6 +23,13 @@
 #include <utility>
 
 #include <cstdio>
+#if __cplusplus >= 201103L
+
+#if !defined(sscanf)
+#define sscanf std::sscanf
+#endif
+
+#endif //__cplusplus
 
 #if defined(_MSC_VER)
 #if !defined(_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES)
@@ -47,7 +53,11 @@ static size_t const stackLimit_g =
 
 namespace Json {
 
+#if __cplusplus >= 201103L || (defined(_CPPLIB_VER) && _CPPLIB_VER >= 520)
 using CharReaderPtr = std::unique_ptr<CharReader>;
+#else
+using CharReaderPtr = std::auto_ptr<CharReader>;
+#endif
 
 // Implementation of class Features
 // ////////////////////////////////
@@ -144,12 +154,7 @@ bool Reader::readValue() {
   // after calling readValue(). parse() executes one nodes_.push(), so > instead
   // of >=.
   if (nodes_.size() > stackLimit_g)
-#if JSON_USE_EXCEPTION
     throwRuntimeError("Exceeded stackLimit in readValue().");
-#else
-    // throwRuntimeError aborts. Don't abort here.
-    return false;
-#endif
 
   Token token;
   readTokenSkippingComments(token);

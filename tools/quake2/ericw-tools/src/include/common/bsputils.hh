@@ -37,7 +37,8 @@
 const dmodelh2_t *BSP_GetWorldModel(const mbsp_t *bsp);
 int Face_GetNum(const mbsp_t *bsp, const mface_t *f);
 
-// bounds-checked array access (assertion failure on out-of-bounds)
+// Bounds-checked array access. Malformed references raise ericwtools_error in
+// all build types instead of relying on debug-only assertions.
 const bsp2_dnode_t *BSP_GetNode(const mbsp_t *bsp, int nodenum);
 const mleaf_t *BSP_GetLeaf(const mbsp_t *bsp, int leafnum);
 int BSP_GetLeafNum(const mbsp_t *bsp, const mleaf_t *leaf);
@@ -120,11 +121,12 @@ size_t DecompressedVisSize(const mbsp_t *bsp);
 int VisleafToLeafnum(int visleaf);
 int LeafnumToVisleaf(int leafnum);
 bool Pvs_LeafVisible(const mbsp_t *bsp, const std::vector<uint8_t> &pvs, const mleaf_t *leaf);
-void DecompressVis(const uint8_t *in, const uint8_t *inend, uint8_t *out, uint8_t *outend);
+[[nodiscard]] bool DecompressVis(const uint8_t *in, const uint8_t *inend, uint8_t *out, uint8_t *outend);
 std::unordered_map<int, std::vector<uint8_t>> DecompressAllVis(const mbsp_t *bsp, bool trans_water = false);
 
 void BSP_VisitAllLeafs(const mbsp_t &bsp, const dmodelh2_t &model, const std::function<void(const mleaf_t &)> &visitor);
 
+void BSPX_ValidateDecoupledLM(const bspx_decoupled_lm_perface &face, size_t face_num);
 bspx_decoupled_lm_perface BSPX_DecoupledLM(const bspxentries_t &entries, int face_num);
 std::optional<bspxfacenormals> BSPX_FaceNormals(const mbsp_t &bsp, const bspxentries_t &entries);
 std::optional<lightgrid_octree_t> BSPX_LightgridOctree(const bspxentries_t &entries);

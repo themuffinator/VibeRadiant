@@ -21,6 +21,7 @@ See file, 'COPYING', for details.
 
 #include <QClipboard>
 #include <QCoreApplication>
+#include <QDir>
 #include <QDockWidget>
 #include <QString>
 #include <QDragEnterEvent>
@@ -54,7 +55,10 @@ See file, 'COPYING', for details.
 #include <QApplication>
 #include <QDesktopServices>
 #include <QCloseEvent>
+#include <cmath>
+#include <functional>
 #include <optional>
+#include <ranges>
 
 #include <common/bspfile.hh>
 #include <common/litfile.hh>
@@ -63,6 +67,7 @@ See file, 'COPYING', for details.
 #include <vis/vis.hh>
 #include <light/light.hh>
 #include <common/bspinfo.hh>
+#include <hub/preview.hh>
 #include <fmt/core.h>
 #include <fmt/chrono.h>
 #include <QMessageBox>
@@ -73,6 +78,7 @@ See file, 'COPYING', for details.
 // Recent files
 
 static constexpr auto RECENT_SETTINGS_KEY = "recent_files";
+static constexpr auto LAST_DIRECTORY_SETTINGS_KEY = "last_open_directory";
 static constexpr size_t MAX_RECENTS = 10;
 
 static void ClearRecents()
@@ -108,6 +114,18 @@ static QStringList GetRecents()
 {
     QSettings s;
     QStringList recents = s.value(RECENT_SETTINGS_KEY).toStringList();
+    recents.removeDuplicates();
+    for (auto recent = recents.begin(); recent != recents.end();) {
+        if (!QFileInfo::exists(*recent)) {
+            recent = recents.erase(recent);
+        } else {
+            ++recent;
+        }
+    }
+    while (recents.size() > MAX_RECENTS) {
+        recents.pop_back();
+    }
+    s.setValue(RECENT_SETTINGS_KEY, recents);
     return recents;
 }
 
@@ -141,18 +159,25 @@ static QString CameraBookmarkToQString(const camera_bookmark_t &b)
 
 static std::optional<camera_bookmark_t> CameraBookmarkFromQString(const QString &string)
 {
-    QStringList parts = string.split(' ', Qt::SkipEmptyParts);
+    const QStringList parts = string.split(' ', Qt::SkipEmptyParts);
     if (parts.length() != 6)
         return std::nullopt;
 
-    camera_bookmark_t result;
-    result.origin[0] = parts[0].toFloat();
-    result.origin[1] = parts[1].toFloat();
-    result.origin[2] = parts[2].toFloat();
+    std::array<bool, 6> valid{};
+    camera_bookmark_t result{};
+    result.origin[0] = parts[0].toFloat(&valid[0]);
+    result.origin[1] = parts[1].toFloat(&valid[1]);
+    result.origin[2] = parts[2].toFloat(&valid[2]);
 
-    result.forward[0] = parts[3].toFloat();
-    result.forward[1] = parts[4].toFloat();
-    result.forward[2] = parts[5].toFloat();
+    result.forward[0] = parts[3].toFloat(&valid[3]);
+    result.forward[1] = parts[4].toFloat(&valid[4]);
+    result.forward[2] = parts[5].toFloat(&valid[5]);
+
+    if (!std::ranges::all_of(valid, std::identity{}) || !std::isfinite(result.origin[0]) ||
+        !std::isfinite(result.origin[1]) || !std::isfinite(result.origin[2]) || !std::isfinite(result.forward[0]) ||
+        !std::isfinite(result.forward[1]) || !std::isfinite(result.forward[2]) || qv::length2(result.forward) == 0.0f) {
+        return std::nullopt;
+    }
 
     return {result};
 }
@@ -166,7 +191,9 @@ static void AddCameraBookmark(const camera_bookmark_t &b)
     QSettings s;
     QStringList qt_strings = s.value(CAMERA_BOOKMARKS_SETTINGS_KEY).toStringList();
 
-    qt_strings.push_front(CameraBookmarkToQString(b));
+    const QString serialized = CameraBookmarkToQString(b);
+    qt_strings.removeAll(serialized);
+    qt_strings.push_front(serialized);
 
     while (qt_strings.size() > MAX_CAMERA_BOOKMARKS) {
         qt_strings.pop_back();
@@ -195,12 +222,14 @@ ETLogWidget::ETLogWidget(QWidget *parent)
 {
     for (size_t i = 0; i < std::size(logTabNames); i++) {
         m_textEdits[i] = new QTextEdit();
+        m_textEdits[i]->setReadOnly(true);
+        m_textEdits[i]->setUndoRedoEnabled(false);
+        m_textEdits[i]->document()->setMaximumBlockCount(50'000);
 
         auto *formLayout = new QFormLayout();
         auto *form = new QWidget();
         formLayout->addRow(m_textEdits[i]);
         form->setLayout(formLayout);
-        setTabText(i, logTabNames[i]);
         addTab(form, logTabNames[i]);
         formLayout->setContentsMargins(0, 0, 0, 0);
     }
@@ -460,10 +489,9 @@ void MainWindow::createPropertiesSidebar()
     connect(reload_button, &QAbstractButton::clicked, this, &MainWindow::reload);
     connect(render_lightmap_only, &QAbstractButton::toggled, this,
         [this](bool checked) { glView->setLighmapOnly(checked); });
-    connect(render_fullbright, &QAbstractButton::toggled, this,
-        [this](bool checked) { glView->setFullbright(checked); });
-    connect(render_normals, &QAbstractButton::toggled, this,
-        [this](bool checked) { glView->setDrawNormals(checked); });
+    connect(
+        render_fullbright, &QAbstractButton::toggled, this, [this](bool checked) { glView->setFullbright(checked); });
+    connect(render_normals, &QAbstractButton::toggled, this, [this](bool checked) { glView->setDrawNormals(checked); });
     connect(show_tris, &QAbstractButton::toggled, this, [this](bool checked) { glView->setShowTris(checked); });
     connect(show_tris_seethrough, &QAbstractButton::toggled, this,
         [this](bool checked) { glView->setShowTrisSeeThrough(checked); });
@@ -493,9 +521,10 @@ void MainWindow::createPropertiesSidebar()
         [this](bool checked) { glView->setDrawLeafs(checked ? std::optional<int>{5} : std::nullopt); });
     connect(draw_portals, &QAbstractButton::toggled, this, [this](bool checked) { glView->setDrawPortals(checked); });
     connect(draw_leak, &QAbstractButton::toggled, this, [this](bool checked) { glView->setDrawLeak(checked); });
-    connect(draw_lightgrid, &QAbstractButton::toggled, this,
-        [this](bool checked) { glView->setDrawLightgrid(checked); });
-    connect(show_click_ray, &QAbstractButton::toggled, this, [this](bool checked) { glView->setShowClickRay(checked); });
+    connect(
+        draw_lightgrid, &QAbstractButton::toggled, this, [this](bool checked) { glView->setDrawLightgrid(checked); });
+    connect(
+        show_click_ray, &QAbstractButton::toggled, this, [this](bool checked) { glView->setShowClickRay(checked); });
     connect(show_hud, &QAbstractButton::toggled, this, [this](bool checked) { glView->setShowHud(checked); });
     connect(keep_position, &QAbstractButton::toggled, this, [this](bool checked) { glView->setKeepOrigin(checked); });
     connect(nearest, &QAbstractButton::toggled, this,
@@ -539,23 +568,39 @@ void MainWindow::logWidgetSetText(ETLogTab tab, const std::string &str)
     m_outputLogWidget->setTabText((int32_t)tab, str.c_str());
 }
 
+void MainWindow::appendLog(ETLogTab tab, const QString &text)
+{
+    auto *textEdit = m_outputLogWidget->textEdit(tab);
+    const bool atBottom = textEdit->verticalScrollBar()->value() == textEdit->verticalScrollBar()->maximum();
+    QTextCursor cursor(textEdit->document());
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(text);
+
+    if (atBottom) {
+        QScrollBar *bar = textEdit->verticalScrollBar();
+        bar->setValue(bar->maximum());
+    }
+}
+
 void MainWindow::hub_percent_callback(std::optional<uint32_t> percent, std::optional<duration> elapsed)
 {
-    int32_t tabIndex = (int32_t)m_activeLogTab;
+    const ETLogTab tab = m_activeLogTab.load();
+    const int32_t tabIndex = static_cast<int32_t>(tab);
 
     if (elapsed.has_value()) {
-        hub_log_callback(
-            logging::flag::PROGRESS, fmt::format("finished in: {:.3}\n", elapsed.value()).c_str());
+        hub_log_callback(logging::flag::PROGRESS, fmt::format("finished in: {:.3}\n", elapsed.value()).c_str());
         QMetaObject::invokeMethod(
-            this, std::bind(&MainWindow::logWidgetSetText, this, m_activeLogTab, ETLogWidget::logTabNames[tabIndex]));
+            this, [this, tab, tabIndex]() { logWidgetSetText(tab, ETLogWidget::logTabNames[tabIndex]); },
+            Qt::QueuedConnection);
     } else {
         if (percent.has_value()) {
+            const std::string title = fmt::format("{} [{:>3}%]", ETLogWidget::logTabNames[tabIndex], percent.value());
             QMetaObject::invokeMethod(
-                this, std::bind(&MainWindow::logWidgetSetText, this, m_activeLogTab,
-                          fmt::format("{} [{:>3}%]", ETLogWidget::logTabNames[tabIndex], percent.value())));
+                this, [this, tab, title]() { logWidgetSetText(tab, title); }, Qt::QueuedConnection);
         } else {
-            QMetaObject::invokeMethod(this, std::bind(&MainWindow::logWidgetSetText, this, m_activeLogTab,
-                                                fmt::format("{} (...)", ETLogWidget::logTabNames[tabIndex])));
+            const std::string title = fmt::format("{} (...)", ETLogWidget::logTabNames[tabIndex]);
+            QMetaObject::invokeMethod(
+                this, [this, tab, title]() { logWidgetSetText(tab, title); }, Qt::QueuedConnection);
         }
     }
 }
@@ -565,30 +610,14 @@ void MainWindow::hub_log_callback(logging::flag flags, const char *str)
     if (bitflags(flags) & logging::flag::PERCENT)
         return;
 
+    const ETLogTab tab = m_activeLogTab.load();
+    const QString text = QString::fromUtf8(str ? str : "");
     if (QApplication::instance()->thread() != QThread::currentThread()) {
-        QMetaObject::invokeMethod(this,
-            std::bind([this, flags](const std::string &s) -> void { hub_log_callback(flags, s.c_str()); },
-                std::string(str)));
+        QMetaObject::invokeMethod(this, [this, tab, text]() { appendLog(tab, text); }, Qt::QueuedConnection);
         return;
     }
 
-    auto *textEdit = m_outputLogWidget->textEdit(m_activeLogTab);
-    const bool atBottom = textEdit->verticalScrollBar()->value() == textEdit->verticalScrollBar()->maximum();
-    QTextDocument *doc = textEdit->document();
-    QTextCursor cursor(doc);
-    cursor.movePosition(QTextCursor::End);
-    cursor.beginEditBlock();
-    cursor.insertBlock();
-    cursor.insertHtml(QString::asprintf("%s\n", str));
-    cursor.endEditBlock();
-
-    // scroll scrollarea to bottom if it was at bottom when we started
-    //(we don't want to force scrolling to bottom if user is looking at a
-    // higher position)
-    if (atBottom) {
-        QScrollBar *bar = textEdit->verticalScrollBar();
-        bar->setValue(bar->maximum());
-    }
+    appendLog(tab, text);
 }
 
 void MainWindow::createOutputLog()
@@ -831,7 +860,19 @@ void MainWindow::updateCameraBookmarksSubmenu()
     });
 }
 
-MainWindow::~MainWindow() { }
+MainWindow::~MainWindow()
+{
+    if (m_compileThread) {
+        disconnect(m_compileThread, nullptr, this, nullptr);
+        m_compileThread->wait();
+        delete m_compileThread;
+        m_compileThread = nullptr;
+    }
+
+    // These callbacks are process-global and must not retain a destroyed window.
+    logging::set_print_callback({});
+    logging::set_percent_callback({});
+}
 
 static void OpenHelpFile(const QString &file)
 {
@@ -885,10 +926,18 @@ void MainWindow::setupMenu()
         QString text = QInputDialog::getText(
             this, tr("Move camera to"), tr("Enter X Y Z coords, space-separated"), QLineEdit::Normal, QString(), &ok);
 
-        QStringList comps = text.split(QString::fromLatin1(" "), Qt::SkipEmptyParts);
+        const QStringList comps = text.split(QString::fromLatin1(" "), Qt::SkipEmptyParts);
+        if (!ok || comps.length() != 3) {
+            return;
+        }
 
-        if (comps.length() >= 3) {
-            this->glView->setCamera(qvec3d{comps[0].toDouble(), comps[1].toDouble(), comps[2].toDouble()});
+        std::array<bool, 3> valid{};
+        const qvec3d position{comps[0].toDouble(&valid[0]), comps[1].toDouble(&valid[1]), comps[2].toDouble(&valid[2])};
+        if (std::ranges::all_of(valid, std::identity{}) && std::isfinite(position[0]) && std::isfinite(position[1]) &&
+            std::isfinite(position[2])) {
+            this->glView->setCamera(position);
+        } else {
+            QMessageBox::warning(this, tr("Invalid Position"), tr("Enter exactly three finite numbers: X Y Z."));
         }
     });
 
@@ -907,8 +956,9 @@ void MainWindow::setupMenu()
     });
     selectionMenu->addSeparator();
     m_actionFocusSelectedFace = selectionMenu->addAction(tr("Focus Camera on Selected Face"), this, [this]() {
-        const auto *bsp = std::get_if<mbsp_t>(&m_bspdata.bsp);
-        if (!bsp || m_selectedFaceIndex < 0 || m_selectedFaceIndex >= static_cast<int>(bsp->dfaces.size()))
+        const auto *bsp = m_bspdata ? std::get_if<mbsp_t>(&m_bspdata->bsp) : nullptr;
+        if (!bsp || bsp->dmodels.empty() || m_selectedFaceIndex < 0 ||
+            m_selectedFaceIndex >= static_cast<int>(bsp->dfaces.size()))
             return;
         const auto &face = bsp->dfaces.at(m_selectedFaceIndex);
         const qvec3f centroid = Face_Centroid(bsp, &face);
@@ -918,8 +968,9 @@ void MainWindow::setupMenu()
         glView->setCamera(camera_pos, forward);
     });
     m_actionFocusSelectedLeaf = selectionMenu->addAction(tr("Focus Camera on Selected Leaf"), this, [this]() {
-        const auto *bsp = std::get_if<mbsp_t>(&m_bspdata.bsp);
-        if (!bsp || m_selectedFaceIndex < 0 || m_selectedFaceIndex >= static_cast<int>(bsp->dfaces.size()))
+        const auto *bsp = m_bspdata ? std::get_if<mbsp_t>(&m_bspdata->bsp) : nullptr;
+        if (!bsp || bsp->dmodels.empty() || m_selectedFaceIndex < 0 ||
+            m_selectedFaceIndex >= static_cast<int>(bsp->dfaces.size()))
             return;
         const auto &face = bsp->dfaces.at(m_selectedFaceIndex);
         const qvec3f centroid = Face_Centroid(bsp, &face);
@@ -948,7 +999,9 @@ void MainWindow::setupMenu()
         }
         glView->setTextureFilter(std::optional<std::string>{m_selectedTexture});
     });
-    m_actionClearSelection = selectionMenu->addAction(tr("Clear Selection"), this, [this]() { glView->clearSelection(); });
+    m_actionClearSelection =
+        selectionMenu->addAction(tr("Clear Selection"), this, [this]() { glView->clearSelection(); });
+    m_actionClearSelection->setShortcut(QKeySequence(QStringLiteral("Esc")));
 
     if (m_actionCopySelectedFace)
         m_actionCopySelectedFace->setEnabled(false);
@@ -995,6 +1048,13 @@ void MainWindow::dropEvent(QDropEvent *event)
 
 void MainWindow::showEvent(QShowEvent *event)
 {
+    QMainWindow::showEvent(event);
+
+    if (m_initialFileHandled) {
+        return;
+    }
+    m_initialFileHandled = true;
+
     // FIXME: move command-line parsing somewhere else?
     // FIXME: support more command-line options?
     auto args = QCoreApplication::arguments();
@@ -1005,52 +1065,126 @@ void MainWindow::showEvent(QShowEvent *event)
 
 void MainWindow::fileOpen()
 {
-    // open the file browser in the directory containing the currently open file, if there is one
-    QString currentDir;
+    QSettings settings;
+    QString currentDir = settings.value(LAST_DIRECTORY_SETTINGS_KEY).toString();
     if (!m_mapFile.isEmpty()) {
         currentDir = QFileInfo(m_mapFile).absolutePath();
     }
 
     QString fileName = QFileDialog::getOpenFileName(this, tr("Open File"), currentDir, tr("Map (*.map);; BSP (*.bsp)"));
 
-    if (!fileName.isEmpty())
+    if (!fileName.isEmpty()) {
+        settings.setValue(LAST_DIRECTORY_SETTINGS_KEY, QFileInfo(fileName).absolutePath());
         loadFile(fileName);
+    }
 }
 
 void MainWindow::takeScreenshot()
 {
     QString fileName = QFileDialog::getSaveFileName(this, tr("Save Screenshot"), "", tr("PNG (*.png)"));
 
-    if (!fileName.isEmpty())
-        glView->takeScreenshot(fileName, 3840, 2160);
+    if (fileName.isEmpty()) {
+        return;
+    }
+    if (QFileInfo(fileName).suffix().isEmpty()) {
+        fileName += QStringLiteral(".png");
+    }
+    if (!glView->takeScreenshot(fileName, 3840, 2160)) {
+        QMessageBox::warning(this, tr("Screenshot Failed"),
+            tr("The screenshot could not be rendered or written to:\n%1").arg(QDir::toNativeSeparators(fileName)));
+    }
 }
 
 void MainWindow::fileReloadTimerExpired()
 {
-    qint64 currentSize = QFileInfo(m_mapFile).size();
+    if (m_compileThread) {
+        m_reloadPending = true;
+        return;
+    }
+
+    const QFileInfo mapInfo(m_mapFile);
+    if (!mapInfo.exists() || !mapInfo.isFile()) {
+        refreshWatcherPaths();
+        return;
+    }
+
+    const qint64 currentSize = mapInfo.size();
 
     // it was rewritten...
     if (currentSize != m_fileSize) {
         qDebug() << "size changed since last write, restarting timer";
+        m_fileSize = currentSize;
         m_fileReloadTimer->start(150);
         return;
     }
 
     // good to go? maybe?
     qDebug() << "size not changed, good to go";
+    refreshWatcherPaths();
     loadFileInternal(m_mapFile, true);
 
     m_fileSize = -1;
 }
 
+bool MainWindow::refreshWatcherPaths()
+{
+    if (!m_watcher || m_mapFile.isEmpty()) {
+        return false;
+    }
+
+    const QFileInfo fileInfo(m_mapFile);
+    const QString basePath = fileInfo.dir().filePath(fileInfo.completeBaseName());
+    QStringList candidates{m_mapFile, basePath + QStringLiteral(".lit"), basePath + QStringLiteral(".prt"),
+        basePath + QStringLiteral(".pts"), basePath + QStringLiteral(".lin")};
+    if (fileInfo.suffix().compare(QStringLiteral("map"), Qt::CaseInsensitive) == 0) {
+        candidates.push_back(basePath + QStringLiteral(".bsp"));
+        candidates.push_back(basePath + QStringLiteral(".rad"));
+    }
+
+    bool addedFile = false;
+    const QStringList watchedFiles = m_watcher->files();
+    for (const QString &candidate : candidates) {
+        if (QFileInfo::exists(candidate) && !watchedFiles.contains(candidate)) {
+            addedFile |= m_watcher->addPath(candidate);
+        }
+    }
+
+    const QString directory = fileInfo.absolutePath();
+    if (QFileInfo::exists(directory) && !m_watcher->directories().contains(directory)) {
+        m_watcher->addPath(directory);
+    }
+    return addedFile;
+}
+
 void MainWindow::loadFile(const QString &file)
 {
-    qDebug() << "load " << file;
+    const QFileInfo requestedInfo(file);
+    const QString suffix = requestedInfo.suffix();
+    if (!requestedInfo.exists() || !requestedInfo.isFile()) {
+        QMessageBox::warning(
+            this, tr("Open File"), tr("The selected file does not exist:\n%1").arg(QDir::toNativeSeparators(file)));
+        return;
+    }
+    if (suffix.compare(QStringLiteral("map"), Qt::CaseInsensitive) != 0 &&
+        suffix.compare(QStringLiteral("bsp"), Qt::CaseInsensitive) != 0) {
+        QMessageBox::warning(this, tr("Open File"), tr("vmt-hub can open only .map and .bsp files."));
+        return;
+    }
+
+    const QString normalizedFile = QDir::cleanPath(requestedInfo.absoluteFilePath());
+    qDebug() << "load " << normalizedFile;
+
+    if (m_compileThread) {
+        m_pendingFile = normalizedFile;
+        statusBar()->showMessage(
+            tr("Queued %1 until the current build finishes.").arg(QFileInfo(normalizedFile).fileName()));
+        return;
+    }
 
     // update recents
-    updateRecentsSubmenu(AddRecent(file));
+    updateRecentsSubmenu(AddRecent(normalizedFile));
 
-    m_mapFile = file;
+    m_mapFile = normalizedFile;
 
     if (m_watcher) {
         delete m_watcher;
@@ -1059,28 +1193,18 @@ void MainWindow::loadFile(const QString &file)
     m_fileSize = -1;
 
     // start watching it and related outputs
-    qDebug() << "adding path: " << m_watcher->addPath(file);
+    refreshWatcherPaths();
 
-    auto addWatchPath = [this](const QString &path) {
-        if (QFileInfo::exists(path)) {
-            qDebug() << "adding path: " << m_watcher->addPath(path);
-        } else {
-            qDebug() << "file not found: " << path;
+    connect(m_watcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &path) {
+        qDebug() << "got change notification for " << path;
+        refreshWatcherPaths();
+
+        if (m_compileThread) {
+            if (QDir::cleanPath(path).compare(m_mapFile, Qt::CaseInsensitive) == 0) {
+                m_reloadPending = true;
+            }
+            return;
         }
-    };
-
-    QFileInfo fileInfo(file);
-    const QString basePath = fileInfo.path() + "/" + fileInfo.completeBaseName();
-    addWatchPath(basePath + ".lit");
-    addWatchPath(basePath + ".prt");
-    addWatchPath(basePath + ".pts");
-    addWatchPath(basePath + ".lin");
-    if (fileInfo.suffix().compare("map", Qt::CaseInsensitive) == 0) {
-        addWatchPath(basePath + ".bsp");
-    }
-
-    connect(m_watcher, &QFileSystemWatcher::fileChanged, this, [&](const QString &path) {
-        qDebug() << "got change notif for " << m_mapFile;
 
         // check current files' size
         m_fileSize = QFileInfo(m_mapFile).size();
@@ -1089,7 +1213,22 @@ void MainWindow::loadFile(const QString &file)
         m_fileReloadTimer->start(150);
     });
 
-    loadFileInternal(file, false);
+    connect(m_watcher, &QFileSystemWatcher::directoryChanged, this, [this](const QString &) {
+        const bool sourceWasUnwatched = !m_watcher->files().contains(m_mapFile) && QFileInfo::exists(m_mapFile);
+        const bool addedCandidate = refreshWatcherPaths();
+        if (!addedCandidate) {
+            return;
+        }
+        if (m_compileThread) {
+            m_reloadPending |= sourceWasUnwatched;
+            return;
+        }
+
+        m_fileSize = QFileInfo(m_mapFile).size();
+        m_fileReloadTimer->start(150);
+    });
+
+    loadFileInternal(normalizedFile, false);
 }
 
 std::filesystem::path MakeFSPath(const QString &string)
@@ -1097,31 +1236,42 @@ std::filesystem::path MakeFSPath(const QString &string)
     return std::filesystem::path{string.toStdU16String()};
 }
 
-bspdata_t MainWindow::QbspVisLight_Common(const std::filesystem::path &name, std::vector<std::string> extra_common_args,
-    std::vector<std::string> extra_qbsp_args, std::vector<std::string> extra_vis_args,
-    std::vector<std::string> extra_light_args, bool run_vis, bool run_light)
+MainWindow::compile_result_t MainWindow::QbspVisLight_Common(const std::filesystem::path &name,
+    std::vector<std::string> extra_common_args, std::vector<std::string> extra_qbsp_args,
+    std::vector<std::string> extra_vis_args, std::vector<std::string> extra_light_args, bool run_vis, bool run_light)
 {
+    compile_result_t result;
+    result.temporary_directory =
+        std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/vmt-hub-preview-XXXXXX"));
+    if (!result.temporary_directory->isValid()) {
+        throw std::runtime_error(fmt::format("could not create temporary preview workspace: {}",
+            result.temporary_directory->errorString().toStdString()));
+    }
+
+    const auto paths = hub::make_preview_paths(name, MakeFSPath(result.temporary_directory->path()));
+    result.preview_artifact_path = paths.output_bsp;
+    if (run_light) {
+        hub::copy_map_rad_if_present(paths);
+    }
+
+    // Tool failures may throw before their normal logging::close() path. Close
+    // the process-global log before the temporary directory tries to remove it.
+    struct close_log_on_exit_t
+    {
+        ~close_log_on_exit_t() { logging::close(); }
+    } close_log_on_exit;
+
     auto resetActiveTabText = [&]() {
-        QMetaObject::invokeMethod(this, std::bind(&MainWindow::logWidgetSetText, this, m_activeLogTab,
-                                            ETLogWidget::logTabNames[(int32_t)m_activeLogTab]));
+        const ETLogTab tab = m_activeLogTab.load();
+        QMetaObject::invokeMethod(
+            this, [this, tab]() { logWidgetSetText(tab, ETLogWidget::logTabNames[static_cast<int32_t>(tab)]); },
+            Qt::QueuedConnection);
     };
 
-    auto bsp_path = name;
-    bsp_path.replace_extension(".bsp");
-
-    std::vector<std::string> args{
-        "", // the exe path, which we're ignoring in this case
-    };
-    for (auto &extra : extra_common_args) {
-        args.push_back(extra);
-    }
-    for (auto &extra : extra_qbsp_args) {
-        args.push_back(extra);
-    }
-    args.push_back(name.string());
+    const auto args = hub::make_preview_qbsp_arguments(extra_common_args, extra_qbsp_args, paths);
 
     // run qbsp
-    m_activeLogTab = ETLogTab::TAB_BSP;
+    m_activeLogTab.store(ETLogTab::TAB_BSP);
 
     InitQBSP(args);
     ProcessFile();
@@ -1130,17 +1280,8 @@ bspdata_t MainWindow::QbspVisLight_Common(const std::filesystem::path &name, std
 
     // run vis
     if (run_vis) {
-        m_activeLogTab = ETLogTab::TAB_VIS;
-        std::vector<std::string> vis_args{
-            "", // the exe path, which we're ignoring in this case
-        };
-        for (auto &extra : extra_common_args) {
-            vis_args.push_back(extra);
-        }
-        for (auto &extra : extra_vis_args) {
-            vis_args.push_back(extra);
-        }
-        vis_args.push_back(name.string());
+        m_activeLogTab.store(ETLogTab::TAB_VIS);
+        const auto vis_args = hub::make_preview_tool_arguments(extra_common_args, extra_vis_args, paths);
         vis_main(vis_args);
     }
 
@@ -1148,34 +1289,23 @@ bspdata_t MainWindow::QbspVisLight_Common(const std::filesystem::path &name, std
 
     // run light
     if (run_light) {
-        m_activeLogTab = ETLogTab::TAB_LIGHT;
-        std::vector<std::string> light_args{
-            "", // the exe path, which we're ignoring in this case
-        };
-        for (auto &extra : extra_common_args) {
-            light_args.push_back(extra);
-        }
-        for (auto &arg : extra_light_args) {
-            light_args.push_back(arg);
-        }
-        light_args.push_back(name.string());
-
+        m_activeLogTab.store(ETLogTab::TAB_LIGHT);
+        const auto light_args = hub::make_preview_light_arguments(extra_common_args, extra_light_args, paths);
         light_main(light_args);
     }
 
     resetActiveTabText();
 
-    m_activeLogTab = ETLogTab::TAB_hub;
+    m_activeLogTab.store(ETLogTab::TAB_hub);
 
-    // serialize obj
-    {
-        bspdata_t bspdata;
-        LoadBSPFile(bsp_path, &bspdata);
+    auto output_bsp = paths.output_bsp;
+    LoadBSPFile(output_bsp, &result.bspdata);
 
-        ConvertBSPFormat(&bspdata, &bspver_generic);
-
-        return bspdata;
+    if (!ConvertBSPFormat(&result.bspdata, &bspver_generic)) {
+        throw std::runtime_error("unsupported BSP format produced by compiler");
     }
+
+    return result;
 }
 
 static std::vector<std::string> ParseArgs(const QLineEdit *line_edit)
@@ -1252,161 +1382,209 @@ private:
     GLView *glView;
 };
 
-int MainWindow::compileMap(const QString &file, bool is_reload)
+int MainWindow::compileMap(const QString &file, std::vector<std::string> common_args,
+    std::vector<std::string> qbsp_args, std::vector<std::string> vis_args, std::vector<std::string> light_args,
+    bool run_vis, bool run_light)
 {
     fs::path fs_path = MakeFSPath(file);
-
-    m_bspdata = {};
+    auto result = std::make_unique<compile_result_t>();
     render_settings.reset();
 
     try {
-        if (fs_path.extension().compare(".bsp") == 0) {
+        if (QFileInfo(file).suffix().compare(QStringLiteral("bsp"), Qt::CaseInsensitive) == 0) {
 
-            LoadBSPFile(fs_path, &m_bspdata);
-
-            auto opts = ParseArgs(common_options);
+            result->preview_artifact_path = fs_path;
+            LoadBSPFile(fs_path, &result->bspdata);
 
             std::vector<const char *> argPtrs;
-
             argPtrs.push_back("");
-
-            for (const std::string &arg : opts) {
+            for (const std::string &arg : common_args) {
                 argPtrs.push_back(arg.data());
             }
 
-            render_settings.preinitialize(argPtrs.size(), argPtrs.data());
-            render_settings.initialize(argPtrs.size() - 1, argPtrs.data() + 1);
-            render_settings.postinitialize(argPtrs.size(), argPtrs.data());
+            const int argc = static_cast<int>(argPtrs.size());
+            render_settings.preinitialize(argc, argPtrs.data());
+            render_settings.initialize(argc - 1, argPtrs.data() + 1);
+            render_settings.postinitialize(argc, argPtrs.data());
 
-            m_bspdata.version->game->init_filesystem(fs_path, render_settings);
+            result->bspdata.version->game->init_filesystem(fs_path, render_settings);
 
-            ConvertBSPFormat(&m_bspdata, &bspver_generic);
+            if (!ConvertBSPFormat(&result->bspdata, &bspver_generic)) {
+                throw std::runtime_error("unsupported BSP format");
+            }
 
         } else {
-            m_bspdata =
-                QbspVisLight_Common(fs_path, ParseArgs(common_options), ParseArgs(qbsp_options), ParseArgs(vis_options),
-                    ParseArgs(light_options), vis_checkbox->isChecked(), light_checkbox->isChecked());
+            *result = QbspVisLight_Common(fs_path, std::move(common_args), std::move(qbsp_args), std::move(vis_args),
+                std::move(light_args), run_vis, run_light);
 
             // FIXME: move to a hub_settings
-            settings::common_settings settings;
-
             // FIXME: copy the -path args from light
-            settings.paths.copy_from(::light_options.paths);
+            render_settings.paths.copy_from(::light_options.paths);
 
-            m_bspdata.loadversion->game->init_filesystem(file.toStdString(), settings);
+            result->bspdata.loadversion->game->init_filesystem(fs_path, render_settings);
         }
     } catch (const settings::parse_exception &p) {
-        // FIXME: threading error: don't call Qt widgets code from background thread
-        auto *textEdit = m_outputLogWidget->textEdit(m_activeLogTab);
-        textEdit->append(QString::fromUtf8(p.what()) + QString::fromLatin1("\n"));
-        m_activeLogTab = ETLogTab::TAB_hub;
+        hub_log_callback(logging::flag::DEFAULT, fmt::format("error: {}\n", p.what()).c_str());
+        m_activeLogTab.store(ETLogTab::TAB_hub);
         return 1;
     } catch (const settings::quit_after_help_exception &p) {
-        // FIXME: threading error: don't call Qt widgets code from background thread
-        auto *textEdit = m_outputLogWidget->textEdit(m_activeLogTab);
-        textEdit->append(QString::fromUtf8(p.what()) + QString::fromLatin1("\n"));
-        m_activeLogTab = ETLogTab::TAB_hub;
+        hub_log_callback(logging::flag::DEFAULT, fmt::format("{}\n", p.what()).c_str());
+        m_activeLogTab.store(ETLogTab::TAB_hub);
         return 1;
     } catch (const std::exception &other) {
-        // FIXME: threading error: don't call Qt widgets code from background thread
-        auto *textEdit = m_outputLogWidget->textEdit(m_activeLogTab);
-        textEdit->append(QString::fromUtf8(other.what()) + QString::fromLatin1("\n"));
-        m_activeLogTab = ETLogTab::TAB_hub;
+        hub_log_callback(logging::flag::DEFAULT, fmt::format("error: {}\n", other.what()).c_str());
+        m_activeLogTab.store(ETLogTab::TAB_hub);
         return 1;
     }
 
     // try to load .lit
-    auto lit_path = fs_path;
+    auto lit_path = result->preview_artifact_path;
     lit_path.replace_extension(".lit");
 
-    m_hdr_litdata = {};
-    m_litdata = {};
-
     try {
-        if (const auto *bsp = std::get_if<mbsp_t>(&m_bspdata.bsp)) {
+        if (const auto *bsp = std::get_if<mbsp_t>(&result->bspdata.bsp)) {
             auto lit_variant = LoadLitFile(lit_path, *bsp);
 
             if (auto *lit1_ptr = std::get_if<lit1_t>(&lit_variant)) {
-                m_litdata = std::move(lit1_ptr->rgbdata);
+                result->litdata = std::move(lit1_ptr->rgbdata);
             } else if (auto *lit_hdr_ptr = std::get_if<lit_hdr>(&lit_variant)) {
-                m_hdr_litdata = std::move(lit_hdr_ptr->samples);
+                result->hdr_litdata = std::move(lit_hdr_ptr->samples);
             }
         }
     } catch (const std::runtime_error &error) {
         logging::print("error loading lit: {}", error.what());
-        m_litdata = {};
-        m_hdr_litdata = {};
     }
 
+    m_compileResult = std::move(result);
     return 0;
 }
 
 void MainWindow::compileThreadExited()
 {
-    // clear lightstyle widgets
-    while (QWidget *w = lightstyles->parentWidget()->findChild<QWidget *>(QString(), Qt::FindDirectChildrenOnly)) {
-        delete w;
-    }
-
     delete m_compileThread;
     m_compileThread = nullptr;
 
-    if (!std::holds_alternative<mbsp_t>(m_bspdata.bsp)) {
-        return;
-    }
-    const auto &bsp = std::get<mbsp_t>(m_bspdata.bsp);
+    bool loaded = false;
+    auto result = std::move(m_compileResult);
+    if (result && std::holds_alternative<mbsp_t>(result->bspdata.bsp)) {
+        try {
+            const auto &candidate_bsp = std::get<mbsp_t>(result->bspdata.bsp);
+            auto ents = EntData_Parse(candidate_bsp);
+            auto atlas = build_lightmap_atlas(candidate_bsp, result->bspdata.bspx.entries, result->litdata,
+                result->hdr_litdata, false, bspx_decoupled_lm->isChecked());
 
-    auto ents = EntData_Parse(bsp);
+            auto candidate_bspdata = std::make_shared<bspdata_t>(std::move(result->bspdata));
+            const auto &bsp = std::get<mbsp_t>(candidate_bspdata->bsp);
+            auto shared_bsp = std::shared_ptr<const mbsp_t>(candidate_bspdata, &bsp);
 
-    // build lightmap atlas
-    auto atlas = build_lightmap_atlas(
-        bsp, m_bspdata.bspx.entries, m_litdata, m_hdr_litdata, false, bspx_decoupled_lm->isChecked());
+            const QString previewFile = result->temporary_directory
+                                            ? QString::fromStdU16String(result->preview_artifact_path.u16string())
+                                            : m_compileFile;
+            // GLView consumes the associated .prt/.pts/.lin files synchronously;
+            // keep the owned preview directory alive through this call.
+            glView->renderBSP(previewFile, std::move(shared_bsp), candidate_bspdata->bspx.entries, ents, atlas,
+                render_settings, bspx_normals->isChecked());
 
-    glView->renderBSP(m_mapFile, bsp, m_bspdata.bspx.entries, ents, atlas, render_settings, bspx_normals->isChecked());
+            // Publish the new CPU-side preview only after GLView has validated
+            // and uploaded it successfully.
+            m_bspdata = std::move(candidate_bspdata);
+            m_litdata = std::move(result->litdata);
+            m_hdr_litdata = std::move(result->hdr_litdata);
 
-    if (!m_fileWasReload && !glView->getKeepOrigin()) {
-        for (auto &ent : ents) {
-            if (ent.get("classname") == "info_player_start") {
-                qvec3f origin;
-                ent.get_vector("origin", origin);
+            if (!m_fileWasReload && !glView->getKeepOrigin()) {
+                for (auto &ent : ents) {
+                    if (ent.get("classname") == "info_player_start") {
+                        qvec3f origin;
+                        ent.get_vector("origin", origin);
 
-                qvec3f angles{};
+                        qvec3f angles{};
+                        if (ent.has("angles")) {
+                            ent.get_vector("angles", angles);
+                            angles = {angles[1], -angles[0], angles[2]}; // -pitch yaw roll -> yaw pitch roll
+                        } else if (ent.has("angle")) {
+                            angles = {ent.get_float("angle"), 0, 0};
+                        } else if (ent.has("mangle")) {
+                            ent.get_vector("mangle", angles);
+                        }
 
-                if (ent.has("angles")) {
-                    ent.get_vector("angles", angles);
-                    angles = {angles[1], -angles[0], angles[2]}; // -pitch yaw roll -> yaw pitch roll
-                } else if (ent.has("angle"))
-                    angles = {ent.get_float("angle"), 0, 0};
-                else if (ent.has("mangle"))
-                    ent.get_vector("mangle", angles);
+                        glView->setCamera(origin, qv::vec_from_mangle(angles));
+                        break;
+                    }
+                }
+            }
 
-                glView->setCamera(origin, qv::vec_from_mangle(angles));
-                break;
+            while (QLayoutItem *item = lightstyles->takeAt(0)) {
+                delete item->widget();
+                delete item;
+            }
+            for (const auto &style_entry : atlas.style_to_lightmap_atlas) {
+                lightstyles->addWidget(new QLightStyleSlider(style_entry.first, glView));
+            }
+
+            stats_panel->updateWithBSP(&bsp, m_bspdata->bspx.entries);
+            statusBar()->showMessage(tr("Loaded %1").arg(QFileInfo(m_compileFile).fileName()), 3000);
+            loaded = true;
+        } catch (const std::exception &error) {
+            appendLog(ETLogTab::TAB_hub, tr("error preparing preview: %1\n").arg(QString::fromUtf8(error.what())));
+            if (!glView->hasPreview()) {
+                // GLView clears partially uploaded GPU state on failure. Clear
+                // the matching published CPU/UI state as well, while retaining
+                // an old preview when validation failed before upload began.
+                glView->clearSelection();
+                m_bspdata.reset();
+                m_litdata.clear();
+                m_hdr_litdata.clear();
+                while (QLayoutItem *item = lightstyles->takeAt(0)) {
+                    delete item->widget();
+                    delete item;
+                }
+                stats_panel->updateWithBSP(nullptr, {});
             }
         }
     }
 
-    // set lightstyle data
-    for (auto &style_entry : atlas.style_to_lightmap_atlas) {
-
-        auto *style = new QLightStyleSlider(style_entry.first, glView);
-        lightstyles->addWidget(style);
+    if (!loaded) {
+        statusBar()->showMessage(tr("Build or load failed for %1").arg(QFileInfo(m_compileFile).fileName()), 5000);
     }
 
-    stats_panel->updateWithBSP(&bsp, m_bspdata.bspx.entries);
+    refreshWatcherPaths();
+    m_compileFile.clear();
+
+    if (!m_pendingFile.isEmpty()) {
+        const QString pendingFile = m_pendingFile;
+        m_pendingFile.clear();
+        m_reloadPending = false;
+        loadFile(pendingFile);
+    } else if (m_reloadPending) {
+        m_reloadPending = false;
+        if (QFileInfo::exists(m_mapFile)) {
+            loadFileInternal(m_mapFile, true);
+        }
+    }
 }
 
 void MainWindow::loadFileInternal(const QString &file, bool is_reload)
 {
-    // TODO
-    if (m_compileThread)
+    if (m_compileThread) {
+        m_reloadPending = true;
         return;
+    }
 
     qDebug() << "loadFileInternal " << file;
 
     // just in case
     m_fileReloadTimer->stop();
     m_fileWasReload = is_reload;
+    m_compileFile = file;
+
+    // Snapshot widget state on the GUI thread. The compiler worker must never
+    // read QWidget instances directly.
+    const auto commonArgs = ParseArgs(common_options);
+    const auto qbspArgs = ParseArgs(qbsp_options);
+    const auto visArgs = ParseArgs(vis_options);
+    const auto lightArgs = ParseArgs(light_options);
+    const bool runVis = vis_checkbox->isChecked();
+    const bool runLight = light_checkbox->isChecked();
 
     // persist settings
     QSettings s;
@@ -1463,7 +1641,16 @@ void MainWindow::loadFileInternal(const QString &file, bool is_reload)
         edit->clear();
     }
 
-    m_compileThread = QThread::create(std::bind(&MainWindow::compileMap, this, file, is_reload));
+    m_activeLogTab.store(ETLogTab::TAB_hub);
+    m_compileResult.reset();
+    statusBar()->showMessage(is_reload ? tr("Rebuilding %1...").arg(QFileInfo(file).fileName())
+                                       : tr("Loading %1...").arg(QFileInfo(file).fileName()));
+
+    m_compileThread =
+        QThread::create([this, file, commonArgs, qbspArgs, visArgs, lightArgs, runVis, runLight]() mutable {
+            compileMap(file, std::move(commonArgs), std::move(qbspArgs), std::move(visArgs), std::move(lightArgs),
+                runVis, runLight);
+        });
     connect(m_compileThread, &QThread::finished, this, &MainWindow::compileThreadExited);
     m_compileThread->start();
 }
@@ -1476,8 +1663,8 @@ void MainWindow::displayCameraPositionInfo()
     std::string leaf_type;
     int32_t area = -1;
     {
-        const auto *bsp = std::get_if<mbsp_t>(&m_bspdata.bsp);
-        if (!bsp)
+        const auto *bsp = m_bspdata ? std::get_if<mbsp_t>(&m_bspdata->bsp) : nullptr;
+        if (!bsp || bsp->dmodels.empty())
             return;
 
         const mleaf_t *leaf = BSP_FindLeafAtPoint(bsp, &bsp->dmodels[0], point);
@@ -1508,7 +1695,7 @@ void MainWindow::displaySelectedFaceInfo(int faceIndex)
         return;
     }
 
-    const auto *bsp = std::get_if<mbsp_t>(&m_bspdata.bsp);
+    const auto *bsp = m_bspdata ? std::get_if<mbsp_t>(&m_bspdata->bsp) : nullptr;
     if (!bsp || faceIndex < 0 || faceIndex >= static_cast<int>(bsp->dfaces.size())) {
         m_selectionStatus->clear();
         m_selectedFaceIndex = -1;
@@ -1559,7 +1746,7 @@ void MainWindow::displaySelectedFaceInfo(int faceIndex)
 
     const qvec3f centroid = Face_Centroid(bsp, &face);
     const qvec3d centroid_d{centroid[0], centroid[1], centroid[2]};
-    const mleaf_t *leaf = BSP_FindLeafAtPoint(bsp, &bsp->dmodels[0], centroid_d);
+    const mleaf_t *leaf = bsp->dmodels.empty() ? nullptr : BSP_FindLeafAtPoint(bsp, &bsp->dmodels[0], centroid_d);
     int leaf_index = -1;
     int area = -1;
     if (leaf) {
@@ -1591,4 +1778,3 @@ void MainWindow::displaySelectedFaceInfo(int faceIndex)
         glView->setTextureFilter(std::optional<std::string>{m_selectedTexture});
     }
 }
-

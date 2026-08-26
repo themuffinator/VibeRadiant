@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 
 // litheader_t::v1_t
 
@@ -136,42 +137,66 @@ lit_variant_t LoadLitFile(const fs::path &path, const mbsp_t &bsp)
 
     stream >> endianness<std::endian::little>;
 
-    std::array<char, 4> ident;
+    std::array<char, 4> ident{};
     stream >= ident;
+    if (!stream) {
+        throw std::runtime_error("truncated lit header");
+    }
     if (ident != std::array<char, 4>{'Q', 'L', 'I', 'T'}) {
         throw std::runtime_error("invalid lit ident");
     }
 
-    int version;
+    int32_t version = 0;
     stream >= version;
-    if (version == LIT_VERSION) {
-        std::vector<uint8_t> litdata;
-        uint8_t b;
-        while (stream >= b && stream.good()) {
-            litdata.push_back(b);
-        }
-
-        // validate data length
-        if (litdata.size() != bsp.lightsamples() * 3) {
-            throw std::runtime_error("incorrect lit size");
-        }
-
-        return {lit1_t{.rgbdata = std::move(litdata)}};
-    } else if (version == LIT_VERSION_E5BGR9) {
-        std::vector<uint32_t> hdrsamples;
-
-        uint32_t sample;
-        while (stream >= sample && stream.good()) {
-            hdrsamples.push_back(sample);
-        }
-
-        // validate data length
-        if (hdrsamples.size() != bsp.lightsamples()) {
-            throw std::runtime_error("incorrect hdr lit size");
-        }
-
-        return {lit_hdr{.samples = std::move(hdrsamples)}};
+    if (!stream) {
+        throw std::runtime_error("truncated lit header");
     }
 
-    throw std::runtime_error("invalid lit version");
+    constexpr size_t header_size = sizeof(ident) + sizeof(version);
+    const size_t sample_count = bsp.lightsamples();
+    size_t bytes_per_sample = 0;
+    if (version == LIT_VERSION) {
+        bytes_per_sample = 3;
+    } else if (version == LIT_VERSION_E5BGR9) {
+        bytes_per_sample = sizeof(uint32_t);
+    } else {
+        throw std::runtime_error("invalid lit version");
+    }
+
+    if (sample_count > (std::numeric_limits<size_t>::max() - header_size) / bytes_per_sample ||
+        sample_count > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()) / bytes_per_sample) {
+        throw std::runtime_error("lit sample count is too large");
+    }
+    const size_t payload_size = sample_count * bytes_per_sample;
+    const size_t expected_size = header_size + payload_size;
+
+    stream.seekg(0, std::ios_base::end);
+    const std::streampos end = stream.tellg();
+    if (end < 0 || static_cast<uint64_t>(end) != static_cast<uint64_t>(expected_size)) {
+        throw std::runtime_error(version == LIT_VERSION ? "incorrect lit size" : "incorrect hdr lit size");
+    }
+    stream.seekg(static_cast<std::streamoff>(header_size), std::ios_base::beg);
+    if (!stream) {
+        throw std::runtime_error("unable to seek to lit samples");
+    }
+
+    if (version == LIT_VERSION) {
+        std::vector<uint8_t> litdata(payload_size);
+        if (payload_size != 0) {
+            stream.read(reinterpret_cast<char *>(litdata.data()), static_cast<std::streamsize>(payload_size));
+            if (!stream || stream.gcount() != static_cast<std::streamsize>(payload_size)) {
+                throw std::runtime_error("truncated lit data");
+            }
+        }
+        return {lit1_t{.rgbdata = std::move(litdata)}};
+    }
+
+    std::vector<uint32_t> hdrsamples(sample_count);
+    for (uint32_t &sample : hdrsamples) {
+        stream >= sample;
+    }
+    if (!stream) {
+        throw std::runtime_error("truncated hdr lit data");
+    }
+    return {lit_hdr{.samples = std::move(hdrsamples)}};
 }

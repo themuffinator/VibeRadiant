@@ -26,6 +26,10 @@
 #include <common/prtfile.hh>
 #include <vis/leafbits.hh>
 
+#include <limits>
+#include <new>
+#include <span>
+
 constexpr double VIS_ON_EPSILON = 0.1;
 constexpr double VIS_EQUAL_EPSILON = 0.001;
 
@@ -66,11 +70,18 @@ struct viswinding_t
 
     using unique_ptr = std::unique_ptr<viswinding_t, viswinding_deleter_t>;
 
-    static inline unique_ptr new_heap_winding(int size)
+    static inline unique_ptr new_heap_winding(size_t size)
     {
+        if (size > (std::numeric_limits<size_t>::max() - offsetof(viswinding_t, points)) / sizeof(qvec3d)) {
+            throw std::bad_alloc();
+        }
+
         const size_t bytes = offsetof(viswinding_t, points) + sizeof(qvec3d) * size;
 
         viswinding_t *result = static_cast<viswinding_t *>(malloc(bytes));
+        if (!result) {
+            throw std::bad_alloc();
+        }
         result->numpoints = size;
 
         return unique_ptr(result, viswinding_deleter_t());
@@ -101,6 +112,12 @@ struct viswinding_t
     // sets origin & radius
     inline void set_winding_sphere()
     {
+        if (numpoints == 0) {
+            origin = {};
+            radius = 0;
+            return;
+        }
+
         // set origin
         origin = {};
         for (size_t i = 0; i < numpoints; ++i)
@@ -135,6 +152,12 @@ struct visportal_t
     leafbits_t visbits, mightsee;
     int nummightsee;
     int numcansee;
+};
+
+struct portal_visibility_intersection_t
+{
+    uint32_t more;
+    bool exact;
 };
 
 inline float viswinding_t::distFromPortal(visportal_t &p)
@@ -207,6 +230,22 @@ struct visstats_t
     }
 };
 
+struct visibility_summary_t
+{
+    size_t rows = 0;
+    int minimum = 0;
+    int maximum = 0;
+    double mean = 0;
+    double standard_deviation = 0;
+    double percentage = 0;
+};
+
+visibility_summary_t summarize_visibility(std::span<const int> visible_counts, int possible_count);
+std::vector<int> expand_leaf_visibility_counts(
+    std::span<const int> cluster_visible_counts, std::span<const mleaf_t> real_leaves);
+void validate_prt_leaf_mapping_cardinality(const prtfile_t &prtfile, const mbsp_t &bsp);
+uint64_t prt_topology_digest(const prtfile_t &prtfile);
+
 viswinding_t *AllocStackWinding(pstack_t &stack);
 void FreeStackWinding(viswinding_t *&w, pstack_t &stack);
 viswinding_t *ClipStackWinding(visstats_t &stats, viswinding_t *in, pstack_t &stack, const qplane3d &split);
@@ -234,6 +273,7 @@ extern int leafbytes_real;
 extern int leaflongs;
 
 extern fs::path portalfile, statefile, statetmpfile;
+extern uint64_t portal_topology_digest;
 
 namespace vis
 {
@@ -244,9 +284,13 @@ void BasePortalVis();
 
 visstats_t PortalFlow(visportal_t *p);
 
+portal_visibility_intersection_t IntersectPortalVisibility(const visportal_t &portal,
+    const leafbits_t &previous_mightsee, const leafbits_t &already_visible, leafbits_t &intersection);
+size_t CheckedPortalIndex(const visportal_t *portal);
+
 void CalcAmbientSounds(mbsp_t *bsp);
 
-void CalcPHS(mbsp_t *bsp);
+void CalcPHS(mbsp_t *bsp, std::span<const uint8_t> cached_pvs = {}, size_t cached_stride = 0);
 
 extern qtime_point starttime, endtime, statetime;
 

@@ -29,7 +29,7 @@ class leafbits_t
     size_t _size = 0;
     std::unique_ptr<uint32_t[]> bits{};
 
-    constexpr size_t block_size() const { return (_size + mask) >> shift; }
+    constexpr size_t block_size() const { return (_size >> shift) + ((_size & mask) != 0); }
     inline std::unique_ptr<uint32_t[]> allocate() { return std::make_unique<uint32_t[]>(block_size()); }
     constexpr size_t byte_size() const { return block_size() * sizeof(*bits.get()); }
 
@@ -48,7 +48,9 @@ public:
     inline leafbits_t(const leafbits_t &copy)
         : leafbits_t(copy._size)
     {
-        memcpy(bits.get(), copy.bits.get(), byte_size());
+        if (const size_t bytes = byte_size()) {
+            memcpy(bits.get(), copy.bits.get(), bytes);
+        }
     }
 
     inline leafbits_t(leafbits_t &&move) noexcept
@@ -60,6 +62,9 @@ public:
 
     inline leafbits_t &operator=(leafbits_t &&move) noexcept
     {
+        if (this == &move) {
+            return *this;
+        }
         _size = move._size;
         bits = std::move(move.bits);
 
@@ -70,18 +75,40 @@ public:
 
     inline leafbits_t &operator=(const leafbits_t &copy)
     {
+        if (this == &copy) {
+            return *this;
+        }
         resize(copy._size);
-        memcpy(bits.get(), copy.bits.get(), byte_size());
+        if (const size_t bytes = byte_size()) {
+            memcpy(bits.get(), copy.bits.get(), bytes);
+        }
         return *this;
     }
 
     constexpr size_t size() const { return _size; }
 
     // this clears existing bit data!
-    inline void resize(size_t new_size) { *this = leafbits_t(new_size); }
+    inline void resize(size_t new_size)
+    {
+        if (new_size != _size) {
+            *this = leafbits_t(new_size);
+        } else {
+            clear();
+        }
+    }
 
-    inline void clear() { memset(bits.get(), 0, byte_size()); }
-    inline void setall() { memset(bits.get(), 0xff, byte_size()); }
+    inline void clear()
+    {
+        if (const size_t bytes = byte_size()) {
+            memset(bits.get(), 0, bytes);
+        }
+    }
+    inline void setall()
+    {
+        if (const size_t bytes = byte_size()) {
+            memset(bits.get(), 0xff, bytes);
+        }
+    }
 
     inline uint32_t *data() { return bits.get(); }
     inline const uint32_t *data() const { return bits.get(); }

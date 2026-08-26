@@ -31,7 +31,6 @@
 #include <light/ltface.hh>
 #include <light/write.hh> // for facesup_t
 #include <light/trace_embree.hh>
-#include <light/cache.hh> // Incremental lighting
 
 #include <common/log.hh>
 #include <common/bsputils.hh>
@@ -51,6 +50,8 @@
 #include <map>
 #include <set>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <mutex>
 #include <string>
 
@@ -63,6 +64,12 @@ bool dirt_in_use = false;
 
 // Context Global
 vibey::light::LightContext *g_ctx = nullptr;
+
+namespace
+{
+std::mutex light_main_mutex;
+thread_local bool light_main_active_on_this_thread = false;
+} // namespace
 
 // Legacy Proxy Accessors
 std::span<lightsurf_t> &LightSurfaces()
@@ -158,6 +165,8 @@ worldspawn_keys::worldspawn_keys()
       lightmapgamma{this, "gamma", 1.0, 0.0, 100.0, &worldspawn_group},
       addminlight{this, "addmin", false, &worldspawn_group},
       minlight{this, {"light", "minlight"}, 0, &worldspawn_group},
+      minlight_grid{this, {"mingridlight", "minlight_grid"}, 0, &worldspawn_group,
+          "override minlight for BSPX lightgrids; inherits minlight when unspecified"},
       minlightMottle{this, {"minlight_mottle", "minlightMottle"}, false, &worldspawn_group},
       maxlight{this, "maxlight", 0, &worldspawn_group},
       minlight_color{this, {"minlight_color", "mincolor"}, 255.0, 255.0, 255.0, &worldspawn_group},
@@ -207,26 +216,34 @@ worldspawn_keys::worldspawn_keys()
 
 // light_settings::setting_soft
 
-bool light_settings::setting_soft::parse(const std::string &setting_name, parser_base_t &parser, source source)
+void light_settings::setting_action::reset()
 {
-    if (!parser.parse_token(PARSE_PEEK)) {
+    _source = source::DEFAULT;
+}
+
+bool light_settings::setting_action::parse(
+    const std::string &setting_name, parser_base_t &parser, source setting_source)
+{
+    // Match setting_value precedence. Command-line actions are parsed before
+    // worldspawn keys, so a later, lower-priority map value must not mutate the
+    // already selected output/debug mode.
+    if (setting_source < get_source()) {
+        return true;
+    }
+
+    if (!setting_func::parse(setting_name, parser, setting_source)) {
         return false;
     }
 
-    try {
-        int32_t f = static_cast<int32_t>(std::stoull(parser.token));
+    // The callback owns the effective state; retain only the highest-priority
+    // provenance here so the manifest can report how the action was requested.
+    change_source(setting_source);
+    return true;
+}
 
-        set_value(f, source);
-
-        parser.parse_token();
-
-        return true;
-    } catch (std::exception &) {
-        // if we didn't provide a (valid) number, then
-        // assume it's meant to be the default of -1
-        set_value(-1, source);
-        return true;
-    }
+std::string light_settings::setting_action::string_value() const
+{
+    return is_changed() ? "1" : "0";
 }
 
 std::string light_settings::setting_soft::format() const
@@ -286,7 +303,7 @@ light_settings::light_settings()
       debugvert{this, "debugvert", std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN(),
           std::numeric_limits<float>::quiet_NaN(), &debug_group, ""},
       highlightseams{this, "highlightseams", false, &debug_group, ""},
-      soft{this, "soft", 0, -1, std::numeric_limits<int32_t>::max(), &postprocessing_group,
+      soft{this, "soft", 0, -1, MAX_SOFT_RADIUS, can_omit_argument_tag(), -1, &postprocessing_group,
           "blurs the lightmap. specify n to blur radius in samples, otherwise auto"},
       radlights{this, "radlights", "\"filename.rad\"", &experimental_group,
           "loads a <surfacename> <r> <g> <b> <intensity> file"},
@@ -294,6 +311,7 @@ light_settings::light_settings()
           this, "lightmap_scale", 0, &experimental_group, "force change lightmap scale; vanilla engines only allow 16"},
       extra{
           this, {"extra", "extra4"}, 1, &performance_group, "supersampling; 2x2 (extra) or 4x4 (extra4) respectively"},
+      super{this, {"super", "supersample"}, 1, 1, 8, &performance_group, "deterministic N x N supersampling (1 to 8)"},
       emissivequality{this, "emissivequality", emissivequality_t::LOW,
           {{"LOW", emissivequality_t::LOW}, {"MEDIUM", emissivequality_t::MEDIUM}, {"HIGH", emissivequality_t::HIGH}},
           &performance_group,
@@ -362,6 +380,10 @@ light_settings::light_settings()
           &experimental_group, "writes e5bgr9 data into the bsp itself"},
       world_units_per_luxel{
           this, "world_units_per_luxel", 0, 0, 1024, &output_group, "enables output of DECOUPLED_LM BSPX lump"},
+      force_world_units_per_luxel{this, {"force_world_units_per_luxel", "world_units_per_luxel_force"}, false,
+          &output_group, "ignore per-entity lightmap scales and use -world_units_per_luxel globally"},
+      embedsettings{this, "embedsettings", false, &output_group,
+          "embed a path-sanitized lighting settings manifest in the LIGHTING_SETTINGS BSPX lump"},
       litonly{this, "litonly", false, &output_group, "only write .lit file, don't modify BSP"},
       nolights{this, "nolights", false, &output_group, "ignore light entities (only sunlight/minlight)"},
       facestyles{this, "facestyles", 4, &output_group, "max amount of styles per face; requires BSPX lump if > 4"},
@@ -441,12 +463,7 @@ light_settings::light_settings()
           &debug_group, "save mottle pattern to lightmap"},
 
       debug_lightgrid_octree{
-          this, "debug_lightgrid_octree", false, &debug_group, "write .octree.prt file for light grid"},
-
-      incremental{this, "incremental", false, &performance_group, "use incremental lighting to skip unchanged faces"},
-      denoise{this, "denoise", false, &postprocessing_group, "apply smart denoising (bilateral filter) to lightmaps"},
-      gpu{this, "gpu", false, &performance_group, "enable GPU-accelerated raytracing"},
-      stochastic{this, "stochastic", false, &performance_group, "enable probabilistic light sampling"}
+          this, "debug_lightgrid_octree", false, &debug_group, "write .octree.prt file for light grid"}
 {
 }
 
@@ -462,22 +479,45 @@ void light_settings::initialize(int argc, const char **argv)
     try {
         common_settings::initialize(argc - 1, argv + 1);
 
-        if (remainder.size() <= 0 || remainder.size() > 1) {
-            print_help(true);
+        if (remainder.empty() || remainder.size() > 1) {
+            throw parse_exception("expected exactly one BSP input file");
         }
 
         sourceMap = remainder[0];
+
+        if (super.is_changed() && extra.is_changed()) {
+            throw parse_exception("-super/-supersample cannot be combined with -extra or -extra4");
+        }
+        if (super.is_changed()) {
+            extra.set_value(super.value(), super.get_source());
+        }
+
+        if ((write_litfile & lightfile_t::lit2) &&
+            (write_litfile != lightfile_t::lit2 || write_luxfile != luxfile_t::none || litonly.value() ||
+                embedsettings.value())) {
+            FError("-lit2 is a standalone output mode and cannot be combined with -lit, -hdr, BSPX/LUX output, or "
+                   "-litonly/-embedsettings");
+        }
+
+        if (embedsettings.value() && (litonly.value() || debugmode == debugmodes::phong_obj)) {
+            FError("-embedsettings cannot be used with a mode that does not write the BSP (-litonly or "
+                   "-phongdebug_obj)");
+        }
     } catch (parse_exception &ex) {
         print_help(false);
         logging::print("ERROR OCCURRED WHEN TRYING TO PARSE ARGUMENTS:\n");
         logging::print(ex.what());
         logging::print("\n\n");
-        throw settings::quit_after_help_exception();
+        throw settings::quit_after_help_exception(1);
     }
 }
 
 void light_settings::light_postinitialize(int argc, const char **argv)
 {
+    if (force_world_units_per_luxel.value() && !world_units_per_luxel.is_changed()) {
+        FError("-force_world_units_per_luxel requires -world_units_per_luxel\n");
+    }
+
     if (gate.value() > 1) {
         logging::print("WARNING: -gate value greater than 1 may cause artifacts\n");
     }
@@ -489,11 +529,7 @@ void light_settings::light_postinitialize(int argc, const char **argv)
     }
 
     if (soft.value() == -1) {
-        switch (extra.value()) {
-            case 2: soft.set_value(1, settings::source::COMMANDLINE); break;
-            case 4: soft.set_value(2, settings::source::COMMANDLINE); break;
-            default: soft.set_value(0, settings::source::COMMANDLINE); break;
-        }
+        soft.set_value(extra.value() / 2, soft.get_source());
     }
 
     if (litonly.value()) {
@@ -552,6 +588,83 @@ void light_settings::reset()
 } // namespace settings
 
 settings::light_settings light_options;
+
+namespace
+{
+static_assert(
+    LIGHTING_SETTINGS_BSPX_LUMP.size() < 24, "BSPX lump names must fit in the 24-byte, null-terminated name field");
+
+const char *EmbeddedSettingSourceName(settings::source setting_source)
+{
+    switch (setting_source) {
+        case settings::source::DEFAULT: return "default";
+        case settings::source::GAME_TARGET: return "game_target";
+        case settings::source::IMPLIED: return "implied";
+        case settings::source::MAP: return "map";
+        case settings::source::COMMANDLINE: return "command_line";
+    }
+
+    FError("unknown light setting source");
+}
+
+bool OmitEmbeddedSetting(const settings::setting_base &setting)
+{
+    // Input/output file names are not registered settings. Omit every
+    // filesystem-bearing registered type plus the string-valued log path.
+    // setting_set currently covers search paths and external .rad files.
+    return setting.primary_name() == "embedsettings" || setting.primary_name() == "logfile" ||
+           dynamic_cast<const settings::setting_path *>(&setting) != nullptr ||
+           dynamic_cast<const settings::setting_set *>(&setting) != nullptr ||
+           dynamic_cast<const settings::setting_redirect *>(&setting) != nullptr;
+}
+} // namespace
+
+void UpdateEmbeddedLightingSettings(bspdata_t &bspdata, const settings::light_settings &options)
+{
+    if (!options.embedsettings.value()) {
+        return;
+    }
+
+    std::vector<const settings::setting_base *> ordered_settings;
+    for (const settings::setting_base *setting : options) {
+        if (!OmitEmbeddedSetting(*setting)) {
+            ordered_settings.push_back(setting);
+        }
+    }
+    std::sort(ordered_settings.begin(), ordered_settings.end(),
+        [](const auto *left, const auto *right) { return left->primary_name() < right->primary_name(); });
+
+    Json::Value document(Json::objectValue);
+    document["schema"] = "vibeymaptools.light-settings";
+    document["schema_version"] = 1;
+    document["encoding"] = "UTF-8";
+    document["tool"]["name"] = "vmt-light";
+    document["tool"]["version"] = VIBEYMAPTOOLS_VERSION;
+
+    Json::Value manifest_settings(Json::arrayValue);
+    for (const settings::setting_base *setting : ordered_settings) {
+        Json::Value entry(Json::objectValue);
+        entry["name"] = setting->primary_name();
+        entry["value"] = setting->string_value();
+        entry["source"] = EmbeddedSettingSourceName(setting->get_source());
+        manifest_settings.append(std::move(entry));
+    }
+    document["settings"] = std::move(manifest_settings);
+
+    Json::StreamWriterBuilder writer;
+    writer["commentStyle"] = "None";
+    writer["indentation"] = "  ";
+    writer["emitUTF8"] = true;
+    std::string json = Json::writeString(writer, document);
+    if (json.size() > std::numeric_limits<uint32_t>::max()) {
+        FError("embedded lighting settings manifest is too large ({} bytes)", json.size());
+    }
+
+    // Constructing the complete payload first leaves any old/unknown lump
+    // intact if JSON serialization or allocation fails.
+    std::vector<uint8_t> payload(json.begin(), json.end());
+    bspdata.bspx.transfer(LIGHTING_SETTINGS_BSPX_LUMP, std::move(payload));
+}
 
 void FixupGlobalSettings()
 {
@@ -725,10 +838,6 @@ static void FindModelInfo(const mbsp_t *bsp)
     Q_assert(shadowworldonlylist.size() == 0);
     Q_assert(switchableshadowlist.size() == 0);
 
-    if (!bsp->dmodels.size()) {
-        FError("Corrupt .BSP: bsp->nummodels is 0!");
-    }
-
     if (light_options.lightmap_scale.is_changed()) {
         WorldEnt().set("_lightmap_scale", light_options.lightmap_scale.string_value());
     }
@@ -753,14 +862,18 @@ static void FindModelInfo(const mbsp_t *bsp)
     }
 
     /* The world always casts shadows */
-    modelinfo_t *world = new modelinfo_t{bsp, &bsp->dmodels[0], lightmapscale};
+    auto world_owner = std::make_unique<modelinfo_t>(bsp, &bsp->dmodels[0], lightmapscale);
+    modelinfo_t *world = world_owner.get();
     world->shadow.set_value(1.0f, settings::source::MAP); /* world always casts shadows */
     world->phong_angle.copy_from(light_options.phongangle);
+    g_ctx->owned_modelinfo.push_back(std::move(world_owner));
     modelinfo.push_back(world);
     tracelist.push_back(world);
 
     for (int i = 1; i < bsp->dmodels.size(); i++) {
-        modelinfo_t *info = new modelinfo_t{bsp, &bsp->dmodels[i], lightmapscale};
+        auto info_owner = std::make_unique<modelinfo_t>(bsp, &bsp->dmodels[i], lightmapscale);
+        modelinfo_t *info = info_owner.get();
+        g_ctx->owned_modelinfo.push_back(std::move(info_owner));
         modelinfo.push_back(info);
 
         /* Find the entity for the model */
@@ -797,22 +910,6 @@ static void FindModelInfo(const mbsp_t *bsp)
     }
 
     Q_assert(modelinfo.size() == bsp->dmodels.size());
-}
-
-static void SaveLightmapProgress(bspdata_t *bspdata, const fs::path &source)
-{
-    SaveLightmapSurfaces(bspdata, source);
-
-    if (light_options.litonly.value()) {
-        return;
-    }
-
-    // Write a converted copy so the active lighting data stays in generic format.
-    bspdata_t write_bsp = *bspdata;
-    if (!ConvertBSPFormat(&write_bsp, write_bsp.loadversion)) {
-        Error("Failed to convert BSP for intermediate write");
-    }
-    WriteBSPFile(source, &write_bsp);
 }
 
 /*
@@ -897,15 +994,25 @@ static void LightWorld(bspdata_t *bspdata, const fs::path &source, bool forcedsc
         }
     });
 
-    // Save progress after direct lighting
-    logging::print("Saving progress after direct lighting...\n");
-    SaveLightmapProgress(bspdata, source);
-
     if (bouncerequired && !light_options.nolighting.value()) {
 
         for (size_t i = 0; i < light_options.bounce.value(); i++) {
 
-            if (!MakeBounceLights(light_options, &bsp, i)) {
+            const bool made_bounce_lights = MakeBounceLights(light_options, &bsp, i);
+
+            // Bounce debugging still needs the direct pass to seed virtual
+            // lights, but the direct samples must not leak into its output.
+            if (i == 0 && (light_options.debugmode == debugmodes::bounce ||
+                              light_options.debugmode == debugmodes::bouncelights)) {
+                for (lightsurf_t &surface : light_surfaces) {
+                    for (lightmap_t &lightmap : surface.lightmapsByStyle) {
+                        std::fill(lightmap.samples.begin(), lightmap.samples.end(), lightsample_t{});
+                        lightmap.bounce_color = {};
+                    }
+                }
+            }
+
+            if (!made_bounce_lights) {
                 logging::header("No bounces; indirect lighting halted");
                 break;
             }
@@ -922,10 +1029,6 @@ static void LightWorld(bspdata_t *bspdata, const fs::path &source, bool forcedsc
                     IndirectLightFace(&bsp, light_surfaces[f], light_options, i);
                 }
             });
-
-            // Save progress after each bounce pass
-            logging::print("Saving progress after bounce pass {}...\n", i);
-            SaveLightmapProgress(bspdata, source);
         }
     }
 
@@ -944,12 +1047,6 @@ static void LightWorld(bspdata_t *bspdata, const fs::path &source, bool forcedsc
 
     // Final save
     SaveLightmapSurfaces(bspdata, source);
-
-    // Load textures for PBR
-    if (light_options.phongallowed.value()) {
-        logging::header("Loading Textures");
-        img::load_textures(&bsp, light_options);
-    }
 
     // kill this stuff if its somehow found.
     bspdata->bspx.entries.erase("LMSTYLE16");
@@ -1014,8 +1111,9 @@ static void LightWorld(bspdata_t *bspdata, const fs::path &source, bool forcedsc
 
                 for (size_t i = 0, k = 0; i < bsp.dfaces.size(); i++) {
                     for (size_t j = 0; j < stylesperface; j++, k++) {
-                        styles_mem[k] = g_ctx->faces_sup[i].styles[j] == INVALID_LIGHTSTYLE ? INVALID_LIGHTSTYLE_OLD
-                                                                                             : g_ctx->faces_sup[i].styles[j];
+                        styles_mem[k] = g_ctx->faces_sup[i].styles[j] == INVALID_LIGHTSTYLE
+                                            ? INVALID_LIGHTSTYLE_OLD
+                                            : g_ctx->faces_sup[i].styles[j];
                     }
                 }
 
@@ -1056,39 +1154,111 @@ static void LightWorld(bspdata_t *bspdata, const fs::path &source, bool forcedsc
 
 // obj
 
-static void ExportObjFace(std::ofstream &f, const mbsp_t *bsp, const mface_t *face, int *vertcount)
+static size_t ObjFaceVertexIndex(const mbsp_t &bsp, const mface_t &face, size_t edge_offset, size_t facenum)
 {
+    const int32_t signed_edge = bsp.dsurfedges[static_cast<size_t>(face.firstedge) + edge_offset];
+    if (signed_edge == std::numeric_limits<int32_t>::min()) {
+        FError("can't export OBJ: face {} references an invalid edge", facenum);
+    }
+    const size_t edge_index =
+        static_cast<size_t>(signed_edge < 0 ? -static_cast<int64_t>(signed_edge) : static_cast<int64_t>(signed_edge));
+    if (edge_index >= bsp.dedges.size()) {
+        FError("can't export OBJ: face {} references out-of-range edge {}", facenum, edge_index);
+    }
+    const size_t vertex_index = bsp.dedges[edge_index][signed_edge < 0 ? 1 : 0];
+    if (vertex_index >= bsp.dvertexes.size()) {
+        FError("can't export OBJ: edge {} references out-of-range vertex {}", edge_index, vertex_index);
+    }
+    return vertex_index;
+}
+
+static void ValidateObjFace(const mbsp_t &bsp, const mface_t &face, size_t facenum)
+{
+    if (face.firstedge < 0 || face.numedges < 3 || static_cast<size_t>(face.firstedge) > bsp.dsurfedges.size() ||
+        static_cast<size_t>(face.numedges) > bsp.dsurfedges.size() - static_cast<size_t>(face.firstedge)) {
+        FError("can't export OBJ: face {} has an invalid surface-edge range", facenum);
+    }
+
+    for (size_t edge_offset = 0; edge_offset < static_cast<size_t>(face.numedges); ++edge_offset) {
+        const size_t vertex_index = ObjFaceVertexIndex(bsp, face, edge_offset, facenum);
+        const qvec3f &position = bsp.dvertexes[vertex_index];
+        const qvec3f &normal = GetSurfaceVertexNormal(&bsp, &face, static_cast<int>(edge_offset)).normal;
+        for (size_t axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(position[axis]) || !std::isfinite(normal[axis])) {
+                FError("can't export OBJ: face {} has non-finite vertex data", facenum);
+            }
+        }
+    }
+}
+
+static void ExportObjFace(std::ofstream &f, const mbsp_t *bsp, const mface_t *face, size_t facenum, size_t *vertcount)
+{
+    const size_t edge_count = static_cast<size_t>(face->numedges);
+    if (*vertcount > std::numeric_limits<size_t>::max() - edge_count) {
+        FError("can't export OBJ: vertex count overflows this platform");
+    }
+
     // export the vertices and uvs
-    for (int i = 0; i < face->numedges; i++) {
-        const int vertnum = Face_VertexAtIndex(bsp, face, i);
-        const qvec3f normal = GetSurfaceVertexNormal(bsp, face, i).normal;
+    for (size_t i = 0; i < edge_count; i++) {
+        const size_t vertnum = ObjFaceVertexIndex(*bsp, *face, i, facenum);
+        const qvec3f normal = GetSurfaceVertexNormal(bsp, face, static_cast<int>(i)).normal;
         const qvec3f &pos = bsp->dvertexes[vertnum];
         ewt::print(f, "v {:.9} {:.9} {:.9}\n", pos[0], pos[1], pos[2]);
         ewt::print(f, "vn {:.9} {:.9} {:.9}\n", normal[0], normal[1], normal[2]);
     }
 
     f << "f";
-    for (int i = 0; i < face->numedges; i++) {
+    for (size_t i = 0; i < edge_count; i++) {
         // .obj vertexes start from 1
         // .obj faces are CCW, quake is CW, so reverse the order
-        const int vertindex = *vertcount + (face->numedges - 1 - i) + 1;
+        const size_t vertindex = *vertcount + (edge_count - 1 - i) + 1;
         ewt::print(f, " {}//{}", vertindex, vertindex);
     }
     f << '\n';
 
-    *vertcount += face->numedges;
+    *vertcount += edge_count;
 }
 
 static void ExportObj(const fs::path &filename, const mbsp_t *bsp)
 {
+    if (!bsp) {
+        FError("can't export OBJ for a null BSP");
+    }
+    if (bsp->dmodels.empty()) {
+        FError("can't export OBJ: BSP has no world model");
+    }
+
+    const dmodelh2_t &world = bsp->dmodels[0];
+    if (world.firstface < 0 || world.numfaces < 0 || static_cast<size_t>(world.firstface) > bsp->dfaces.size() ||
+        static_cast<size_t>(world.numfaces) > bsp->dfaces.size() - static_cast<size_t>(world.firstface)) {
+        FError("can't export OBJ: world model has an invalid face range");
+    }
+    const size_t start = static_cast<size_t>(world.firstface);
+    const size_t end = start + static_cast<size_t>(world.numfaces);
+
+    // Validate the complete export before truncating an existing destination.
+    for (size_t i = start; i < end; ++i) {
+        ValidateObjFace(*bsp, bsp->dfaces[i], i);
+    }
+
     std::ofstream objfile(filename);
-    int vertcount = 0;
+    if (!objfile) {
+        FError("couldn't open {} for writing", filename);
+    }
+    size_t vertcount = 0;
 
-    const int start = bsp->dmodels[0].firstface;
-    const int end = bsp->dmodels[0].firstface + bsp->dmodels[0].numfaces;
+    for (size_t i = start; i < end; i++) {
+        ExportObjFace(objfile, bsp, &bsp->dfaces[i], i, &vertcount);
+    }
 
-    for (int i = start; i < end; i++) {
-        ExportObjFace(objfile, bsp, BSP_GetFace(bsp, i), &vertcount);
+    objfile.flush();
+    if (!objfile) {
+        objfile.close();
+        FError("error writing {}", filename);
+    }
+    objfile.close();
+    if (!objfile) {
+        FError("error closing {}", filename);
     }
 
     logging::print("Wrote {}\n", filename);
@@ -1282,6 +1452,7 @@ static void ResetLight()
         g_ctx->selfshadowlist.clear();
         g_ctx->shadowworldonlylist.clear();
         g_ctx->switchableshadowlist.clear();
+        g_ctx->owned_modelinfo.clear();
         g_ctx->extended_texinfo_flags.clear();
         g_ctx->extended_content_flags.clear();
         g_ctx->dump_facenum = -1;
@@ -1307,8 +1478,31 @@ void light_reset()
  * light modelfile
  * ==================
  */
-int light_main(int argc, const char **argv)
+static int light_main_impl(int argc, const char **argv)
 {
+    // light's remaining process-global state cannot safely serve two callers. A
+    // thread-local sentinel catches recursion before try_locking a mutex already
+    // owned by this thread, which is undefined for std::mutex.
+    if (light_main_active_on_this_thread) {
+        FError("light compiler is already active; concurrent or recursive invocation is not supported");
+    }
+
+    std::unique_lock<std::mutex> invocation_lock(light_main_mutex, std::try_to_lock);
+    if (!invocation_lock.owns_lock()) {
+        FError("light compiler is already active; concurrent or recursive invocation is not supported");
+    }
+
+    light_main_active_on_this_thread = true;
+    struct invocation_state_reset_t
+    {
+        ~invocation_state_reset_t() { light_main_active_on_this_thread = false; }
+    } invocation_state_reset;
+
+    // This should be impossible while holding the invocation lock; retain the
+    // check to diagnose a stale context left by code outside light_main.
+    if (g_ctx) {
+        FError("light compiler context was already initialized before invocation");
+    }
     light_reset();
 
     bspdata_t bspdata;
@@ -1323,12 +1517,6 @@ int light_main(int argc, const char **argv)
     logging::init(
         fs::path(source).replace_filename(source.stem().string() + "-light").replace_extension("log"), light_options);
 
-    // delete previous litfile
-    if (!light_options.onlyents.value()) {
-        source.replace_extension("lit");
-        remove(source);
-    }
-
     source.replace_extension("rad");
     if (source != "lights.rad")
         ParseLightsFile("lights.rad"); // generic/default name
@@ -1339,9 +1527,14 @@ int light_main(int argc, const char **argv)
 
     bspdata.version->game->init_filesystem(source, light_options);
 
-    ConvertBSPFormat(&bspdata, &bspver_generic);
+    if (!ConvertBSPFormat(&bspdata, &bspver_generic)) {
+        FError("couldn't convert {} to the generic BSP representation", source);
+    }
 
     mbsp_t &bsp = std::get<mbsp_t>(bspdata.bsp);
+    if (bsp.dmodels.empty()) {
+        FError("BSP contains no models");
+    }
 
     // mxd. Use 1.0 rangescale as a default to better match with qrad3/arghrad
     if (bspdata.loadversion->game->id == GAME_QUAKE_II) {
@@ -1388,6 +1581,16 @@ int light_main(int argc, const char **argv)
     // But we are past that.
     vibey::light::LightContext ctx(&light_options, &bsp);
     g_ctx = &ctx;
+    struct context_reset_t
+    {
+        vibey::light::LightContext *context;
+        ~context_reset_t()
+        {
+            if (g_ctx == context) {
+                g_ctx = nullptr;
+            }
+        }
+    } context_reset{&ctx};
 
     g_ctx->extended_texinfo_flags = LoadExtendedTexinfoFlags(source, &bsp);
     g_ctx->extended_content_flags = LoadExtendedContentFlags(source, &bsp);
@@ -1438,6 +1641,7 @@ int light_main(int argc, const char **argv)
         }
 
         if (light_options.write_litfile & lightfile_t::lit2) {
+            logging::close();
             return 0; // run away before any files are written
         }
     }
@@ -1451,16 +1655,33 @@ int light_main(int argc, const char **argv)
         ExportObj(fs::path{source}.replace_extension(".obj"), &bsp);
     }
 
+    const bool writes_external_lit =
+        (light_options.write_litfile & lightfile_t::hdr) || (light_options.write_litfile & lightfile_t::lit2) ||
+        ((light_options.write_litfile & lightfile_t::lit) && !bsp.loadversion->game->has_rgb_lightmap);
+
     WriteEntitiesToString(light_options, &bsp);
+    UpdateEmbeddedLightingSettings(bspdata, light_options);
     /* Convert data format back if necessary */
-    ConvertBSPFormat(&bspdata, bspdata.loadversion);
+    if (!ConvertBSPFormat(&bspdata, bspdata.loadversion)) {
+        FError("couldn't convert {} back to {}", source, bspdata.loadversion->short_name);
+    }
 
     if (!light_options.litonly.value()) {
         WriteBSPFile(source, &bspdata);
     }
 
-    // Explicitly nullify global context on exit
-    g_ctx = nullptr;
+    // A successful run with no replacement external lighting file makes any
+    // previous .lit stale. Defer removal until all processing and BSP output
+    // have succeeded so a failed compile never destroys the last valid file.
+    if (!light_options.onlyents.value() && !writes_external_lit) {
+        fs::path stale_lit = source;
+        stale_lit.replace_extension("lit");
+        std::error_code error;
+        fs::remove(stale_lit, error);
+        if (error) {
+            FError("couldn't remove stale {}: {}", stale_lit, error.message());
+        }
+    }
 
     auto end = I_FloatTime();
     logging::print("{:.3} seconds elapsed\n", (end - start));
@@ -1481,6 +1702,17 @@ int light_main(int argc, const char **argv)
     logging::close();
 
     return 0;
+}
+
+int light_main(int argc, const char **argv)
+{
+    const int result = light_main_impl(argc, argv);
+    if (result == 0) {
+        // The implementation's invocation lock, context, workers, and local
+        // diagnostic objects are all gone before warning promotion can throw.
+        logging::fail_if_warnings();
+    }
+    return result;
 }
 
 int light_main(const std::vector<std::string> &args)

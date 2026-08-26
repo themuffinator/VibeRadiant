@@ -46,6 +46,7 @@ struct full_atlas_t
      * these are normalized to 0..1
      */
     std::map<int, std::vector<qvec2f>> facenum_to_lightmap_uvs;
+    std::map<int, std::vector<uint16_t>> facenum_to_lightmap_styles;
 
     std::map<int, single_style_atlas_t> style_to_lightmap_atlas;
 };
@@ -53,4 +54,5 @@ struct full_atlas_t
 full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, const std::vector<uint8_t> &litdata,
     const std::vector<uint32_t> &hdr_litdata, bool use_bspx, bool use_decoupled);
 
-void serialize_bsp(const bspdata_t &bspdata, const mbsp_t &bsp, const fs::path &name);
+void serialize_bsp(
+    const bspdata_t &bspdata, const mbsp_t &bsp, const fs::path &name, bool export_lightmap_atlas = false);

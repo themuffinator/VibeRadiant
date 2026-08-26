@@ -115,7 +115,7 @@ struct fmt::formatter<fs::path>
     constexpr auto parse(format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.end(); }
 
     template<typename FormatContext>
-    auto format(const fs::path &p, FormatContext &ctx)
+    auto format(const fs::path &p, FormatContext &ctx) const
     {
         return fmt::format_to(ctx.out(), "{}", p.string());
     }

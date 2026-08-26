@@ -19,14 +19,28 @@
 
 #pragma once
 
+#include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 template<typename Dst, typename Src>
 constexpr bool numeric_cast_will_overflow(const Src &value)
 {
     using DstLim = std::numeric_limits<Dst>;
     using SrcLim = std::numeric_limits<Src>;
+
+    if constexpr (std::is_floating_point_v<Src> && std::is_integral_v<Dst>) {
+        if (!std::isfinite(value)) {
+            return true;
+        }
+
+        const long double truncated = std::trunc(static_cast<long double>(value));
+        const long double lower = static_cast<long double>(DstLim::lowest());
+        const long double upper_exclusive = DstLim::is_signed ? -static_cast<long double>(DstLim::lowest())
+                                                              : static_cast<long double>(DstLim::max()) + 1.0L;
+        return truncated < lower || truncated >= upper_exclusive;
+    }
 
     constexpr bool positive_overflow_possible = DstLim::max() < SrcLim::max();
     constexpr bool negative_overflow_possible = SrcLim::is_signed || (DstLim::lowest() > SrcLim::lowest());

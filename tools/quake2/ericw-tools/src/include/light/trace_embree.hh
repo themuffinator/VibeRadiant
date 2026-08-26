@@ -109,7 +109,6 @@ struct triinfo
     const img::texture *texture;
     float alpha;
     bool is_fence, is_glass;
-    bool transparent_for_lighting = false;
 
     // cached from modelinfo for faster access
     bool shadowworldonly;
@@ -122,7 +121,7 @@ struct triinfo
 
 struct sceneinfo
 {
-    unsigned geomID;
+    unsigned geomID = RTC_INVALID_GEOMETRY_ID;
 
     std::vector<triinfo> triInfo;
 };
@@ -130,15 +129,20 @@ struct sceneinfo
 extern sceneinfo skygeom; // sky. always occludes.
 extern sceneinfo solidgeom; // solids. always occludes.
 extern sceneinfo filtergeom; // conditional occluders.. needs to run ray intersection filter
+extern sceneinfo skipgeom; // generated skip-brush hulls. always occludes when channels match.
 
 inline const sceneinfo &Embree_SceneinfoForGeomID(unsigned int geomID)
 {
-    if (geomID == skygeom.geomID) {
+    if (geomID == RTC_INVALID_GEOMETRY_ID) {
+        FError("unexpected invalid Embree geometry ID");
+    } else if (geomID == skygeom.geomID) {
         return skygeom;
     } else if (geomID == solidgeom.geomID) {
         return solidgeom;
     } else if (geomID == filtergeom.geomID) {
         return filtergeom;
+    } else if (geomID == skipgeom.geomID) {
+        return skipgeom;
     } else {
         FError("unexpected geomID");
     }

@@ -21,10 +21,17 @@
 #include <common/log.hh>
 #include <common/cmdlib.hh>
 #include <common/bspfile.hh>
+#include <common/bsputils.hh>
 #include <common/ostream.hh>
 
 #include <fstream>
 #include <iomanip>
+#include <bit>
+#include <cmath>
+#include <limits>
+#include <set>
+#include <string_view>
+#include <utility>
 #include <fmt/core.h>
 #include <common/json.hh>
 #include "common/fs.hh"
@@ -40,7 +47,7 @@ static std::string hex_string(const uint8_t *bytes, const size_t count)
     std::string str;
 
     for (size_t i = 0; i < count; ++i) {
-        fmt::format_to(std::back_inserter(str), "{:x}", bytes[i]);
+        fmt::format_to(std::back_inserter(str), "{:02x}", bytes[i]);
     }
 
     return str;
@@ -58,6 +65,9 @@ static Json::Value serialize_bspxbrushlist(const std::vector<uint8_t> &lump)
     p >> endianness<std::endian::little>;
     bspxbrushes structured;
     p >= structured;
+    if (!p) {
+        FError("malformed BRUSHLIST lump");
+    }
 
     for (const bspxbrushes_permodel &src_model : structured.models) {
         auto &model = j.append(Json::Value(Json::objectValue));
@@ -87,19 +97,25 @@ static Json::Value serialize_bspxbrushlist(const std::vector<uint8_t> &lump)
 
 static Json::Value serialize_bspx_decoupled_lm(const std::vector<uint8_t> &lump)
 {
+    constexpr size_t serialized_face_size = (sizeof(uint16_t) * 2) + sizeof(int32_t) + (sizeof(float) * 8);
+    if (lump.size() % serialized_face_size != 0) {
+        FError("DECOUPLED_LM size {} is not a whole number of {}-byte face records", lump.size(), serialized_face_size);
+    }
+
     auto j = Json::Value(Json::arrayValue);
 
     imemstream p(lump.data(), lump.size(), std::ios_base::in | std::ios_base::binary);
 
     p >> endianness<std::endian::little>;
 
-    while (true) {
+    for (size_t face_index = 0; face_index < lump.size() / serialized_face_size; ++face_index) {
         bspx_decoupled_lm_perface src_face;
         p >= src_face;
 
         if (!p) {
-            break;
+            FError("DECOUPLED_LM face record {} is truncated", face_index);
         }
+        BSPX_ValidateDecoupledLM(src_face, face_index);
 
         auto &model = j.append(Json::objectValue);
         model["lmwidth"] = src_face.lmwidth;
@@ -190,13 +206,36 @@ static std::string serialize_image(const std::optional<img::texture> &texture_op
     }
 
     auto &texture = texture_opt.value();
+    if (texture.width == 0 || texture.height == 0) {
+        FError("can't serialize an image with zero-sized dimensions {}x{}", texture.width, texture.height);
+    }
+    constexpr uint32_t components = 4;
+    constexpr auto max_stbi_dimension = static_cast<uint32_t>(std::numeric_limits<int>::max());
+    if (texture.height > max_stbi_dimension || texture.width > max_stbi_dimension / components) {
+        FError("can't serialize image dimensions {}x{} with a representable PNG stride", texture.width, texture.height);
+    }
+    if (static_cast<size_t>(texture.height) > std::numeric_limits<size_t>::max() / texture.width) {
+        FError("can't serialize image dimensions {}x{}: pixel count overflows", texture.width, texture.height);
+    }
+    const size_t expected_pixels = static_cast<size_t>(texture.width) * texture.height;
+    if (texture.pixels.size() != expected_pixels) {
+        FError("can't serialize image dimensions {}x{} from {} RGBA pixels (expected {})", texture.width,
+            texture.height, texture.pixels.size(), expected_pixels);
+    }
+
+    const int width = static_cast<int>(texture.width);
+    const int height = static_cast<int>(texture.height);
+    const int stride = static_cast<int>(texture.width * components);
     std::vector<uint8_t> buf;
-    stbi_write_png_to_func(
+    const int write_succeeded = stbi_write_png_to_func(
         [](void *context, void *data, int size) {
             std::copy(reinterpret_cast<uint8_t *>(data), reinterpret_cast<uint8_t *>(data) + size,
                 std::back_inserter(*reinterpret_cast<decltype(buf) *>(context)));
         },
-        &buf, texture.meta.width, texture.meta.height, 4, texture.pixels.data(), texture.width * 4);
+        &buf, width, height, components, texture.pixels.data(), stride);
+    if (write_succeeded == 0) {
+        FError("failed to encode {}x{} image as PNG", texture.width, texture.height);
+    }
 
     std::string str{"data:image/png;base64,"};
 
@@ -205,23 +244,303 @@ static std::string serialize_image(const std::optional<img::texture> &texture_op
     return str;
 }
 
-#include "common/bsputils.hh"
-
-static faceextents_t get_face_extents(const mbsp_t &bsp, const bspxentries_t &bspx,
-    const std::vector<bspx_decoupled_lm_perface> &bspx_decoupled, const mface_t &face, bool use_bspx,
-    bool use_decoupled)
+static size_t checked_atlas_product(size_t lhs, size_t rhs, std::string_view description)
 {
-    if (use_decoupled) {
-        ptrdiff_t face_idx = &face - bsp.dfaces.data();
-        auto &bspx = bspx_decoupled[face_idx];
-        return {face, bsp, bspx.lmwidth, bspx.lmheight, bspx.world_to_lm_space};
-    }
-    if (!use_bspx) {
-        return {face, bsp, LMSCALE_DEFAULT};
+    if (rhs != 0 && lhs > std::numeric_limits<size_t>::max() / rhs) {
+        FError("lightmap atlas {} size overflow", description);
     }
 
-    return {face, bsp,
-        (float)nth_bit(reinterpret_cast<const char *>(bspx.at("LMSHIFT").data())[&face - bsp.dfaces.data()])};
+    return lhs * rhs;
+}
+
+static uint16_t read_little_u16(const std::vector<uint8_t> &bytes, size_t offset)
+{
+    return static_cast<uint16_t>(bytes[offset]) | (static_cast<uint16_t>(bytes[offset + 1]) << 8);
+}
+
+static uint32_t read_little_u32(const std::vector<uint8_t> &bytes, size_t offset)
+{
+    return static_cast<uint32_t>(bytes[offset]) | (static_cast<uint32_t>(bytes[offset + 1]) << 8) |
+           (static_cast<uint32_t>(bytes[offset + 2]) << 16) | (static_cast<uint32_t>(bytes[offset + 3]) << 24);
+}
+
+static void finish_output_file(std::ofstream &stream, const fs::path &path)
+{
+    stream.flush();
+    if (!stream) {
+        FError("error writing {}", path);
+    }
+
+    stream.close();
+    if (!stream) {
+        FError("error closing {}", path);
+    }
+}
+
+static void remove_staged_output(const fs::path &path)
+{
+    std::error_code ignored;
+    if (fs::remove(path, ignored) || !ignored) {
+        return;
+    }
+
+    ignored.clear();
+    fs::permissions(path, fs::perms::owner_write, fs::perm_options::add, ignored);
+    if (!ignored) {
+        fs::remove(path, ignored);
+    }
+}
+
+struct staged_output_cleanup_t
+{
+    explicit staged_output_cleanup_t(fs::path path)
+        : path(std::move(path))
+    {
+    }
+
+    ~staged_output_cleanup_t()
+    {
+        if (active) {
+            remove_staged_output(path);
+        }
+    }
+
+    void release() noexcept { active = false; }
+
+    fs::path path;
+    bool active = true;
+};
+
+static fs::file_status checked_output_status(const fs::path &path, std::string_view description)
+{
+    std::error_code error;
+    const fs::file_status status = fs::symlink_status(path, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
+        FError("unable to inspect {} {}: {}", description, path, error.message());
+    }
+    return status;
+}
+
+static void ensure_output_path_available(const fs::path &path, std::string_view description)
+{
+    if (fs::exists(checked_output_status(path, description))) {
+        FError("{} {} already exists", description, path);
+    }
+}
+
+static void remove_output_backup(const fs::path &backup_path, const fs::path &output_path)
+{
+    std::error_code error;
+    if (fs::remove(backup_path, error) || !error) {
+        return;
+    }
+
+    std::error_code permission_error;
+    fs::permissions(backup_path, fs::perms::owner_write, fs::perm_options::add, permission_error);
+    if (!permission_error) {
+        error.clear();
+        if (fs::remove(backup_path, error) || !error) {
+            return;
+        }
+    }
+
+    FError("output {} was written, but its temporary backup {} could not be removed: {}", output_path, backup_path,
+        error.message());
+}
+
+template<typename Writer>
+static void write_output_file(const fs::path &path, std::ios_base::openmode mode, Writer &&writer)
+{
+    const fs::file_status destination_status = checked_output_status(path, "output path");
+    const bool destination_exists = fs::exists(destination_status);
+    if (destination_exists && !fs::is_regular_file(destination_status)) {
+        FError("output path {} exists and is not a regular file", path);
+    }
+
+    fs::path temporary_path = path;
+    temporary_path += ".tmp";
+    ensure_output_path_available(temporary_path, "temporary output path");
+
+    fs::path backup_path = path;
+    backup_path += ".previous.tmp";
+    ensure_output_path_available(backup_path, "backup output path");
+
+    staged_output_cleanup_t staged_cleanup(temporary_path);
+
+    std::ofstream stream(temporary_path, mode | std::ios_base::out | std::ios_base::trunc);
+    if (!stream) {
+        FError("unable to open {} for writing", temporary_path);
+    }
+
+    if (destination_exists && destination_status.permissions() != fs::perms::unknown) {
+        std::error_code permission_error;
+        fs::permissions(temporary_path, destination_status.permissions(), fs::perm_options::replace, permission_error);
+        if (permission_error) {
+            FError("unable to preserve permissions for {}: {}", path, permission_error.message());
+        }
+    }
+
+    try {
+        std::forward<Writer>(writer)(stream);
+        finish_output_file(stream, temporary_path);
+    } catch (...) {
+        stream.close();
+        throw;
+    }
+
+    std::error_code ec;
+    if (destination_exists) {
+        fs::rename(path, backup_path, ec);
+        if (ec) {
+            FError("unable to preserve existing output {}: {}", path, ec.message());
+        }
+    }
+
+    fs::rename(temporary_path, path, ec);
+    if (ec) {
+        const std::string promotion_error = ec.message();
+
+        if (destination_exists) {
+            std::error_code rollback_error;
+            fs::rename(backup_path, path, rollback_error);
+            if (rollback_error) {
+                FError("unable to install output {}: {}; restoring the previous output also failed: {}", path,
+                    promotion_error, rollback_error.message());
+            }
+        }
+        FError("unable to install output {}: {}", path, promotion_error);
+    }
+
+    staged_cleanup.release();
+
+    if (destination_exists) {
+        remove_output_backup(backup_path, path);
+    }
+}
+
+static std::vector<std::vector<uint16_t>> load_atlas_face_styles(const mbsp_t &bsp, const bspxentries_t &bspx)
+{
+    constexpr size_t max_extended_styles = 16;
+    const auto lmstyle = bspx.find("LMSTYLE");
+    const auto lmstyle16 = bspx.find("LMSTYLE16");
+
+    // Match BSPX consumers: prefer a usable LMSTYLE16 table, but fall back to
+    // LMSTYLE when an older producer left a malformed LMSTYLE16 lump behind.
+    const auto lmstyle16_has_valid_cardinality = [&]() {
+        if (lmstyle16 == bspx.end()) {
+            return false;
+        }
+
+        const auto &bytes = lmstyle16->second;
+        if (bsp.dfaces.empty()) {
+            return bytes.empty();
+        }
+        if (bsp.dfaces.size() > std::numeric_limits<size_t>::max() / sizeof(uint16_t)) {
+            return false;
+        }
+
+        const size_t bytes_per_face_denominator = bsp.dfaces.size() * sizeof(uint16_t);
+        if (bytes.empty() || bytes.size() % bytes_per_face_denominator != 0) {
+            return false;
+        }
+
+        const size_t styles_per_face = bytes.size() / bytes_per_face_denominator;
+        return styles_per_face > 0 && styles_per_face <= max_extended_styles;
+    };
+
+    const bool use_lmstyle16 = lmstyle16 != bspx.end() && (lmstyle == bspx.end() || lmstyle16_has_valid_cardinality());
+
+    std::vector<std::vector<uint16_t>> result(bsp.dfaces.size());
+
+    if (use_lmstyle16) {
+        const auto &bytes = lmstyle16->second;
+        const size_t bytes_per_entry = sizeof(uint16_t);
+
+        if (bsp.dfaces.empty()) {
+            if (!bytes.empty()) {
+                FError("LMSTYLE16 has {} bytes but the BSP has no faces", bytes.size());
+            }
+            return result;
+        }
+
+        const size_t bytes_per_face_denominator =
+            checked_atlas_product(bsp.dfaces.size(), bytes_per_entry, "LMSTYLE16");
+        if (bytes.empty() || bytes.size() % bytes_per_face_denominator != 0) {
+            FError("LMSTYLE16 size {} is not a whole number of 16-bit styles for {} faces", bytes.size(),
+                bsp.dfaces.size());
+        }
+
+        const size_t styles_per_face = bytes.size() / bytes_per_face_denominator;
+        if (styles_per_face == 0 || styles_per_face > max_extended_styles) {
+            FError("LMSTYLE16 has invalid cardinality of {} styles per face (maximum {})", styles_per_face,
+                max_extended_styles);
+        }
+
+        for (size_t face_index = 0; face_index < bsp.dfaces.size(); ++face_index) {
+            auto &styles = result[face_index];
+            styles.reserve(styles_per_face);
+            const size_t face_offset =
+                checked_atlas_product(face_index, styles_per_face * bytes_per_entry, "LMSTYLE16");
+            for (size_t style_index = 0; style_index < styles_per_face; ++style_index) {
+                styles.push_back(read_little_u16(bytes, face_offset + (style_index * bytes_per_entry)));
+            }
+        }
+    } else if (lmstyle != bspx.end()) {
+        const auto &bytes = lmstyle->second;
+
+        if (bsp.dfaces.empty()) {
+            if (!bytes.empty()) {
+                FError("LMSTYLE has {} bytes but the BSP has no faces", bytes.size());
+            }
+            return result;
+        }
+        if (bytes.empty() || bytes.size() % bsp.dfaces.size() != 0) {
+            FError("LMSTYLE size {} is not a whole number of styles for {} faces", bytes.size(), bsp.dfaces.size());
+        }
+
+        const size_t styles_per_face = bytes.size() / bsp.dfaces.size();
+        if (styles_per_face == 0 || styles_per_face > max_extended_styles) {
+            FError("LMSTYLE has invalid cardinality of {} styles per face (maximum {})", styles_per_face,
+                max_extended_styles);
+        }
+
+        for (size_t face_index = 0; face_index < bsp.dfaces.size(); ++face_index) {
+            auto &styles = result[face_index];
+            styles.reserve(styles_per_face);
+            const size_t face_offset = checked_atlas_product(face_index, styles_per_face, "LMSTYLE");
+            for (size_t style_index = 0; style_index < styles_per_face; ++style_index) {
+                const uint8_t style = bytes[face_offset + style_index];
+                styles.push_back(style == INVALID_LIGHTSTYLE_OLD ? std::numeric_limits<uint16_t>::max() : style);
+            }
+        }
+    } else {
+        for (size_t face_index = 0; face_index < bsp.dfaces.size(); ++face_index) {
+            auto &styles = result[face_index];
+            styles.reserve(MAXLIGHTMAPS);
+            for (const uint8_t style : bsp.dfaces[face_index].styles) {
+                styles.push_back(style == INVALID_LIGHTSTYLE_OLD ? std::numeric_limits<uint16_t>::max() : style);
+            }
+        }
+    }
+
+    for (size_t face_index = 0; face_index < result.size(); ++face_index) {
+        auto &styles = result[face_index];
+        const auto first_invalid = std::ranges::find(styles, std::numeric_limits<uint16_t>::max());
+        if (std::ranges::find_if(first_invalid, styles.end(),
+                [](uint16_t style) { return style != std::numeric_limits<uint16_t>::max(); }) != styles.end()) {
+            FError("lightmap styles for face {} contain a style after the invalid terminator", face_index);
+        }
+        styles.erase(first_invalid, styles.end());
+
+        std::set<uint16_t> unique_styles;
+        for (const uint16_t style : styles) {
+            if (!unique_styles.insert(style).second) {
+                FError("lightmap styles for face {} contain duplicate style {}", face_index, style);
+            }
+        }
+    }
+
+    return result;
 }
 
 full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, const std::vector<uint8_t> &litdata,
@@ -231,12 +550,9 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
     {
         const mface_t *face;
         faceextents_t extents;
-        int32_t lightofs;
-
-        // lightmap data for this face
-        int width = 0, height = 0;
-        std::vector<qvec4b> rgba8_samples;
-        std::vector<uint32_t> e5brg9_samples;
+        std::vector<uint16_t> styles;
+        size_t sample_count = 0;
+        size_t source_offset = 0;
 
         size_t atlas = 0;
         size_t x = 0, y = 0;
@@ -244,27 +560,47 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
 
     constexpr size_t atlas_size = 512;
 
+    if (!bsp.loadversion || !bsp.loadversion->game) {
+        FError("lightmap atlas requires a BSP with a valid source version");
+    }
+
     bool is_hdr = false;
-    const uint32_t *hdr_lightdata_source = nullptr; // 1 packed uint32 (e5brg9) per sample
-    const uint8_t *lightdata_source = nullptr; // either greyscale (1 byte per sample) or rgb (3 bytes per sample)
+    const std::vector<uint32_t> *hdr_lightdata_source = nullptr; // 1 packed uint32 (e5brg9) per sample
+    const std::vector<uint8_t> *lightdata_source =
+        nullptr; // either greyscale (1 byte per sample) or rgb (3 bytes per sample)
+    std::vector<uint32_t> decoded_bspx_hdr;
     bool is_rgb = false;
     bool is_lit = false;
 
     if (!hdr_litdata.empty()) {
-        hdr_lightdata_source = hdr_litdata.data();
+        hdr_lightdata_source = &hdr_litdata;
         is_hdr = true;
     } else if (auto it = bspx.find("LIGHTING_E5BGR9"); it != bspx.end()) {
-        // FIXME: alignment ignored
-        hdr_lightdata_source = reinterpret_cast<const uint32_t *>(it->second.data());
+        const auto &bytes = it->second;
+        if (bytes.size() % sizeof(uint32_t) != 0) {
+            FError("LIGHTING_E5BGR9 size {} is not a whole number of 32-bit samples", bytes.size());
+        }
+
+        decoded_bspx_hdr.resize(bytes.size() / sizeof(uint32_t));
+        for (size_t sample_index = 0; sample_index < decoded_bspx_hdr.size(); ++sample_index) {
+            decoded_bspx_hdr[sample_index] = read_little_u32(bytes, sample_index * sizeof(uint32_t));
+        }
+        hdr_lightdata_source = &decoded_bspx_hdr;
         is_hdr = true;
     } else if (!litdata.empty()) {
+        if (litdata.size() % 3 != 0) {
+            FError("RGB .lit data size {} is not a whole number of samples", litdata.size());
+        }
         is_lit = true;
         is_rgb = true;
-        lightdata_source = litdata.data();
+        lightdata_source = &litdata;
     } else {
         is_lit = false;
         is_rgb = bsp.loadversion->game->has_rgb_lightmap;
-        lightdata_source = bsp.dlightdata.data();
+        if (is_rgb && bsp.dlightdata.size() % 3 != 0) {
+            FError("native RGB lightdata size {} is not a whole number of samples", bsp.dlightdata.size());
+        }
+        lightdata_source = &bsp.dlightdata;
     }
 
     struct atlas
@@ -278,34 +614,59 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
     size_t current_atlas = 0;
     rectangles.reserve(bsp.dfaces.size());
 
-    imemstream bspx_lmoffset(nullptr, 0);
-
-    if (use_bspx) {
-        auto &lmoffset = bspx.at("LMOFFSET");
-        bspx_lmoffset = imemstream(lmoffset.data(), lmoffset.size());
-        bspx_lmoffset >> endianness<std::endian::little>;
-    }
-
     std::vector<bspx_decoupled_lm_perface> bspx_decoupled;
     if (use_decoupled && (bspx.find("DECOUPLED_LM") != bspx.end())) {
-        bspx_decoupled.resize(bsp.dfaces.size());
+        constexpr size_t serialized_face_size = (sizeof(uint16_t) * 2) + sizeof(int32_t) + (sizeof(float) * 8);
+        const auto &decoupled_lm = bspx.at("DECOUPLED_LM");
+        const size_t expected_size = checked_atlas_product(bsp.dfaces.size(), serialized_face_size, "DECOUPLED_LM");
+        if (decoupled_lm.size() != expected_size) {
+            FError("DECOUPLED_LM size {} does not match {} faces (expected {} bytes)", decoupled_lm.size(),
+                bsp.dfaces.size(), expected_size);
+        }
 
-        imemstream stream(nullptr, 0);
-
-        auto &decoupled_lm = bspx.at("DECOUPLED_LM");
-        stream = imemstream(decoupled_lm.data(), decoupled_lm.size());
-        stream >> endianness<std::endian::little>;
-
+        bspx_decoupled.reserve(bsp.dfaces.size());
         for (size_t i = 0; i < bsp.dfaces.size(); ++i) {
-            stream >= bspx_decoupled[i];
+            bspx_decoupled.push_back(BSPX_DecoupledLM(bspx, static_cast<int>(i)));
         }
     } else {
         use_decoupled = false;
     }
 
+    std::vector<int32_t> bspx_lmoffset;
+    std::vector<uint8_t> bspx_lmshift;
+    if (use_bspx && !use_decoupled) {
+        const auto offset_it = bspx.find("LMOFFSET");
+        const auto shift_it = bspx.find("LMSHIFT");
+        if (offset_it == bspx.end()) {
+            FError("lightmap atlas requested BSPX offsets but LMOFFSET is missing");
+        }
+        if (shift_it == bspx.end()) {
+            FError("lightmap atlas requested BSPX extents but LMSHIFT is missing");
+        }
+
+        const size_t expected_offset_size = checked_atlas_product(bsp.dfaces.size(), sizeof(int32_t), "LMOFFSET");
+        if (offset_it->second.size() != expected_offset_size) {
+            FError("LMOFFSET size {} does not match {} faces (expected {} bytes)", offset_it->second.size(),
+                bsp.dfaces.size(), expected_offset_size);
+        }
+        if (shift_it->second.size() != bsp.dfaces.size()) {
+            FError("LMSHIFT size {} does not match {} faces", shift_it->second.size(), bsp.dfaces.size());
+        }
+
+        bspx_lmoffset.reserve(bsp.dfaces.size());
+        for (size_t face_index = 0; face_index < bsp.dfaces.size(); ++face_index) {
+            const uint32_t raw = read_little_u32(offset_it->second, face_index * sizeof(int32_t));
+            bspx_lmoffset.push_back(std::bit_cast<int32_t>(raw));
+        }
+        bspx_lmshift = shift_it->second;
+    }
+
+    auto face_styles = load_atlas_face_styles(bsp, bspx);
+    std::set<uint16_t> available_styles;
+
     // make rectangles
-    for (auto &face : bsp.dfaces) {
-        const ptrdiff_t face_idx = (&face - bsp.dfaces.data());
+    for (size_t face_idx = 0; face_idx < bsp.dfaces.size(); ++face_idx) {
+        const auto &face = bsp.dfaces[face_idx];
         int32_t faceofs;
 
         if (use_decoupled) {
@@ -313,15 +674,91 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
         } else if (!use_bspx) {
             faceofs = face.lightofs;
         } else {
-            bspx_lmoffset.seekg(face_idx * sizeof(int32_t));
-            bspx_lmoffset >= faceofs;
+            faceofs = bspx_lmoffset[face_idx];
         }
 
-        rectangles.push_back(
-            face_rect{&face, get_face_extents(bsp, bspx, bspx_decoupled, face, use_bspx, use_decoupled), faceofs});
+        auto &styles = face_styles[face_idx];
+        if (styles.empty() || faceofs == -1) {
+            continue;
+        }
+        if (faceofs < -1) {
+            FError("lightmap atlas face {} has invalid negative light offset {}", face_idx, faceofs);
+        }
+        if (face.numedges < 3 || face.firstedge < 0 || static_cast<size_t>(face.firstedge) > bsp.dsurfedges.size() ||
+            static_cast<size_t>(face.numedges) > bsp.dsurfedges.size() - static_cast<size_t>(face.firstedge)) {
+            FError("lightmap atlas face {} has an invalid surfedge range ({}, {})", face_idx, face.firstedge,
+                face.numedges);
+        }
+        if (face.planenum < 0 || static_cast<size_t>(face.planenum) >= bsp.dplanes.size()) {
+            FError("lightmap atlas face {} references invalid plane {}", face_idx, face.planenum);
+        }
+        if (face.texinfo < 0 || static_cast<size_t>(face.texinfo) >= bsp.texinfo.size()) {
+            FError("lightmap atlas face {} references invalid texinfo {}", face_idx, face.texinfo);
+        }
+        for (int edge_index = 0; edge_index < face.numedges; ++edge_index) {
+            (void)Face_VertexAtIndex(&bsp, &face, edge_index);
+        }
+
+        faceextents_t extents;
+        if (use_decoupled) {
+            const auto &decoupled = bspx_decoupled[face_idx];
+            if (decoupled.lmwidth == 0 || decoupled.lmheight == 0) {
+                FError("DECOUPLED_LM face {} has zero-sized extents {}x{}", face_idx, decoupled.lmwidth,
+                    decoupled.lmheight);
+            }
+            extents = {face, bsp, decoupled.lmwidth, decoupled.lmheight, decoupled.world_to_lm_space};
+        } else if (use_bspx) {
+            const uint8_t shift = bspx_lmshift[face_idx];
+            if (shift > 30) {
+                FError("LMSHIFT face {} has unsupported shift {}", face_idx, shift);
+            }
+            extents = {face, bsp, std::ldexp(1.0f, shift)};
+        } else {
+            extents = {face, bsp, LMSCALE_DEFAULT};
+        }
+
+        const int width = extents.width();
+        const int height = extents.height();
+        if (width <= 0 || height <= 0 || static_cast<size_t>(width) > atlas_size ||
+            static_cast<size_t>(height) > atlas_size) {
+            FError("lightmap atlas face {} has unsupported extents {}x{} (maximum {}x{})", face_idx, width, height,
+                atlas_size, atlas_size);
+        }
+        const size_t sample_count =
+            checked_atlas_product(static_cast<size_t>(width), static_cast<size_t>(height), "face sample");
+        const size_t all_style_samples = checked_atlas_product(sample_count, styles.size(), "face style sample");
+
+        size_t source_offset;
+        if (is_hdr) {
+            const int32_t offset_divisor = bsp.loadversion->game->has_rgb_lightmap ? 3 : 1;
+            if (faceofs % offset_divisor != 0) {
+                FError("HDR lightmap atlas face {} has unaligned RGB light offset {}", face_idx, faceofs);
+            }
+            source_offset = static_cast<size_t>(faceofs / offset_divisor);
+            if (source_offset > hdr_lightdata_source->size() ||
+                all_style_samples > hdr_lightdata_source->size() - source_offset) {
+                FError("HDR lightmap atlas face {} needs {} samples at offset {}, but the source has {}", face_idx,
+                    all_style_samples, source_offset, hdr_lightdata_source->size());
+            }
+        } else {
+            // Quake stores greyscale offsets in samples while RGB-lightmap
+            // formats already store byte offsets. External .lit data is RGB
+            // in both cases.
+            const size_t offset_multiplier = is_lit && !bsp.loadversion->game->has_rgb_lightmap ? 3 : 1;
+            const size_t bytes_per_sample = is_rgb ? 3 : 1;
+            source_offset = checked_atlas_product(static_cast<size_t>(faceofs), offset_multiplier, "face offset");
+            const size_t source_bytes = checked_atlas_product(all_style_samples, bytes_per_sample, "face sample byte");
+            if (source_offset > lightdata_source->size() || source_bytes > lightdata_source->size() - source_offset) {
+                FError("lightmap atlas face {} needs {} bytes at offset {}, but the source has {}", face_idx,
+                    source_bytes, source_offset, lightdata_source->size());
+            }
+        }
+
+        available_styles.insert(styles.begin(), styles.end());
+        rectangles.push_back(face_rect{&face, std::move(extents), std::move(styles), sample_count, source_offset});
     }
 
-    if (!rectangles.size()) {
+    if (rectangles.empty()) {
         return {};
     }
 
@@ -346,13 +783,13 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
 
             atlas &atl = atlasses[current_atlas];
 
-            if (atl.current_x + rect.extents.width() >= atlas_size) {
+            if (atl.current_x + static_cast<size_t>(rect.extents.width()) > atlas_size) {
                 atl.current_x = 0;
                 atl.current_y += atl.tallest;
                 atl.tallest = 0;
             }
 
-            if (atl.current_y + rect.extents.height() >= atlas_size) {
+            if (atl.current_y + static_cast<size_t>(rect.extents.height()) > atlas_size) {
                 current_atlas++;
                 continue;
             }
@@ -369,8 +806,12 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
 
     // calculate final atlas texture size
     single_style_atlas_t full_atlas;
-    size_t sqrt_count = ceil(sqrt(atlasses.size()));
+    const size_t sqrt_count = static_cast<size_t>(std::ceil(std::sqrt(static_cast<double>(atlasses.size()))));
     size_t trimmed_width = 0, trimmed_height = 0;
+
+    if (sqrt_count > static_cast<size_t>(std::numeric_limits<int>::max()) / atlas_size) {
+        FError("lightmap atlas is too wide to represent");
+    }
 
     for (size_t i = 0; i < atlasses.size(); i++) {
         size_t atlas_x = (i % sqrt_count) * atlas_size;
@@ -395,41 +836,34 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
         }
     }
 
-    full_atlas.width = trimmed_width;
-    full_atlas.height = trimmed_height;
+    if (trimmed_width > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        trimmed_height > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        FError("lightmap atlas dimensions {}x{} are too large to represent", trimmed_width, trimmed_height);
+    }
+    full_atlas.width = static_cast<int>(trimmed_width);
+    full_atlas.height = static_cast<int>(trimmed_height);
+    const size_t atlas_pixels = checked_atlas_product(full_atlas.width, full_atlas.height, "pixel");
     if (is_hdr)
-        full_atlas.e5brg9_samples.resize(full_atlas.width * full_atlas.height);
+        full_atlas.e5brg9_samples.resize(atlas_pixels);
     else
-        full_atlas.rgba8_samples.resize(full_atlas.width * full_atlas.height);
+        full_atlas.rgba8_samples.resize(atlas_pixels);
 
     full_atlas_t result;
 
     // compile all of the styles that are available
-    // TODO: LMSTYLE16
-    for (size_t i = 0; i < INVALID_LIGHTSTYLE_OLD - 1; i++) {
+    for (const uint16_t style : available_styles) {
         bool any_written = false;
 
         for (auto &rect : rectangles) {
-            int32_t style_index = -1;
-
-            for (size_t s = 0; s < MAXLIGHTMAPS; s++) {
-                if (rect.face->styles[s] == i) {
-                    style_index = s;
-                    break;
-                }
-            }
-
-            if (style_index == -1) {
+            const auto style_it = std::ranges::find(rect.styles, style);
+            if (style_it == rect.styles.end()) {
                 continue;
             }
-
-            if (bsp.dlightdata.empty()) {
-                continue;
-            }
+            const size_t style_index = static_cast<size_t>(style_it - rect.styles.begin());
 
             if (!is_hdr) {
-                auto in_pixel = lightdata_source + ((is_lit ? 3 : 1) * rect.lightofs) +
-                                (rect.extents.numsamples() * (is_rgb ? 3 : 1) * style_index);
+                const size_t bytes_per_sample = is_rgb ? 3 : 1;
+                size_t input_offset = rect.source_offset + (rect.sample_count * bytes_per_sample * style_index);
 
                 for (size_t y = 0; y < rect.extents.height(); y++) {
                     for (size_t x = 0; x < rect.extents.width(); x++) {
@@ -440,22 +874,16 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
                         out_pixel[3] = 255;
 
                         if (is_rgb) {
-                            out_pixel[0] = *in_pixel++;
-                            out_pixel[1] = *in_pixel++;
-                            out_pixel[2] = *in_pixel++;
+                            out_pixel[0] = (*lightdata_source)[input_offset++];
+                            out_pixel[1] = (*lightdata_source)[input_offset++];
+                            out_pixel[2] = (*lightdata_source)[input_offset++];
                         } else {
-                            out_pixel[0] = out_pixel[1] = out_pixel[2] = *in_pixel++;
+                            out_pixel[0] = out_pixel[1] = out_pixel[2] = (*lightdata_source)[input_offset++];
                         }
                     }
                 }
             } else {
-                // hdr
-
-                int rect_lightofs_in_samples =
-                    bsp.loadversion->game->has_rgb_lightmap ? rect.lightofs / 3 : rect.lightofs;
-
-                auto in_pixel =
-                    hdr_lightdata_source + rect_lightofs_in_samples + (rect.extents.numsamples() * style_index);
+                size_t input_offset = rect.source_offset + (rect.sample_count * style_index);
 
                 for (size_t y = 0; y < rect.extents.height(); y++) {
                     for (size_t x = 0; x < rect.extents.width(); x++) {
@@ -463,7 +891,7 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
                         size_t oy = rect.y + y;
 
                         auto &out_pixel = full_atlas.e5brg9_samples[(oy * full_atlas.width) + ox];
-                        out_pixel = *in_pixel++;
+                        out_pixel = (*hdr_lightdata_source)[input_offset++];
                     }
                 }
             }
@@ -476,7 +904,7 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
         }
 
         // copy out the atlas texture
-        result.style_to_lightmap_atlas[i] = full_atlas;
+        result.style_to_lightmap_atlas[style] = full_atlas;
 
         std::fill(full_atlas.rgba8_samples.begin(), full_atlas.rgba8_samples.end(), qvec4b{});
 
@@ -504,7 +932,9 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
             face_lightmap_uvs.push_back(tc);
         }
 
-        result.facenum_to_lightmap_uvs[Face_GetNum(bsp, face.face)] = std::move(face_lightmap_uvs);
+        const int face_num = Face_GetNum(bsp, face.face);
+        result.facenum_to_lightmap_uvs[face_num] = std::move(face_lightmap_uvs);
+        result.facenum_to_lightmap_styles[face_num] = face.styles;
     };
 
     for (auto &rect : rectangles) {
@@ -514,12 +944,30 @@ full_atlas_t build_lightmap_atlas(const mbsp_t &bsp, const bspxentries_t &bspx, 
     return result;
 }
 
-static void export_obj_and_lightmaps(const mbsp_t &bsp, const bspxentries_t &bspx, bool use_bspx, bool use_decoupled,
-    fs::path obj_path, const fs::path &lightmaps_path_base)
+static void export_obj_and_lightmaps(const mbsp_t &bsp, const bspxentries_t &bspx, fs::path obj_path,
+    const fs::path &lightmaps_path_base, const fs::path &lit_path)
 {
-    // FIXME: pass in .lit
-    // FIXME: pass in hdr .lit
-    const auto atlas = build_lightmap_atlas(bsp, bspx, {}, {}, use_bspx, use_decoupled);
+    lit_variant_t lit;
+    try {
+        lit = LoadLitFile(lit_path, bsp);
+    } catch (const std::exception &e) {
+        FError("couldn't load external lightmap sidecar {}: {}", lit_path, e.what());
+    }
+
+    const std::vector<uint8_t> empty_rgb;
+    const std::vector<uint32_t> empty_hdr;
+    const auto *rgb_lit = std::get_if<lit1_t>(&lit);
+    const auto *hdr_lit = std::get_if<lit_hdr>(&lit);
+    const auto &rgb_litdata = rgb_lit ? rgb_lit->rgbdata : empty_rgb;
+    const auto &hdr_litdata = hdr_lit ? hdr_lit->samples : empty_hdr;
+
+    if (rgb_lit || hdr_lit) {
+        logging::print("using external lightmap sidecar {}\n", lit_path);
+    }
+
+    const bool use_decoupled = bspx.contains("DECOUPLED_LM");
+    const bool use_bspx = !use_decoupled && (bspx.contains("LMOFFSET") || bspx.contains("LMSHIFT"));
+    const auto atlas = build_lightmap_atlas(bsp, bspx, rgb_litdata, hdr_litdata, use_bspx, use_decoupled);
 
     if (atlas.facenum_to_lightmap_uvs.empty()) {
         return;
@@ -535,37 +983,46 @@ static void export_obj_and_lightmaps(const mbsp_t &bsp, const bspxentries_t &bsp
         std::string extension = is_hdr ? ".hdr" : ".png";
         lightmaps_path.replace_filename(stem + "_" + std::to_string(i) + extension);
 
-        std::ofstream strm(lightmaps_path, std::ofstream::out | std::ofstream::binary);
+        write_output_file(lightmaps_path, std::ios_base::binary, [&](std::ofstream &strm) {
+            int write_result;
+            if (is_hdr) {
+                std::vector<float> temp; // rgb components
 
-        if (is_hdr) {
-            std::vector<float> temp; // rgb components
+                // unpack from e5bgr9 to 3x float
+                for (uint32_t sample : full_atlas.e5brg9_samples) {
+                    qvec3f rgb = HDR_UnpackE5BRG9(sample);
+                    temp.push_back(rgb[0]);
+                    temp.push_back(rgb[1]);
+                    temp.push_back(rgb[2]);
+                }
 
-            // unpack from e5bgr9 to 3x float
-            for (uint32_t sample : full_atlas.e5brg9_samples) {
-                qvec3f rgb = HDR_UnpackE5BRG9(sample);
-                temp.push_back(rgb[0]);
-                temp.push_back(rgb[1]);
-                temp.push_back(rgb[2]);
+                write_result = stbi_write_hdr_to_func(
+                    [](void *context, void *data, int size) {
+                        std::ofstream &strm = *((std::ofstream *)context);
+                        strm.write((const char *)data, size);
+                    },
+                    &strm, full_atlas.width, full_atlas.height, 3, temp.data());
+            } else {
+                if (full_atlas.width > std::numeric_limits<int>::max() / 4) {
+                    FError("lightmap atlas {} is too wide for PNG output", lightmaps_path);
+                }
+                write_result = stbi_write_png_to_func(
+                    [](void *context, void *data, int size) {
+                        std::ofstream &strm = *((std::ofstream *)context);
+                        strm.write((const char *)data, size);
+                    },
+                    &strm, full_atlas.width, full_atlas.height, 4, full_atlas.rgba8_samples.data(),
+                    full_atlas.width * 4);
             }
 
-            stbi_write_hdr_to_func(
-                [](void *context, void *data, int size) {
-                    std::ofstream &strm = *((std::ofstream *)context);
-                    strm.write((const char *)data, size);
-                },
-                &strm, full_atlas.width, full_atlas.height, 3, temp.data());
-        } else {
-            stbi_write_png_to_func(
-                [](void *context, void *data, int size) {
-                    std::ofstream &strm = *((std::ofstream *)context);
-                    strm.write((const char *)data, size);
-                },
-                &strm, full_atlas.width, full_atlas.height, 4, full_atlas.rgba8_samples.data(), full_atlas.width * 4);
-        }
+            if (write_result == 0) {
+                FError("failed to encode lightmap atlas {}", lightmaps_path);
+            }
+        });
         logging::print("wrote {}\n", lightmaps_path);
     }
 
-    auto ExportObjFace = [&atlas](std::ostream &f, const mbsp_t *bsp, int face_num, int &vertcount) {
+    auto ExportObjFace = [&atlas](std::ostream &f, const mbsp_t *bsp, int face_num, uint64_t &vertcount) {
         const auto *face = BSP_GetFace(bsp, face_num);
 
         const auto &tcs = atlas.facenum_to_lightmap_uvs.at(face_num);
@@ -589,7 +1046,7 @@ static void export_obj_and_lightmaps(const mbsp_t &bsp, const bspxentries_t &bsp
         for (int i = 0; i < face->numedges; i++) {
             // .obj vertexes start from 1
             // .obj faces are CCW, quake is CW, so reverse the order
-            const int vertindex = vertcount + (face->numedges - 1 - i) + 1;
+            const uint64_t vertindex = vertcount + static_cast<uint64_t>(face->numedges - 1 - i) + 1;
             ewt::print(f, " {0}/{0}/{0}", vertindex);
         }
         f << '\n';
@@ -597,13 +1054,14 @@ static void export_obj_and_lightmaps(const mbsp_t &bsp, const bspxentries_t &bsp
         vertcount += face->numedges;
     };
 
-    auto ExportObj = [&ExportObjFace, &obj_path](const mbsp_t *bsp) {
-        std::ofstream objstream(obj_path, std::ofstream::out);
-        int vertcount = 0;
+    auto ExportObj = [&ExportObjFace, &atlas, &obj_path](const mbsp_t *bsp) {
+        write_output_file(obj_path, {}, [&](std::ofstream &objstream) {
+            uint64_t vertcount = 0;
 
-        for (int i = 0; i < bsp->dfaces.size(); ++i) {
-            ExportObjFace(objstream, bsp, i, vertcount);
-        }
+            for (const auto &[face_num, unused] : atlas.facenum_to_lightmap_uvs) {
+                ExportObjFace(objstream, bsp, face_num, vertcount);
+            }
+        });
     };
 
     ExportObj(&bsp);
@@ -611,7 +1069,7 @@ static void export_obj_and_lightmaps(const mbsp_t &bsp, const bspxentries_t &bsp
     logging::print("wrote {}\n", obj_path);
 }
 
-void serialize_bsp(const bspdata_t &bspdata, const mbsp_t &bsp, const fs::path &name)
+void serialize_bsp(const bspdata_t &bspdata, const mbsp_t &bsp, const fs::path &name, bool export_lightmap_atlas)
 {
     auto j = Json::Value(Json::objectValue);
 
@@ -638,7 +1096,7 @@ void serialize_bsp(const bspdata_t &bspdata, const mbsp_t &bsp, const fs::path &
             visdata = Json::Value(Json::objectValue);
 
             auto &pvs = (visdata["pvs"] = Json::Value(Json::arrayValue));
-            auto &phs = (visdata["pvs"] = Json::Value(Json::arrayValue));
+            auto &phs = (visdata["phs"] = Json::Value(Json::arrayValue));
 
             for (auto &offset : bsp.dvis.bit_offsets) {
                 pvs.append(offset[VIS_PVS]);
@@ -729,11 +1187,12 @@ void serialize_bsp(const bspdata_t &bspdata, const mbsp_t &bsp, const fs::path &
                 json_array({src_texinfo.vecs.at(1, 0), src_texinfo.vecs.at(1, 1), src_texinfo.vecs.at(1, 2),
                     src_texinfo.vecs.at(1, 3)})});
 
-            texinfo["flags"] = bspdata.loadversion->game->id == GAME_QUAKE_II ? src_texinfo.flags.native_q2
-                                                                              : src_texinfo.flags.native_q1;
+            texinfo["flags"] = bspdata.loadversion->game->id == GAME_QUAKE_II
+                                   ? static_cast<int32_t>(src_texinfo.flags.native_q2)
+                                   : static_cast<int32_t>(src_texinfo.flags.native_q1);
             texinfo["miptex"] = src_texinfo.miptex;
             texinfo["value"] = src_texinfo.value;
-            texinfo["texture"] = std::string(src_texinfo.texture.data());
+            texinfo["texture"] = src_texinfo.texturename;
             texinfo["nexttexinfo"] = src_texinfo.nexttexinfo;
         }
     }
@@ -755,9 +1214,8 @@ void serialize_bsp(const bspdata_t &bspdata, const mbsp_t &bsp, const fs::path &
             // for readibility, also output the actual vertices
             auto verts = Json::Value(Json::arrayValue);
             for (int32_t k = 0; k < src_face.numedges; ++k) {
-                auto se = bsp.dsurfedges[src_face.firstedge + k];
-                uint32_t v = (se < 0) ? bsp.dedges[-se][1] : bsp.dedges[se][0];
-                verts.append(to_json(bsp.dvertexes[v]));
+                const int vertex = Face_VertexAtIndex(&bsp, &src_face, k);
+                verts.append(to_json(bsp.dvertexes[static_cast<size_t>(vertex)]));
             }
             face["vertices"] = verts;
 
@@ -890,10 +1348,18 @@ void serialize_bsp(const bspdata_t &bspdata, const mbsp_t &bsp, const fs::path &
         }
     }
 #endif
-    export_obj_and_lightmaps(bsp, bspdata.bspx.entries, false, true, fs::path(name).replace_extension(".geometry.obj"),
-        fs::path(name).replace_extension(".lm.png"));
+    if (export_lightmap_atlas) {
+        auto lit_path = fs::path(name);
+        if (lit_path.extension() == ".json") {
+            lit_path.replace_extension();
+        }
+        lit_path.replace_extension(".lit");
 
-    std::ofstream(name, std::fstream::out | std::fstream::trunc) << std::setw(4) << j;
+        export_obj_and_lightmaps(bsp, bspdata.bspx.entries, fs::path(name).replace_extension(".geometry.obj"),
+            fs::path(name).replace_extension(".lm.png"), lit_path);
+    }
+
+    write_output_file(name, {}, [&](std::ofstream &json_stream) { json_stream << std::setw(4) << j; });
 
     logging::print("wrote {}\n", name);
 }

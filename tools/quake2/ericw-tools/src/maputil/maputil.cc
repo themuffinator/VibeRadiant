@@ -18,6 +18,9 @@ See file, 'COPYING', for details.
 */
 
 #include <cstdint>
+#include <cmath>
+#include <iterator>
+#include <limits>
 
 #include <common/entdata.h>
 #include <common/parser.hh>
@@ -101,6 +104,42 @@ public:
         nullptr, "removes extended Quake II/III information on faces."};
 
     std::vector<std::unique_ptr<settings::setting_base>> operations;
+
+    void initialize(int argc, const char **argv) override
+    {
+        settings::common_settings::initialize(argc, argv);
+
+        // The documented interface accepts the input map as the first
+        // positional argument. The common settings parser deliberately stops
+        // at positional arguments, so rewrite the remaining command line as
+        // an ordered -load operation and continue parsing it.
+        // Only the first map operation may use the positional spelling. If an
+        // explicit operation was already parsed, leave the remainder for
+        // maputil_main to reject instead of silently treating a stray argument
+        // as a second map load.
+        if (!remainder.empty() && !remainder.front().empty() && operations.empty()) {
+            std::vector<std::string> rewritten;
+            rewritten.reserve(remainder.size() + 1);
+            rewritten.emplace_back("-load");
+            rewritten.insert(
+                rewritten.end(), std::make_move_iterator(remainder.begin()), std::make_move_iterator(remainder.end()));
+
+            std::vector<const char *> arguments;
+            arguments.reserve(rewritten.size());
+            for (const std::string &argument : rewritten) {
+                arguments.push_back(argument.c_str());
+            }
+
+            token_parser_t parser(arguments.size(), arguments.data(), {"command line"});
+            remainder = parse(parser);
+        }
+    }
+
+    void reset() override
+    {
+        settings::common_settings::reset();
+        operations.clear();
+    }
 };
 
 maputil_settings maputil_options;
@@ -126,6 +165,24 @@ map_file_t LoadMapOrEntFile(const fs::path &source)
 
 #ifdef USE_LUA
 using array_iterate_callback = std::function<bool(lua_State *state, size_t index)>;
+
+static double lua_check_finite_number(lua_State *state, const int index, const char *field)
+{
+    const double value = luaL_checknumber(state, index);
+    if (!std::isfinite(value)) {
+        luaL_error(state, "%s must be finite", field);
+    }
+    return value;
+}
+
+static int32_t lua_check_int32(lua_State *state, const int index, const char *field)
+{
+    const lua_Integer value = luaL_checkinteger(state, index);
+    if (value < std::numeric_limits<int32_t>::min() || value > std::numeric_limits<int32_t>::max()) {
+        luaL_error(state, "%s is outside the signed 32-bit range", field);
+    }
+    return static_cast<int32_t>(value);
+}
 
 void lua_iterate_array(lua_State *state, array_iterate_callback cb)
 {
@@ -164,63 +221,62 @@ size_t lua_count_array(lua_State *state)
 static void json_to_lua(lua_State *state, const Json::Value &value)
 {
     switch (value.type()) {
-    case Json::ValueType::objectValue: {
-        lua_newtable(state);
+        case Json::ValueType::objectValue: {
+            lua_newtable(state);
 
-        for (auto &key : value.getMemberNames()) {
-            const Json::Value &val = value[key];
-            lua_pushstring(state, key.c_str());
-            json_to_lua(state, val);
-            lua_settable(state, -3);
+            for (auto &key : value.getMemberNames()) {
+                const Json::Value &val = value[key];
+                lua_pushstring(state, key.c_str());
+                json_to_lua(state, val);
+                lua_settable(state, -3);
+            }
+            return;
         }
-        return;
-    }
-    case Json::ValueType::arrayValue: {
-        lua_newtable(state);
+        case Json::ValueType::arrayValue: {
+            lua_newtable(state);
 
             size_t i = 1;
 
-        for (auto &v : value) {
-            json_to_lua(state, v);
-            lua_rawseti(state, -2, i++);
+            for (auto &v : value) {
+                json_to_lua(state, v);
+                lua_rawseti(state, -2, i++);
+            }
+            return;
         }
-        return;
-    }
-    case Json::ValueType::stringValue: {
-        lua_pushstring(state, value.asCString());
-        return;
-    }
-    case Json::ValueType::uintValue: {
-        lua_pushnumber(state, value.asUInt64());
-        return;
-    }
-    case Json::ValueType::intValue: {
-        lua_pushnumber(state, value.asInt64());
-        return;
-    }
-    case Json::ValueType::realValue: {
-        lua_pushnumber(state, value.asDouble());
-        return;
-    }
-    case Json::ValueType::booleanValue: {
-        lua_pushboolean(state, value.asBool());
-        return;
-    }
-    case Json::ValueType::nullValue: {
-        lua_pushnil(state);
-        return;
-    }
-    default: {
-        luaL_error(state, "invalid JSON object type\n");
-        return;
-    }
+        case Json::ValueType::stringValue: {
+            lua_pushstring(state, value.asCString());
+            return;
+        }
+        case Json::ValueType::uintValue: {
+            lua_pushnumber(state, value.asUInt64());
+            return;
+        }
+        case Json::ValueType::intValue: {
+            lua_pushnumber(state, value.asInt64());
+            return;
+        }
+        case Json::ValueType::realValue: {
+            lua_pushnumber(state, value.asDouble());
+            return;
+        }
+        case Json::ValueType::booleanValue: {
+            lua_pushboolean(state, value.asBool());
+            return;
+        }
+        case Json::ValueType::nullValue: {
+            lua_pushnil(state);
+            return;
+        }
+        default: {
+            luaL_error(state, "invalid JSON object type\n");
+            return;
+        }
     }
 }
 
 static int l_load_json(lua_State *state)
 {
-    const char *path = lua_tostring(state, -1);
-    lua_pop(state, 1);
+    const char *path = luaL_checkstring(state, 1);
 
     auto result = fs::load(path);
 
@@ -228,8 +284,7 @@ static int l_load_json(lua_State *state)
         return luaL_error(state, "can't load JSON file: %s\n", path);
     }
 
-    try
-    {
+    try {
         Json::Value json = parse_json(result->data(), result->data() + result->size());
 
         json_to_lua(state, json);
@@ -301,11 +356,11 @@ static void maputil_make_brush_side(lua_State *state, const brush_side_t &side)
 
     if (std::holds_alternative<texdef_quake_ed_t>(side.raw) || std::holds_alternative<texdef_valve_t>(side.raw) ||
         std::holds_alternative<texdef_etp_t>(side.raw)) {
-        const texdef_quake_ed_t &raw =
-            std::holds_alternative<texdef_quake_ed_t>(side.raw) ? std::get<texdef_quake_ed_t>(side.raw)
-            : std::holds_alternative<texdef_valve_t>(side.raw)
-                ? reinterpret_cast<const texdef_quake_ed_t &>(std::get<texdef_valve_t>(side.raw))
-                : reinterpret_cast<const texdef_quake_ed_t &>(std::get<texdef_etp_t>(side.raw));
+        const texdef_quake_ed_t &raw = std::holds_alternative<texdef_quake_ed_t>(side.raw)
+                                           ? std::get<texdef_quake_ed_t>(side.raw)
+                                       : std::holds_alternative<texdef_valve_t>(side.raw)
+                                           ? static_cast<const texdef_quake_ed_t &>(std::get<texdef_valve_t>(side.raw))
+                                           : static_cast<const texdef_quake_ed_t &>(std::get<texdef_etp_t>(side.raw));
 
         lua_createtable(state, 2, 0);
         lua_pushnumber(state, raw.shift[0]);
@@ -333,16 +388,16 @@ static void maputil_make_brush_side(lua_State *state, const brush_side_t &side)
     }
 
     if (std::holds_alternative<texdef_valve_t>(side.raw) || std::holds_alternative<texdef_bp_t>(side.raw)) {
-        const texdef_bp_t &raw_bp = std::holds_alternative<texdef_valve_t>(side.raw)
-                                        ? std::get<texdef_valve_t>(side.raw)
-                                        : std::get<texdef_bp_t>(side.raw);
+        const qmat<double, 2, 3> &axis = std::holds_alternative<texdef_valve_t>(side.raw)
+                                             ? std::get<texdef_valve_t>(side.raw).axis
+                                             : std::get<texdef_bp_t>(side.raw).axis;
 
         lua_createtable(state, 2, 0);
 
         for (size_t i = 0; i < 2; i++) {
             lua_createtable(state, 3, 0);
             for (size_t v = 0; v < 3; v++) {
-                lua_pushnumber(state, raw_bp.axis.at(i, v));
+                lua_pushnumber(state, axis.at(i, v));
                 lua_rawseti(state, -2, v + 1);
             }
             lua_rawseti(state, -2, i + 1);
@@ -426,7 +481,7 @@ static void maputil_make_brush(lua_State *state, const brush_t &brush)
     }
 }
 
-#define LUA_VERIFY_TOP_TYPE(type) Q_assert(lua_type(state, -1) == type)
+#define LUA_VERIFY_TOP_TYPE(type) luaL_checktype(state, -1, type)
 
 static void maputil_copy_dict(lua_State *state, map_entity_t &entity)
 {
@@ -450,10 +505,10 @@ static void maputil_copy_dict(lua_State *state, map_entity_t &entity)
             n++;
 
             lua_rawgeti(state, -1, 1);
-            const char *key = lua_tostring(state, -1);
+            const char *key = luaL_checkstring(state, -1);
             lua_pop(state, 1);
             lua_rawgeti(state, -1, 2);
-            const char *value = lua_tostring(state, -1);
+            const char *value = luaL_checkstring(state, -1);
             lua_pop(state, 1);
             entity.epairs.set(key, value);
 
@@ -469,21 +524,26 @@ static texdef_quake_ed_t maputil_load_quaked(lua_State *state)
     texdef_quake_ed_t quaked;
 
     lua_getfield(state, -1, "shift");
+    luaL_checktype(state, -1, LUA_TTABLE);
     for (size_t i = 0; i < 2; i++) {
         lua_rawgeti(state, -1, i + 1);
-        quaked.shift[i] = lua_tonumber(state, -1);
+        quaked.shift[i] = lua_check_finite_number(state, -1, "texture shift component");
         lua_pop(state, 1);
     }
     lua_pop(state, 1);
 
     lua_getfield(state, -1, "rotate");
-    quaked.rotate = lua_tonumber(state, -1);
+    quaked.rotate = lua_check_finite_number(state, -1, "texture rotation");
     lua_pop(state, 1);
 
     lua_getfield(state, -1, "scale");
+    luaL_checktype(state, -1, LUA_TTABLE);
     for (size_t i = 0; i < 2; i++) {
         lua_rawgeti(state, -1, i + 1);
-        quaked.scale[i] = lua_tonumber(state, -1);
+        quaked.scale[i] = lua_check_finite_number(state, -1, "texture scale component");
+        if (quaked.scale[i] == 0.0) {
+            luaL_error(state, "texture scale components must not be zero");
+        }
         lua_pop(state, 1);
     }
     lua_pop(state, 1);
@@ -496,13 +556,15 @@ static texdef_bp_t maputil_load_bp(lua_State *state)
     texdef_bp_t bp;
 
     lua_getfield(state, -1, "axis");
+    luaL_checktype(state, -1, LUA_TTABLE);
 
     for (size_t i = 0; i < 2; i++) {
         lua_rawgeti(state, -1, i + 1);
+        luaL_checktype(state, -1, LUA_TTABLE);
 
         for (size_t v = 0; v < 3; v++) {
             lua_rawgeti(state, -1, v + 1);
-            bp.axis.at(i, v) = lua_tonumber(state, -1);
+            bp.axis.at(i, v) = lua_check_finite_number(state, -1, "brush-primitives axis component");
             lua_pop(state, 1);
         }
 
@@ -518,18 +580,20 @@ static void maputil_copy_side(lua_State *state, brush_side_t &side)
 {
     // texture
     lua_getfield(state, -1, "texture");
-    side.texture = lua_tostring(state, -1);
+    side.texture = luaL_checkstring(state, -1);
     lua_pop(state, 1);
 
     // plane points
     lua_getfield(state, -1, "plane_points");
+    luaL_checktype(state, -1, LUA_TTABLE);
 
     for (size_t i = 0; i < 3; i++) {
         lua_rawgeti(state, -1, i + 1);
+        luaL_checktype(state, -1, LUA_TTABLE);
 
         for (size_t z = 0; z < 3; z++) {
             lua_rawgeti(state, -1, z + 1);
-            side.planepts[i][z] = lua_tonumber(state, -1);
+            side.planepts[i][z] = lua_check_finite_number(state, -1, "plane point component");
             lua_pop(state, 1);
         }
 
@@ -540,35 +604,50 @@ static void maputil_copy_side(lua_State *state, brush_side_t &side)
 
     // raw
     lua_getfield(state, -1, "raw");
+    luaL_checktype(state, -1, LUA_TTABLE);
+
+    size_t raw_format_count = 0;
 
     if (lua_getfield(state, -1, "quaked") != LUA_TNIL) {
+        raw_format_count++;
         side.raw = maputil_load_quaked(state);
     }
     lua_pop(state, 1);
 
     if (lua_getfield(state, -1, "valve") != LUA_TNIL) {
+        raw_format_count++;
         texdef_bp_t bp = maputil_load_bp(state);
         texdef_quake_ed_t qed = maputil_load_quaked(state);
 
-        side.raw = texdef_valve_t{qed, bp};
+        texdef_valve_t valve;
+        static_cast<texdef_quake_ed_t &>(valve) = qed;
+        static_cast<texdef_bp_t &>(valve) = bp;
+        side.raw = valve;
     }
     lua_pop(state, 1);
 
     if (lua_getfield(state, -1, "bp") != LUA_TNIL) {
+        raw_format_count++;
         side.raw = maputil_load_bp(state);
     }
     lua_pop(state, 1);
 
     if (lua_getfield(state, -1, "etp") != LUA_TNIL) {
+        raw_format_count++;
         texdef_quake_ed_t qed = maputil_load_quaked(state);
 
         lua_getfield(state, -1, "tx2");
-        bool b = !!lua_toboolean(state, -1);
+        luaL_checktype(state, -1, LUA_TBOOLEAN);
+        const bool b = lua_toboolean(state, -1) != 0;
         lua_pop(state, 1);
 
         side.raw = texdef_etp_t{qed, b};
     }
     lua_pop(state, 1);
+
+    if (raw_format_count != 1) {
+        luaL_error(state, "side.raw must contain exactly one of quaked, valve, bp, or etp");
+    }
 
     lua_pop(state, 1);
 
@@ -579,15 +658,15 @@ static void maputil_copy_side(lua_State *state, brush_side_t &side)
         texinfo_quake2_t q2;
 
         lua_getfield(state, -1, "contents");
-        q2.contents = lua_tonumber(state, -1);
+        q2.contents = lua_check_int32(state, -1, "surface contents");
         lua_pop(state, 1);
 
         lua_getfield(state, -1, "value");
-        q2.value = lua_tonumber(state, -1);
+        q2.value = lua_check_int32(state, -1, "surface value");
         lua_pop(state, 1);
 
         lua_getfield(state, -1, "flags");
-        q2.flags = lua_tonumber(state, -1);
+        q2.flags = lua_check_int32(state, -1, "surface flags");
         lua_pop(state, 1);
 
         side.extended_info = q2;
@@ -669,14 +748,18 @@ static inline qplane3d pop_plane_from_side(lua_State *state)
     qplane3d plane;
 
     lua_getfield(state, -1, "plane");
+    luaL_checktype(state, -1, LUA_TTABLE);
 
     for (size_t i = 0; i < 3; i++) {
         lua_rawgeti(state, -1, i + 1);
-        plane.normal[i] = lua_tonumber(state, -1);
+        plane.normal[i] = lua_check_finite_number(state, -1, "plane normal component");
         lua_pop(state, 1);
     }
+    if (qv::length2(plane.normal) == 0.0) {
+        luaL_error(state, "plane normal must not be zero");
+    }
     lua_rawgeti(state, -1, 4);
-    plane.dist = lua_tonumber(state, -1);
+    plane.dist = lua_check_finite_number(state, -1, "plane distance");
     lua_pop(state, 1);
 
     lua_pop(state, 1);
@@ -691,7 +774,10 @@ static int l_create_winding(lua_State *state)
     // -1 = extents
     bool found_face = false;
 
-    double extents = lua_tonumber(state, -1);
+    const double extents = lua_check_finite_number(state, -1, "winding extent");
+    if (extents <= 0.0) {
+        return luaL_error(state, "winding extent must be greater than zero");
+    }
     lua_pop(state, 1);
 
     lua_pushvalue(state, -2);
@@ -745,8 +831,7 @@ static int l_create_winding(lua_State *state)
 
 static int l_load_texture_meta(lua_State *state)
 {
-    const char *path = lua_tostring(state, 1); /* get argument */
-    lua_pop(state, 1);
+    const char *path = luaL_checkstring(state, 1);
 
     if (!current_game) {
         luaL_error(state, "need a game loaded with -game for this function");
@@ -853,6 +938,10 @@ static lua_State *maputil_setup_lua()
 {
     lua_State *state = luaL_newstate();
 
+    if (!state) {
+        FError("couldn't create Lua state");
+    }
+
     luaL_openlibs(state);
 
     return state;
@@ -873,7 +962,7 @@ static int maputil_lua_error(lua_State *state)
 }
 #endif
 
-static void maputil_exec_script(const fs::path &file)
+static bool maputil_exec_script(const fs::path &file)
 {
 #ifdef USE_LUA
     lua_State *state = maputil_setup_lua();
@@ -896,12 +985,14 @@ static void maputil_exec_script(const fs::path &file)
     }
 
     maputil_free_lua(state);
+    return err == LUA_OK;
 #else
     logging::print("maputil not compiled with Lua support\n");
+    return false;
 #endif
 }
 
-static void maputil_exec_query(const char *query)
+static bool maputil_exec_query(const char *query)
 {
 #ifdef USE_LUA
     logging::print("query: {}\n", query);
@@ -910,9 +1001,11 @@ static void maputil_exec_query(const char *query)
 
     int err = luaL_loadstring(state, query);
 
+    bool success = true;
     if (err != LUA_OK) {
         logging::print("can't load query: {}\n", lua_tostring(state, -1));
         lua_pop(state, 1);
+        success = false;
     } else {
         maputil_setup_globals(state);
 
@@ -939,6 +1032,7 @@ static void maputil_exec_query(const char *query)
             if (err != LUA_OK) {
                 logging::print("can't execute query: {}\n", lua_tostring(state, -1));
                 lua_pop(state, 1);
+                success = false;
             } else {
                 int b = lua_toboolean(state, -1);
                 lua_pop(state, 1);
@@ -955,14 +1049,22 @@ static void maputil_exec_query(const char *query)
     }
 
     maputil_free_lua(state);
+    return success;
 #else
     logging::print("maputil not compiled with Lua support\n");
+    return false;
 #endif
 }
 
-int maputil_main(int argc, const char **argv)
+static int maputil_main_impl(int argc, const char **argv)
 {
     logging::preinitialize();
+
+    maputil_options.reset();
+    map_file = {};
+    current_game = nullptr;
+    fs::clear();
+    img::clear();
 
     maputil_options.preinitialize(argc, argv);
     maputil_options.initialize(argc - 1, argv + 1);
@@ -970,12 +1072,17 @@ int maputil_main(int argc, const char **argv)
 
     logging::init(std::nullopt, maputil_options);
 
+    if (!maputil_options.remainder.empty()) {
+        FError("unexpected command-line argument '{}'", maputil_options.remainder.front());
+    }
+
     if (maputil_options.operations.empty()) {
-        maputil_options.print_help(true);
+        maputil_options.print_help(false);
         return 1;
     }
 
     fs::path source;
+    bool map_loaded = false;
 
     for (auto &operation : maputil_options.operations) {
 
@@ -990,7 +1097,11 @@ int maputil_main(int argc, const char **argv)
             logging::print("{}\n", source);
 
             map_file = LoadMapOrEntFile(source);
+            map_loaded = true;
         } else if (operation->primary_name() == "game") {
+            if (!map_loaded) {
+                FError("-game must be specified after -load");
+            }
             const std::string &gamename = operation->string_value();
 
             current_game = nullptr;
@@ -1008,10 +1119,23 @@ int maputil_main(int argc, const char **argv)
 
             current_game->init_filesystem(source, maputil_options);
         } else if (operation->primary_name() == "script") {
-            maputil_exec_script(operation->string_value().c_str());
+            if (!map_loaded) {
+                FError("-script requires a map loaded with -load");
+            }
+            if (!maputil_exec_script(operation->string_value().c_str())) {
+                FError("script execution failed");
+            }
         } else if (operation->primary_name() == "query") {
-            maputil_exec_query(operation->string_value().c_str());
+            if (!map_loaded) {
+                FError("-query requires a map loaded with -load");
+            }
+            if (!maputil_exec_query(operation->string_value().c_str())) {
+                FError("query execution failed");
+            }
         } else if (operation->primary_name() == "strip_extended_info") {
+            if (!map_loaded) {
+                FError("-strip_extended_info requires a map loaded with -load");
+            }
             for (auto &entity : map_file.entities) {
                 for (auto &brush : entity.brushes) {
                     for (auto &face : brush.faces) {
@@ -1020,6 +1144,10 @@ int maputil_main(int argc, const char **argv)
                 }
             }
         } else if (operation->primary_name() == "convert") {
+
+            if (!map_loaded) {
+                FError("-convert requires a map loaded with -load");
+            }
 
             std::string type = operation->string_value();
             texcoord_style_t dest_style;
@@ -1038,15 +1166,40 @@ int maputil_main(int argc, const char **argv)
 
             map_file.convert_to(dest_style, current_game, maputil_options);
         } else if (operation->primary_name() == "save") {
+            if (!map_loaded) {
+                FError("-save requires a map loaded with -load");
+            }
             fs::path dest = DefaultExtension(operation->string_value(), "map");
             logging::print("saving to {}...\n", dest);
 
             std::ofstream stream(dest);
+            if (!stream) {
+                FError("couldn't open {} for writing", dest);
+            }
             map_file.write(stream);
+            stream.close();
+            if (!stream) {
+                FError("error writing {}", dest);
+            }
         } else {
             Error("option not implemented: {}", operation->primary_name());
         }
     }
 
     return 0;
+}
+
+int maputil_main(int argc, const char **argv)
+{
+    try {
+        const int result = maputil_main_impl(argc, argv);
+        logging::close();
+        if (result == 0) {
+            logging::fail_if_warnings();
+        }
+        return result;
+    } catch (...) {
+        logging::close();
+        throw;
+    }
 }

@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <string>
 #include <utility>
+#include <cmath>
+#include <limits>
 
 #include <light/light.hh>
 #include <light/entities.hh>
@@ -74,6 +76,18 @@ struct lightgrid_raw_data
 
     qvec3f grid_index_to_world(const qvec3i &index) const { return grid_mins + (index * grid_dist); }
 };
+
+static size_t LightGridCellCount(const qvec3i &size)
+{
+    size_t result = 1;
+    for (const int dimension : size) {
+        if (dimension <= 0 || static_cast<size_t>(dimension) > std::numeric_limits<size_t>::max() / result) {
+            FError("invalid lightgrid leaf size {}", size);
+        }
+        result *= static_cast<size_t>(dimension);
+    }
+    return result;
+}
 
 static std::vector<uint8_t> MakeOctreeLump(const mbsp_t &bsp, const lightgrid_raw_data &data, lightgrid_format_t format)
 {
@@ -228,43 +242,6 @@ static std::vector<uint8_t> MakeOctreeLump(const mbsp_t &bsp, const lightgrid_ra
     logging::print(
         "octree leafs {} overhead {} bytes\n", octree_leafs.size(), octree_leafs.size() * sizeof(octree_leaf));
 
-    // lookup function
-    std::function<std::tuple<lightgrid_samples_t, bool>(uint32_t, qvec3i)> octree_lookup_r;
-    octree_lookup_r = [&](uint32_t node_index, qvec3i test_point) -> std::tuple<lightgrid_samples_t, bool> {
-        if (node_index & lightgrid::FLAG_OCCLUDED) {
-            return {lightgrid_samples_t{}, true};
-        }
-        if (node_index & lightgrid::FLAG_LEAF) {
-            // in actuality, we'd pull the data from a 3D grid stored in the leaf.
-            int i = data.get_grid_index(test_point[0], test_point[1], test_point[2]);
-            return {data.grid_result[i], data.grid_result[i].occluded};
-        }
-        auto &node = octree_nodes[node_index];
-        int i = child_index(node.division_point, test_point); // [0..7]
-        return octree_lookup_r(node.children[i], test_point);
-    };
-
-#if 0
-    // self-check
-    for (int z = 0; z < data.grid_size[2]; ++z) {
-        for (int y = 0; y < data.grid_size[1]; ++y) {
-            for (int x = 0; x < data.grid_size[0]; ++x) {
-                auto [color, occluded] = octree_lookup_r(root_node, {x, y, z});
-
-                int sample_index = data.get_grid_index(x, y, z);
-
-                // compare against original data
-                if (occluded) {
-                    Q_assert(data.occlusion[sample_index]);
-                } else {
-                    Q_assert(!data.occlusion[sample_index]);
-                    Q_assert(data.grid_result[sample_index] == color);
-                }
-            }
-        }
-    }
-#endif
-
     // pack into the output data structures
     lightgrid_header_t header;
     header.grid_dist = data.grid_dist;
@@ -276,6 +253,7 @@ static std::vector<uint8_t> MakeOctreeLump(const mbsp_t &bsp, const lightgrid_ra
 
     // the nodes (fixed-size)
     std::vector<lightgrid_node_t> nodes;
+    nodes.reserve(octree_nodes.size());
     for (const auto &node : octree_nodes) {
         lightgrid_node_t &node_out = nodes.emplace_back();
 
@@ -286,7 +264,8 @@ static std::vector<uint8_t> MakeOctreeLump(const mbsp_t &bsp, const lightgrid_ra
     if (format == lightgrid_format_t::OCTREE) {
         lightgrid_octree_t result;
         result.header = header;
-        result.nodes = nodes;
+        result.nodes = std::move(nodes);
+        result.leafs.reserve(octree_leafs.size());
 
         // the leafs (each is variable sized)
         for (const auto &leaf : octree_leafs) {
@@ -294,6 +273,7 @@ static std::vector<uint8_t> MakeOctreeLump(const mbsp_t &bsp, const lightgrid_ra
 
             leaf_out.mins = leaf.mins;
             leaf_out.size = leaf.size;
+            leaf_out.samples.reserve(LightGridCellCount(leaf.size));
 
             auto &cm = leaf.mins;
             auto &cs = leaf.size;
@@ -319,7 +299,8 @@ static std::vector<uint8_t> MakeOctreeLump(const mbsp_t &bsp, const lightgrid_ra
     } else if (format == lightgrid_format_t::LIGHTGRIDS) {
         subgrid_t result;
         result.header = header;
-        result.nodes = nodes;
+        result.nodes = std::move(nodes);
+        result.leafs.reserve(octree_leafs.size());
 
         // the leafs (each is variable sized)
         for (const auto &leaf : octree_leafs) {
@@ -327,6 +308,7 @@ static std::vector<uint8_t> MakeOctreeLump(const mbsp_t &bsp, const lightgrid_ra
 
             leaf_out.mins = leaf.mins;
             leaf_out.size = leaf.size;
+            leaf_out.samples.reserve(LightGridCellCount(leaf.size));
 
             auto &cm = leaf.mins;
             auto &cs = leaf.size;
@@ -344,7 +326,9 @@ static std::vector<uint8_t> MakeOctreeLump(const mbsp_t &bsp, const lightgrid_ra
 
         std::ostringstream str(std::ios_base::out | std::ios_base::binary);
         str << endianness<std::endian::little>;
-        str <= lightgrids_t{.subgrids = {result}};
+        lightgrids_t lightgrids;
+        lightgrids.subgrids.push_back(std::move(result));
+        str <= lightgrids;
 
         auto vec = StringToVector(str.str());
         logging::print("     {:8} bytes LIGHTGRIDS\n", vec.size());
@@ -388,19 +372,41 @@ void LightGrid(bspdata_t *bspdata)
     lightgrid_raw_data data;
     data.grid_dist = light_options.lightgrid_dist.value();
 
+    for (float distance : data.grid_dist) {
+        if (!std::isfinite(distance) || distance <= 0.0f) {
+            FError("lightgrid_dist components must be finite and greater than zero (got {})", data.grid_dist);
+        }
+    }
+
     auto grid_bounds = LightGridBounds(bsp);
+    if (!grid_bounds.valid()) {
+        FError("couldn't determine valid bounds for the lightgrid");
+    }
 
     const qvec3f grid_maxs = grid_bounds.maxs();
     data.grid_mins = grid_bounds.mins();
     const qvec3f world_size = grid_maxs - data.grid_mins;
 
     // number of grid points on each axis
-    data.grid_size = {ceil(world_size[0] / data.grid_dist[0]), ceil(world_size[1] / data.grid_dist[1]),
-        ceil(world_size[2] / data.grid_dist[2])};
+    for (size_t axis = 0; axis < 3; ++axis) {
+        const double axis_size = std::ceil(static_cast<double>(world_size[axis]) / data.grid_dist[axis]);
+        if (!std::isfinite(axis_size) || axis_size < 1.0 || axis_size > std::numeric_limits<int32_t>::max()) {
+            FError("lightgrid axis {} has an invalid sample count ({})", axis, axis_size);
+        }
+        data.grid_size[axis] = static_cast<int32_t>(axis_size);
+    }
 
-    data.grid_result.resize(data.grid_size[0] * data.grid_size[1] * data.grid_size[2]);
+    size_t grid_sample_count = 1;
+    for (const int32_t axis_size : data.grid_size) {
+        if (static_cast<size_t>(axis_size) >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max()) / grid_sample_count) {
+            FError("lightgrid contains too many sample points");
+        }
+        grid_sample_count *= static_cast<size_t>(axis_size);
+    }
+    data.grid_result.resize(grid_sample_count);
 
-    logging::parallel_for(0, data.grid_size[0] * data.grid_size[1] * data.grid_size[2], [&](int sample_index) {
+    logging::parallel_for(0, static_cast<int32_t>(grid_sample_count), [&](int sample_index) {
         const int z = (sample_index / (data.grid_size[0] * data.grid_size[1]));
         const int y = (sample_index / data.grid_size[0]) % data.grid_size[1];
         const int x = sample_index % data.grid_size[0];
@@ -428,6 +434,19 @@ void LightGrid(bspdata_t *bspdata)
     logging::print("     {} grid_mins\n", data.grid_mins);
     logging::print("     {} grid_maxs\n", grid_maxs);
     logging::print("     {} num_styles\n", data.num_styles);
+
+    const lightgrid_trace_stats_t trace_stats = LightgridTraceStats();
+    const auto print_batch_stats = [](std::string_view kind, uint64_t rays, uint64_t batches) {
+        if (rays == 0 || batches == 0) {
+            return;
+        }
+        const double rays_per_batch = static_cast<double>(rays) / static_cast<double>(batches);
+        logging::print(logging::flag::STAT, "     {}: {} rays in {} stream batches ({:.1f} rays/batch)\n", kind, rays,
+            batches, rays_per_batch);
+    };
+    print_batch_stats("point lights", trace_stats.point_light_rays, trace_stats.point_light_batches);
+    print_batch_stats("sunlight", trace_stats.sunlight_rays, trace_stats.sunlight_batches);
+    print_batch_stats("surface lights", trace_stats.surface_light_rays, trace_stats.surface_light_batches);
 
     // octree lump
     if (light_options.lightgrid_format.value() == lightgrid_format_t::OCTREE) {

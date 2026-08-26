@@ -27,8 +27,8 @@ int main(int argc, const char **argv)
 
     try {
         return vis_main(argc, argv);
-    } catch (const settings::quit_after_help_exception &) {
-        return 0;
+    } catch (const settings::quit_after_help_exception &e) {
+        return e.exit_code();
     } catch (const std::exception &e) {
         exit_on_exception(e);
     }

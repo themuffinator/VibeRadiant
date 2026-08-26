@@ -29,6 +29,7 @@ struct LightContext
     mbsp_t *bsp = nullptr;
 
     // Data Structures
+    std::vector<std::unique_ptr<modelinfo_t>> owned_modelinfo;
     std::vector<modelinfo_t *> modelinfo;
     std::vector<const modelinfo_t *> tracelist;
     std::vector<const modelinfo_t *> selfshadowlist;

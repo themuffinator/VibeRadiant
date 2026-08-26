@@ -59,6 +59,11 @@ void PostProcessLightFace(const mbsp_t *bsp, lightsurf_t &lightsurf, const setti
 
 qvec3b round_to_int(const qvec3f &color);
 
+// Calculates the direct-sun response for one surface sample. Back-facing
+// samples receive no light unless the surface explicitly accepts light from
+// both sides.
+float sunlight_angle_factor(const qvec3f &incoming, const qvec3f &surface_normal, bool two_sided, float angle_scale);
+
 struct lightgrid_sample_t
 {
     bool used = false;
@@ -85,11 +90,23 @@ struct lightgrid_samples_t
     bool occluded = false;
 
     void add(const qvec3f &color, int style, const qvec3f &grid_to_light_dir, float anglescale);
+    void apply_minlight(const qvec3f &color, float light, bool additive);
     int used_styles() const;
 
     bspx_lightgrid_samples_t to_bspx_lightgrid_samples() const;
     lightgrids_sampleset_t to_lightgrids_sampleset_t() const;
 };
 
+struct lightgrid_trace_stats_t
+{
+    uint64_t point_light_rays = 0;
+    uint64_t point_light_batches = 0;
+    uint64_t sunlight_rays = 0;
+    uint64_t sunlight_batches = 0;
+    uint64_t surface_light_rays = 0;
+    uint64_t surface_light_batches = 0;
+};
+
+lightgrid_trace_stats_t LightgridTraceStats();
 lightgrid_samples_t CalcLightgridAtPoint(const mbsp_t *bsp, const qvec3f &world_point);
 void ResetLtFace();

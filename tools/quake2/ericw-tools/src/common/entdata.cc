@@ -19,7 +19,12 @@
 
 #include <common/entdata.h>
 
-#include <cstdlib> // atoi()
+#include <algorithm>
+#include <cerrno>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
 
 #include <common/bsputils.hh>
 #include <common/parser.hh>
@@ -56,7 +61,13 @@ double entdict_t::get_float(std::string_view key) const
         return 0;
     }
 
-    return atof(s.data());
+    errno = 0;
+    char *end = nullptr;
+    const double value = std::strtod(s.c_str(), &end);
+    if (end == s.c_str() || errno == ERANGE || !std::isfinite(value)) {
+        return 0;
+    }
+    return value;
 }
 
 int32_t entdict_t::get_int(std::string_view key) const
@@ -67,20 +78,40 @@ int32_t entdict_t::get_int(std::string_view key) const
         return 0;
     }
 
-    return atoi(s.data());
+    errno = 0;
+    char *end = nullptr;
+    const long long value = std::strtoll(s.c_str(), &end, 10);
+    if (end == s.c_str() || errno == ERANGE || value < std::numeric_limits<int32_t>::lowest() ||
+        value > std::numeric_limits<int32_t>::max()) {
+        return 0;
+    }
+    return static_cast<int32_t>(value);
 }
 
 int32_t entdict_t::get_vector(std::string_view key, qvec3f &vec) const
 {
-    std::string value = get(key);
-
-    // FIXME: this fixes ASan triggering on some entities...
-    if (*(value.data() + value.size()) != 0) {
-        *(value.data() + value.size()) = 0;
-    }
+    const std::string &value = get(key);
 
     vec = {};
-    return sscanf(value.data(), "%f %f %f", &vec[0], &vec[1], &vec[2]);
+    const char *position = value.c_str();
+    int32_t parsed_components = 0;
+    for (size_t component = 0; component < vec.size(); ++component) {
+        while (std::isspace(static_cast<unsigned char>(*position))) {
+            ++position;
+        }
+
+        errno = 0;
+        char *end = nullptr;
+        const float parsed = std::strtof(position, &end);
+        if (end == position || errno == ERANGE || !std::isfinite(parsed)) {
+            break;
+        }
+
+        vec[component] = parsed;
+        position = end;
+        ++parsed_components;
+    }
+    return parsed_components;
 }
 
 void entdict_t::set(std::string_view key, std::string_view value)
@@ -105,11 +136,19 @@ void entdict_t::remove(std::string_view key)
 
 void entdict_t::rename(std::string_view from, std::string_view to)
 {
+    if (from == to) {
+        return;
+    }
+
     const auto it = find(from);
     if (it != end()) {
         auto oldValue = std::move(it->second);
         keyvalues.erase(it);
-        keyvalues.emplace_back(to, std::move(oldValue));
+        if (const auto destination = find(to); destination != end()) {
+            destination->second = std::move(oldValue);
+        } else {
+            keyvalues.emplace_back(to, std::move(oldValue));
+        }
     }
 }
 
@@ -168,13 +207,17 @@ void entdict_t::parse(parser_base_t &parser)
         if (parser.token == "}")
             FError("closing brace without data");
 
-        // trim whitespace from start/end
-        while (!keystr.empty() && std::isspace(keystr.front())) {
-            keystr.erase(keystr.begin());
-        }
-        while (!keystr.empty() && std::isspace(keystr.back())) {
-            keystr.erase(keystr.cbegin());
-        }
+        // Trim in two bulk operations so a maliciously long padded key cannot
+        // force quadratic repeated front erases.
+        const auto first = std::find_if_not(
+            keystr.begin(), keystr.end(), [](unsigned char character) { return std::isspace(character); });
+        const auto last = std::find_if_not(keystr.rbegin(), keystr.rend(), [](unsigned char character) {
+            return std::isspace(character);
+        }).base();
+        const size_t leading_whitespace = static_cast<size_t>(std::distance(keystr.begin(), first));
+        const size_t content_end = static_cast<size_t>(std::distance(keystr.begin(), last));
+        keystr.erase(content_end);
+        keystr.erase(0, leading_whitespace);
 
         set(keystr, parser.token);
     }

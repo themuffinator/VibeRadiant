@@ -93,9 +93,11 @@ public:
     std::vector<std::unique_ptr<settings::setting_base>> operations;
 
     bsputil_settings();
+    void reset() override;
 };
 
 struct mbsp_t;
 
 void ExportWad(std::ofstream &wadfile, const mbsp_t *bsp);
+void CheckBSPFile(const mbsp_t *bsp);
 int bsputil_main(int argc, const char **argv);

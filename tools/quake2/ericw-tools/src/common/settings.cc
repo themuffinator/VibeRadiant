@@ -409,11 +409,11 @@ bool setting_vec3::parse(const std::string &setting_name, parser_base_t &parser,
             return false;
         }
 
-        try {
-            vec[i] = std::stod(parser.token);
-        } catch (std::exception &) {
+        const auto value = detail::parse_number<float>(parser.token);
+        if (!value) {
             return false;
         }
+        vec[i] = *value;
     }
 
     set_value(vec, source);
@@ -451,11 +451,11 @@ bool setting_light::parse(const std::string &setting_name, parser_base_t &parser
             break;
         }
 
-        try {
-            vec[i] = std::stod(parser.token);
-        } catch (std::exception &) {
+        const auto value = detail::parse_number<float>(parser.token);
+        if (!value) {
             return false;
         }
+        vec[i] = *value;
 
         num_parsed++;
     }
@@ -511,11 +511,11 @@ bool setting_mangle::parse(const std::string &setting_name, parser_base_t &parse
             break;
         }
 
-        try {
-            vec[i] = std::stod(parser.token);
-        } catch (std::exception &) {
+        const auto value = detail::parse_number<float>(parser.token);
+        if (!value) {
             break;
         }
+        vec[i] = *value;
 
         parser.parse_token();
     }
@@ -730,7 +730,7 @@ std::vector<std::string> setting_container::parse(parser_base_t &parser)
         }
 
         // end of options
-        if (parser.token[0] != '-') {
+        if (parser.token.empty() || parser.token[0] != '-') {
             break;
         }
 
@@ -738,7 +738,7 @@ std::vector<std::string> setting_container::parse(parser_base_t &parser)
         parser.parse_token();
 
         // remove leading hyphens. we support any number of them.
-        while (parser.token.front() == '-') {
+        while (!parser.token.empty() && parser.token.front() == '-') {
             parser.token.erase(parser.token.begin());
         }
 
@@ -799,6 +799,7 @@ common_settings::common_settings()
       nostat{this, "nostat", false, &logging_group, "don't output statistic messages"},
       noprogress{this, "noprogress", false, &logging_group, "don't output progress messages"},
       nocolor{this, "nocolor", false, &logging_group, "don't output color codes (for TB, etc)"},
+      werror{this, "werror", false, &logging_group, "return an error if any warnings are emitted"},
       quiet{this, {"quiet", "noverbose"}, {&nopercent, &nostat, &noprogress}, &logging_group,
           "suppress non-important messages (equivalent to -nopercent -nostat -noprogress)"},
       gamedir{this, "gamedir", "", &game_group,
@@ -829,6 +830,7 @@ void common_settings::set_parameters(int argc, const char **argv)
 
 void common_settings::preinitialize(int argc, const char **argv)
 {
+    logging::reset_warning_count();
     set_parameters(argc, argv);
 }
 
@@ -840,6 +842,7 @@ void common_settings::initialize(int argc, const char **argv)
 
 void common_settings::postinitialize(int argc, const char **argv)
 {
+    logging::set_warnings_as_errors(werror.value());
     configureTBB(threads.value(), lowpriority.value());
 
     if (verbose.value()) {

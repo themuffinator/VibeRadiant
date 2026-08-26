@@ -457,6 +457,9 @@ struct gamedef_t
     // whether the game supports content flags on brush models
     bool allow_contented_bmodels = false;
 
+    // Whether Half-Life-specific texture prefixes are recognized.
+    bool allows_hl_contents = false;
+
     // base dir for searching for paths, in case we are in a mod dir
     // note: we need this to be able to be overridden via options
     const std::string default_base_dir = {};
@@ -532,7 +535,7 @@ struct fmt::formatter<bspversion_t>
     constexpr auto parse(format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.end(); }
 
     template<typename FormatContext>
-    auto format(const bspversion_t &v, FormatContext &ctx) -> decltype(ctx.out())
+    auto format(const bspversion_t &v, FormatContext &ctx) const -> decltype(ctx.out())
     {
         if (v.name) {
             fmt::format_to(ctx.out(), "{} ", v.name);

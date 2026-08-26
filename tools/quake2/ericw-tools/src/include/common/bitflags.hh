@@ -72,9 +72,9 @@ public:
         return *this;
     }
 
-    inline bitflags operator|(const bitflags &r) { return bitflags(*this) |= r; }
-    inline bitflags operator&(const bitflags &r) { return bitflags(*this) &= r; }
-    inline bitflags operator^(const bitflags &r) { return bitflags(*this) ^= r; }
+    inline bitflags operator|(const bitflags &r) const { return bitflags(*this) |= r; }
+    inline bitflags operator&(const bitflags &r) const { return bitflags(*this) &= r; }
+    inline bitflags operator^(const bitflags &r) const { return bitflags(*this) ^= r; }
 
     inline bitflags operator~() const { return ~_bits; }
 

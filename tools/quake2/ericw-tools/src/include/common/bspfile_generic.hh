@@ -102,7 +102,8 @@ struct dmiptex_t
 struct miptex_t
 {
     std::string name;
-    uint32_t width, height;
+    uint32_t width = 0;
+    uint32_t height = 0;
     std::vector<uint8_t> data;
     /**
      * set at read time if the offset is -1
@@ -111,7 +112,7 @@ struct miptex_t
     /**
      * exposed for testing -notex
      */
-    std::array<int32_t, MIPLEVELS> offsets;
+    std::array<int32_t, MIPLEVELS> offsets{};
 
     size_t stream_size() const;
 
@@ -172,7 +173,7 @@ struct fmt::formatter<plane_type_t>
     constexpr auto parse(format_parse_context &ctx) -> decltype(ctx.begin()) { return ctx.end(); }
 
     template<typename FormatContext>
-    auto format(plane_type_t t, FormatContext &ctx)
+    auto format(plane_type_t t, FormatContext &ctx) const
     {
         string_view name = "unknown";
         switch (t) {
@@ -192,7 +193,10 @@ struct dplane_t : qplane3f
 {
     int32_t type;
 
-    [[nodiscard]] constexpr dplane_t operator-() const { return {qplane3f::operator-(), type}; }
+    [[nodiscard]] constexpr dplane_t operator-() const
+    {
+        return { qplane3f::operator-(), type };
+    }
 
     // serialize for streams
     void stream_write(std::ostream &s) const;
@@ -237,7 +241,7 @@ struct mtexinfo_t
 
     // q2 only
     int32_t value; // light emission, etc
-    std::array<char, 32> texture; // texture name (textures/*.wal)
+    std::string texturename; // texture name (textures/*.wal)
     int32_t nexttexinfo = -1; // for animations, -1 = end of chain
 };
 
@@ -380,7 +384,7 @@ struct bspversion_t;
 struct mbsp_t
 {
     // the BSP version that we came from, if any
-    const bspversion_t *loadversion;
+    const bspversion_t *loadversion = nullptr;
 
     // the BSP we were converted from, if any
     fs::path file;
@@ -406,7 +410,7 @@ struct mbsp_t
     std::vector<dbrush_t> dbrushes;
     std::vector<q2_dbrushside_qbism_t> dbrushsides;
 
-    int lightsamples() const;
+    size_t lightsamples() const;
 };
 
 extern const bspversion_t bspver_generic;

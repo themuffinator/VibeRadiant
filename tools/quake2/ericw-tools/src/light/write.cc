@@ -26,26 +26,218 @@
 #include <common/parallel.hh>
 #include <common/litfile.hh>
 
+#include <cmath>
+#include <fstream>
+#include <limits>
+#include <string_view>
+
+namespace
+{
+constexpr int32_t LIT_VERSION_2 = 2;
+
+const gamedef_t &ValidateLightingBsp(const mbsp_t *bsp, std::string_view output_type)
+{
+    if (!bsp) {
+        FError("can't write {} output for a null BSP", output_type);
+    }
+    if (!bsp->loadversion || !bsp->loadversion->game) {
+        FError("can't write {} output without a valid BSP game/version", output_type);
+    }
+    return *bsp->loadversion->game;
+}
+
+size_t CheckedLightSampleCount(const mbsp_t &bsp, const gamedef_t &game, std::string_view output_type)
+{
+    if (game.has_rgb_lightmap) {
+        if (bsp.dlightdata.size() % 3 != 0) {
+            FError("can't write {} output: RGB BSP lighting has a non-integral sample count ({} bytes)", output_type,
+                bsp.dlightdata.size());
+        }
+        return bsp.dlightdata.size() / 3;
+    }
+    return bsp.dlightdata.size();
+}
+
+size_t CheckedOutputByteCount(size_t samples, size_t bytes_per_sample, std::string_view output_type)
+{
+    if (bytes_per_sample && samples > std::numeric_limits<size_t>::max() / bytes_per_sample) {
+        FError("{} output size overflows this platform", output_type);
+    }
+    const size_t bytes = samples * bytes_per_sample;
+    if constexpr (sizeof(std::streamsize) <= sizeof(size_t)) {
+        if (bytes > static_cast<size_t>(std::numeric_limits<std::streamsize>::max())) {
+            FError("{} output is too large for the output stream", output_type);
+        }
+    }
+    return bytes;
+}
+
+void RequireOutputBytes(
+    const std::vector<uint8_t> &buffer, size_t required, std::string_view buffer_name, std::string_view output_type)
+{
+    if (buffer.size() < required) {
+        FError("can't write {} output: {} buffer has {} bytes, but {} are required", output_type, buffer_name,
+            buffer.size(), required);
+    }
+}
+
+void WriteOutputBytes(std::ofstream &stream, const std::vector<uint8_t> &buffer, size_t bytes)
+{
+    if (bytes != 0) {
+        stream.write(reinterpret_cast<const char *>(buffer.data()), static_cast<std::streamsize>(bytes));
+    }
+}
+
+void FinishOutputFile(std::ofstream &stream, const fs::path &path)
+{
+    stream.flush();
+    if (!stream) {
+        stream.close();
+        FError("error writing {}", path);
+    }
+    stream.close();
+    if (!stream) {
+        FError("error closing {}", path);
+    }
+}
+
+uint8_t Lit2ScaleShift(float scale, size_t facenum)
+{
+    if (!std::isfinite(scale) || scale < 1.0f) {
+        FError("can't write lit2 output: face {} has invalid lightmap scale {} (expected a positive power of two)",
+            facenum, scale);
+    }
+
+    int exponent = 0;
+    const float fraction = std::frexp(scale, &exponent);
+    const int shift = exponent - 1;
+    if (fraction != 0.5f || shift < 0 || shift > std::numeric_limits<uint8_t>::max()) {
+        FError("can't write lit2 output: face {} has invalid lightmap scale {} (expected a positive power of two)",
+            facenum, scale);
+    }
+    return static_cast<uint8_t>(shift);
+}
+
+void ValidateLit2Face(const facesup_t &face, size_t facenum, size_t sample_count)
+{
+    Lit2ScaleShift(face.lmscale, facenum);
+
+    size_t style_count = 0;
+    bool reached_unused_style = false;
+    for (size_t style_index = 0; style_index < 4; ++style_index) {
+        if (face.styles[style_index] == INVALID_LIGHTSTYLE) {
+            reached_unused_style = true;
+        } else {
+            if (reached_unused_style) {
+                FError("can't write lit2 output: face {} has a non-contiguous style list", facenum);
+            }
+            ++style_count;
+        }
+    }
+
+    if (face.lightofs == -1) {
+        if (style_count != 0) {
+            FError("can't write lit2 output: unlit face {} has {} active styles", facenum, style_count);
+        }
+        return;
+    }
+    if (face.lightofs < 0) {
+        FError("can't write lit2 output: face {} has invalid light offset {}", facenum, face.lightofs);
+    }
+    if (style_count == 0 || face.extent[0] == 0 || face.extent[1] == 0) {
+        FError("can't write lit2 output: lit face {} has an empty lightmap or no active styles", facenum);
+    }
+
+    const size_t width = face.extent[0];
+    const size_t height = face.extent[1];
+    if (width > std::numeric_limits<size_t>::max() / height) {
+        FError("can't write lit2 output: face {} lightmap size overflows this platform", facenum);
+    }
+    const size_t texels = width * height;
+    if (texels > std::numeric_limits<size_t>::max() / style_count) {
+        FError("can't write lit2 output: face {} lightmap size overflows this platform", facenum);
+    }
+    const size_t span = texels * style_count;
+    const size_t offset = static_cast<size_t>(face.lightofs);
+    if (offset > sample_count || span > sample_count - offset) {
+        FError("can't write lit2 output: face {} sample offset {} plus span {} exceeds {} samples", facenum, offset,
+            span, sample_count);
+    }
+}
+} // namespace
+
 void WriteLitFile(const mbsp_t *bsp, const std::vector<facesup_t> &facesup, const fs::path &filename, int version,
     const std::vector<uint8_t> &lit_filebase, const std::vector<uint8_t> &lux_filebase,
     const std::vector<uint8_t> &hdr_filebase)
 {
-    litheader_t header;
+    if (version != LIT_VERSION && version != LIT_VERSION_2 && version != LIT_VERSION_E5BGR9) {
+        FError("can't write .lit file with unsupported version {}", version);
+    }
+
+    const gamedef_t &game = ValidateLightingBsp(bsp, ".lit");
+    const bool lit2 = version == LIT_VERSION_2;
+    size_t sample_count = 0;
+    size_t payload_bytes = 0;
+
+    if (lit2) {
+        if (game.has_rgb_lightmap) {
+            FError("can't write lit2 output for a BSP format with native RGB lightmaps");
+        }
+        if (facesup.size() != bsp->dfaces.size()) {
+            FError("can't write lit2 output: {} faces require {} face records, but {} were provided",
+                bsp->dfaces.size(), bsp->dfaces.size(), facesup.size());
+        }
+        if (bsp->dfaces.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            FError("can't write lit2 output: BSP has too many faces");
+        }
+        if (lit_filebase.size() % 3 != 0) {
+            FError("can't write lit2 output: RGB buffer size {} is not divisible by 3", lit_filebase.size());
+        }
+        if (lux_filebase.size() != lit_filebase.size()) {
+            FError("can't write lit2 output: direction buffer has {} bytes, expected {}", lux_filebase.size(),
+                lit_filebase.size());
+        }
+        sample_count = lit_filebase.size() / 3;
+        if (sample_count > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            FError("can't write lit2 output: too many lightmap samples");
+        }
+        payload_bytes = CheckedOutputByteCount(sample_count, 3, "lit2");
+
+        for (size_t i = 0; i < facesup.size(); ++i) {
+            ValidateLit2Face(facesup[i], i, sample_count);
+        }
+    } else {
+        sample_count = CheckedLightSampleCount(*bsp, game, ".lit");
+        const size_t bytes_per_sample = version == LIT_VERSION_E5BGR9 ? 4 : 3;
+        payload_bytes = CheckedOutputByteCount(sample_count, bytes_per_sample, ".lit");
+        if (version == LIT_VERSION_E5BGR9) {
+            RequireOutputBytes(hdr_filebase, payload_bytes, "HDR", ".lit");
+        } else {
+            RequireOutputBytes(lit_filebase, payload_bytes, "RGB", ".lit");
+        }
+    }
+
+    litheader_t header{};
 
     fs::path litname = filename;
     litname.replace_extension("lit");
 
     header.v1.version = version;
-    header.v2.numsurfs = bsp->dfaces.size();
-    header.v2.lmsamples = bsp->dlightdata.size();
+    if (lit2) {
+        header.v2.numsurfs = static_cast<int32_t>(bsp->dfaces.size());
+        header.v2.lmsamples = static_cast<int32_t>(sample_count);
+    }
 
     logging::print("Writing {}\n", litname);
     std::ofstream litfile(litname, std::ios_base::out | std::ios_base::binary);
+    if (!litfile) {
+        FError("couldn't open {} for writing", litname);
+    }
+    litfile << endianness<std::endian::little>;
     litfile <= header.v1;
-    if (version == 2) {
-        unsigned int i, j;
+    if (lit2) {
         litfile <= header.v2;
-        for (i = 0; i < bsp->dfaces.size(); i++) {
+        for (size_t i = 0; i < bsp->dfaces.size(); i++) {
             litfile <= facesup[i].lightofs;
             for (int j = 0; j < 4; j++) {
                 litfile <= facesup[i].styles[j];
@@ -53,52 +245,87 @@ void WriteLitFile(const mbsp_t *bsp, const std::vector<facesup_t> &facesup, cons
             for (int j = 0; j < 2; j++) {
                 litfile <= facesup[i].extent[j];
             }
-            j = 0;
-            while (nth_bit(j) < facesup[i].lmscale)
-                j++;
-            litfile <= (uint8_t)j;
+            litfile <= Lit2ScaleShift(facesup[i].lmscale, i);
         }
-        litfile.write((const char *)lit_filebase.data(), bsp->dlightdata.size() * 3);
-        litfile.write((const char *)lux_filebase.data(), bsp->dlightdata.size() * 3);
+        WriteOutputBytes(litfile, lit_filebase, payload_bytes);
+        WriteOutputBytes(litfile, lux_filebase, payload_bytes);
     } else {
         if (version == LIT_VERSION_E5BGR9) {
-            litfile.write((const char *)hdr_filebase.data(), bsp->lightsamples() * 4);
+            WriteOutputBytes(litfile, hdr_filebase, payload_bytes);
         } else {
-            litfile.write((const char *)lit_filebase.data(), bsp->lightsamples() * 3);
+            WriteOutputBytes(litfile, lit_filebase, payload_bytes);
         }
     }
+    FinishOutputFile(litfile, litname);
 }
 
 void WriteLuxFile(const mbsp_t *bsp, const fs::path &filename, int version, const std::vector<uint8_t> &lux_filebase)
 {
-    litheader_t header;
+    if (version != LIT_VERSION) {
+        FError("can't write .lux file with unsupported version {}", version);
+    }
+
+    const gamedef_t &game = ValidateLightingBsp(bsp, ".lux");
+    const size_t sample_count = CheckedLightSampleCount(*bsp, game, ".lux");
+    const size_t payload_bytes = CheckedOutputByteCount(sample_count, 3, ".lux");
+    RequireOutputBytes(lux_filebase, payload_bytes, "direction", ".lux");
+
+    litheader_t header{};
 
     fs::path luxname = filename;
     luxname.replace_extension("lux");
 
     header.v1.version = version;
 
+    logging::print("Writing {}\n", luxname);
     std::ofstream luxfile(luxname, std::ios_base::out | std::ios_base::binary);
+    if (!luxfile) {
+        FError("couldn't open {} for writing", luxname);
+    }
+    luxfile << endianness<std::endian::little>;
     luxfile <= header.v1;
-    luxfile.write((const char *)lux_filebase.data(), bsp->lightsamples() * 3);
+    WriteOutputBytes(luxfile, lux_filebase, payload_bytes);
+    FinishOutputFile(luxfile, luxname);
 }
 
 /*
- * Return space for the lightmap and colourmap at the same time so it can
- * be done in a thread-safe manner.
- *
+ * Return space for the lightmap and colourmap at the same time. Callers
+ * allocate in face order so output offsets and
+ * bytes do not depend on worker
+ * scheduling.
  * size is the number of greyscale pixels = number of bytes to allocate
  * and return in *lightdata
  */
-static inline int GetFileSpace(std::atomic_size_t &offset, size_t size)
+static inline int GetFileSpace(size_t &offset, size_t size)
 {
-    size_t v = offset.fetch_add(align_value<4>(size));
+    constexpr size_t alignment = 4;
+    constexpr size_t max_lightmap_size = static_cast<size_t>(std::numeric_limits<int>::max());
+    if (size > std::numeric_limits<size_t>::max() - (alignment - 1)) {
+        FError("lightmap allocation size overflow");
+    }
+    const size_t aligned_size = align_value<alignment>(size);
 
-    // early check
-    if (v > std::numeric_limits<int>::max())
+    if (offset > max_lightmap_size || aligned_size > max_lightmap_size - offset) {
         FError("exceeded max lightmap space");
+    }
 
-    return v;
+    const int result = static_cast<int>(offset);
+    offset += aligned_size;
+    return result;
+}
+
+static size_t CheckedFaceLightmapAllocation(
+    const faceextents_t &extents, int num_styles, size_t face_index, std::string_view extent_kind)
+{
+    if (extents.lm_extents[0] < 0 || extents.lm_extents[1] < 0 || num_styles < 0) {
+        FError("face {} has invalid {} lightmap extents {}x{} or style count {}", face_index, extent_kind,
+            extents.lm_extents[0], extents.lm_extents[1], num_styles);
+    }
+
+    const size_t width = static_cast<size_t>(extents.lm_extents[0]) + 1;
+    const size_t height = static_cast<size_t>(extents.lm_extents[1]) + 1;
+    const size_t sample_count = CheckedOutputByteCount(width, height, "face lightmap");
+    return CheckedOutputByteCount(sample_count, static_cast<size_t>(num_styles), "face lightmap");
 }
 
 std::atomic<uint32_t> fully_transparent_lightmaps;
@@ -775,7 +1002,7 @@ struct lightmap_intermediate_data_t
 // temp
 
 int CalculateLightmapStyles(const mbsp_t *bsp, mface_t *face, facesup_t *facesup, lightsurf_t *lightsurf,
-    const faceextents_t &extents, std::atomic_size_t &lightmap_size, lightmap_intermediate_data_t &id)
+    const faceextents_t &extents, lightmap_intermediate_data_t &id)
 {
     lightmapdict_t &lightmaps = lightsurf->lightmapsByStyle;
     id.sorted.clear();
@@ -1062,6 +1289,7 @@ void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source)
 
     // lightmap data storage
     std::vector<uint8_t> filebase, lit_filebase, lux_filebase, hdr_filebase;
+    const bool needs_lux_data = light_options.write_luxfile || (light_options.write_litfile & lightfile_t::lit2);
 
     if (light_options.litonly.value()) {
 
@@ -1074,15 +1302,15 @@ void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source)
         filebase.resize(bsp->dlightdata.size());
 
         if (light_options.write_litfile) {
-            lit_filebase.resize(filebase.size() * 3);
+            lit_filebase.resize(CheckedOutputByteCount(filebase.size(), 3, "RGB lightmap"));
         }
 
-        if (light_options.write_luxfile) {
-            lux_filebase.resize(filebase.size() * 3);
+        if (needs_lux_data) {
+            lux_filebase.resize(CheckedOutputByteCount(filebase.size(), 3, "direction lightmap"));
         }
 
         if (light_options.write_litfile & lightfile_t::all_hdr_formats) {
-            hdr_filebase.resize(filebase.size() * 4);
+            hdr_filebase.resize(CheckedOutputByteCount(filebase.size(), 4, "HDR lightmap"));
         }
 
         logging::parallel_for(static_cast<size_t>(0), bsp->dfaces.size(), [&](size_t i) {
@@ -1100,14 +1328,16 @@ void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source)
                 bsp, f, &surf, surf.extents, surf.extents, filebase, lit_filebase, lux_filebase, hdr_filebase);
         });
     } else {
-        std::atomic_size_t lightmap_size = 0;
+        size_t lightmap_size = 0;
         std::vector<lightmap_intermediate_data_t> intermediate_data;
         intermediate_data.resize(bsp->dfaces.size());
 
-        std::atomic_bool has_color = false;
+        bool has_color = false;
 
-        // calculate finish lightmaps and calculate lightofs for each face.
-        // the lightofs will be set to the size in bytes.
+        // Finishing each face is independent and remains the expensive
+        // parallel phase. Offset allocation happens below in face order;
+        // atomic fetch-add here used to make otherwise-identical BSP bytes
+        // depend on worker scheduling.
         logging::parallel_for(static_cast<size_t>(0), bsp->dfaces.size(), [&](size_t i) {
             auto &surf = LightSurfaces()[i];
 
@@ -1116,147 +1346,57 @@ void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source)
             }
 
             FinishLightmapSurface(bsp, &surf);
-
-            auto f = &bsp->dfaces[i];
-            const modelinfo_t *face_modelinfo = ModelInfoForFace(bsp, i);
-            int num_styles;
-
-            if (!g_ctx->facesup_decoupled_global.empty()) {
-                num_styles =
-                    CalculateLightmapStyles(bsp, f, nullptr, &surf, surf.extents, lightmap_size, intermediate_data[i]);
-
-                if (!light_options.novanilla.value()) {
-                    intermediate_data[i].vanilla_lightofs =
-                        GetFileSpace(lightmap_size, surf.vanilla_extents.numsamples() * num_styles);
-                }
-            } else if (g_ctx->faces_sup.empty()) {
-                num_styles =
-                    CalculateLightmapStyles(bsp, f, nullptr, &surf, surf.extents, lightmap_size, intermediate_data[i]);
-            } else if (light_options.novanilla.value() || g_ctx->faces_sup[i].lmscale == face_modelinfo->lightmapscale) {
-                num_styles = CalculateLightmapStyles(
-                    bsp, f, &g_ctx->faces_sup[i], &surf, surf.extents, lightmap_size, intermediate_data[i]);
-            } else {
-                num_styles =
-                    CalculateLightmapStyles(bsp, f, nullptr, &surf, surf.extents, lightmap_size, intermediate_data[i]);
-                intermediate_data[i].vanilla_lightofs =
-                    GetFileSpace(lightmap_size, surf.vanilla_extents.numsamples() * num_styles);
-            }
-
-            if (num_styles) {
-                intermediate_data[i].lightofs = GetFileSpace(lightmap_size, surf.extents.numsamples() * num_styles);
-            }
-
-            if (Lightsurf_HasColor(surf)) {
-                has_color = true;
-            }
         });
 
-        // auto-generate .lit file if appropriate
-        logging::print(logging::flag::STAT, "map uses color: {}\n", static_cast<bool>(has_color));
-        if (has_color) {
-            SetLitNeeded(*bspdata);
-        }
-
-        // allocate required space
-        if (!bsp->loadversion->game->has_rgb_lightmap) {
-            filebase.resize(lightmap_size);
-        }
-
-        if (bsp->loadversion->game->has_rgb_lightmap || light_options.write_litfile) {
-            lit_filebase.resize(lightmap_size * 3);
-        }
-
-        if (light_options.write_luxfile) {
-            lux_filebase.resize(lightmap_size * 3);
-        }
-
-        if (light_options.write_litfile & lightfile_t::all_hdr_formats) {
-            hdr_filebase.resize(lightmap_size * 4);
-        }
-
-        logging::print(logging::flag::STAT, "lightmap size (total): {}\n",
-            filebase.size() + lit_filebase.size() + lux_filebase.size() + hdr_filebase.size());
-
-        logging::parallel_for(static_cast<size_t>(0), bsp->dfaces.size(), [&](size_t i) {
-            auto &surf = LightSurfaces()[i];
-
-            if (surf.samples.empty()) {
-                return;
-            }
-
-            FinishLightmapSurface(bsp, &surf);
-
-            auto f = &bsp->dfaces[i];
-            const modelinfo_t *face_modelinfo = ModelInfoForFace(bsp, i);
-            int num_styles;
-
-            if (!g_ctx->facesup_decoupled_global.empty()) {
-                num_styles =
-                    CalculateLightmapStyles(bsp, f, nullptr, &surf, surf.extents, lightmap_size, intermediate_data[i]);
-            } else if (g_ctx->faces_sup.empty()) {
-                num_styles =
-                    CalculateLightmapStyles(bsp, f, nullptr, &surf, surf.extents, lightmap_size, intermediate_data[i]);
-            } else if (light_options.novanilla.value() || g_ctx->faces_sup[i].lmscale == face_modelinfo->lightmapscale) {
-                num_styles = CalculateLightmapStyles(
-                    bsp, f, &g_ctx->faces_sup[i], &surf, surf.extents, lightmap_size, intermediate_data[i]);
-            } else {
-                num_styles =
-                    CalculateLightmapStyles(bsp, f, nullptr, &surf, surf.extents, lightmap_size, intermediate_data[i]);
-            }
-
-            // Just store the area, don't allocate yet
-            intermediate_data[i].valid = (num_styles > 0);
-            intermediate_data[i].num_styles = num_styles;
-            intermediate_data[i].area = surf.extents.width() * surf.extents.height();
-
-            if (Lightsurf_HasColor(surf)) {
-                has_color = true;
-            }
-        });
-
-        // auto-generate .lit file if appropriate
-        logging::print(logging::flag::STAT, "map uses color: {}\n", static_cast<bool>(has_color));
-        if (has_color) {
-            SetLitNeeded(*bspdata);
-        }
-
-        // Sorting Step for Optimised Packing
-        std::vector<size_t> sorted_indices;
-        sorted_indices.reserve(bsp->dfaces.size());
+        // Select styles and assign storage sequentially in BSP face order.
+        // Besides deterministic offsets, this serializes the one-shot style
+        // overflow diagnostics instead of racing their warning flags.
         for (size_t i = 0; i < bsp->dfaces.size(); ++i) {
-            if (intermediate_data[i].valid) {
-                sorted_indices.push_back(i);
+            auto &surf = LightSurfaces()[i];
+            if (surf.samples.empty()) {
+                continue;
             }
-        }
 
-        // Sort by Area Descending
-        std::sort(sorted_indices.begin(), sorted_indices.end(),
-            [&](size_t a, size_t b) { return intermediate_data[a].area > intermediate_data[b].area; });
+            auto f = &bsp->dfaces[i];
+            const modelinfo_t *face_modelinfo = ModelInfoForFace(bsp, i);
+            int num_styles;
 
-        // Serial Allocation
-        std::atomic_size_t current_offset = 0;
-        for (size_t i : sorted_indices) {
-            const auto &surf = LightSurfaces()[i];
-            int num_styles = intermediate_data[i].num_styles;
-
-            // Logic from original loop for allocating vanilla vs extra
             if (!g_ctx->facesup_decoupled_global.empty()) {
+                num_styles = CalculateLightmapStyles(bsp, f, nullptr, &surf, surf.extents, intermediate_data[i]);
+
                 if (!light_options.novanilla.value()) {
-                    intermediate_data[i].vanilla_lightofs =
-                        GetFileSpace(current_offset, surf.vanilla_extents.numsamples() * num_styles);
+                    const size_t vanilla_samples =
+                        CheckedFaceLightmapAllocation(surf.vanilla_extents, num_styles, i, "vanilla");
+                    intermediate_data[i].vanilla_lightofs = GetFileSpace(lightmap_size, vanilla_samples);
                 }
-            } else if (!g_ctx->faces_sup.empty() && !(light_options.novanilla.value() ||
-                                                 g_ctx->faces_sup[i].lmscale == ModelInfoForFace(bsp, i)->lightmapscale)) {
-                intermediate_data[i].vanilla_lightofs =
-                    GetFileSpace(current_offset, surf.vanilla_extents.numsamples() * num_styles);
+            } else if (g_ctx->faces_sup.empty()) {
+                num_styles = CalculateLightmapStyles(bsp, f, nullptr, &surf, surf.extents, intermediate_data[i]);
+            } else if (light_options.novanilla.value() ||
+                       g_ctx->faces_sup[i].lmscale == face_modelinfo->lightmapscale) {
+                num_styles =
+                    CalculateLightmapStyles(bsp, f, &g_ctx->faces_sup[i], &surf, surf.extents, intermediate_data[i]);
+            } else {
+                num_styles = CalculateLightmapStyles(bsp, f, nullptr, &surf, surf.extents, intermediate_data[i]);
+                const size_t vanilla_samples =
+                    CheckedFaceLightmapAllocation(surf.vanilla_extents, num_styles, i, "vanilla");
+                intermediate_data[i].vanilla_lightofs = GetFileSpace(lightmap_size, vanilla_samples);
             }
 
             if (num_styles) {
-                intermediate_data[i].lightofs = GetFileSpace(current_offset, surf.extents.numsamples() * num_styles);
+                const size_t samples = CheckedFaceLightmapAllocation(surf.extents, num_styles, i, "output");
+                intermediate_data[i].lightofs = GetFileSpace(lightmap_size, samples);
+            }
+
+            if (Lightsurf_HasColor(surf)) {
+                has_color = true;
             }
         }
 
-        lightmap_size.store(current_offset.load());
+        // auto-generate .lit file if appropriate
+        logging::print(logging::flag::STAT, "map uses color: {}\n", has_color);
+        if (has_color) {
+            SetLitNeeded(*bspdata);
+        }
 
         // allocate required space
         if (!bsp->loadversion->game->has_rgb_lightmap) {
@@ -1264,15 +1404,15 @@ void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source)
         }
 
         if (bsp->loadversion->game->has_rgb_lightmap || light_options.write_litfile) {
-            lit_filebase.resize(lightmap_size * 3);
+            lit_filebase.resize(CheckedOutputByteCount(lightmap_size, 3, "RGB lightmap"));
         }
 
-        if (light_options.write_luxfile) {
-            lux_filebase.resize(lightmap_size * 3);
+        if (needs_lux_data) {
+            lux_filebase.resize(CheckedOutputByteCount(lightmap_size, 3, "direction lightmap"));
         }
 
         if (light_options.write_litfile & lightfile_t::all_hdr_formats) {
-            hdr_filebase.resize(lightmap_size * 4);
+            hdr_filebase.resize(CheckedOutputByteCount(lightmap_size, 4, "HDR lightmap"));
         }
 
         logging::print(logging::flag::STAT, "lightmap size (total): {}\n",
@@ -1289,12 +1429,13 @@ void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source)
             const modelinfo_t *face_modelinfo = ModelInfoForFace(bsp, i);
 
             if (!g_ctx->facesup_decoupled_global.empty()) {
-                SaveLightmapSurface(bsp, f, nullptr, &g_ctx->facesup_decoupled_global[i], &surf, surf.extents, surf.extents,
-                    filebase, lit_filebase, lux_filebase, hdr_filebase, intermediate_data[i]);
+                SaveLightmapSurface(bsp, f, nullptr, &g_ctx->facesup_decoupled_global[i], &surf, surf.extents,
+                    surf.extents, filebase, lit_filebase, lux_filebase, hdr_filebase, intermediate_data[i]);
             } else if (g_ctx->faces_sup.empty()) {
                 SaveLightmapSurface(bsp, f, nullptr, nullptr, &surf, surf.extents, surf.extents, filebase, lit_filebase,
                     lux_filebase, hdr_filebase, intermediate_data[i]);
-            } else if (light_options.novanilla.value() || g_ctx->faces_sup[i].lmscale == face_modelinfo->lightmapscale) {
+            } else if (light_options.novanilla.value() ||
+                       g_ctx->faces_sup[i].lmscale == face_modelinfo->lightmapscale) {
                 if (g_ctx->faces_sup[i].lmscale == face_modelinfo->lightmapscale) {
                     f->lightofs = g_ctx->faces_sup[i].lightofs;
                 } else {
@@ -1303,8 +1444,8 @@ void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source)
                 SaveLightmapSurface(bsp, f, &g_ctx->faces_sup[i], nullptr, &surf, surf.extents, surf.extents, filebase,
                     lit_filebase, lux_filebase, hdr_filebase, intermediate_data[i]);
                 for (int j = 0; j < MAXLIGHTMAPS; j++) {
-                    f->styles[j] =
-                        g_ctx->faces_sup[i].styles[j] == INVALID_LIGHTSTYLE ? INVALID_LIGHTSTYLE_OLD : g_ctx->faces_sup[i].styles[j];
+                    f->styles[j] = g_ctx->faces_sup[i].styles[j] == INVALID_LIGHTSTYLE ? INVALID_LIGHTSTYLE_OLD
+                                                                                       : g_ctx->faces_sup[i].styles[j];
                 }
             } else {
                 SaveLightmapSurface(bsp, f, nullptr, nullptr, &surf, surf.extents, surf.vanilla_extents, filebase,

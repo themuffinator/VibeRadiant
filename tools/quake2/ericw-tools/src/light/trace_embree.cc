@@ -26,13 +26,17 @@
 
 #include <common/bsputils.hh>
 #include <common/polylib.hh>
+#include <algorithm>
 #include <vector>
 #include <climits>
+#include <limits>
 #include <set>
+#include <string_view>
 
 sceneinfo skygeom; // sky. always occludes.
 sceneinfo solidgeom; // solids. always occludes.
 sceneinfo filtergeom; // conditional occluders.. needs to run ray intersection filter
+sceneinfo skipgeom; // generated skip-brush hulls. always occludes when channels match.
 
 // set of faces in `solidgeom`,
 std::set<const mface_t *> shadow_casting_solid_faces;
@@ -42,55 +46,91 @@ RTCScene scene;
 
 static const mbsp_t *bsp_static;
 
-static bool Face_IsDetailFenceForLighting(const mbsp_t *bsp, const mface_t *face)
+struct model_face_range_t
 {
-    if (bsp->loadversion->game->id == GAME_QUAKE_II) {
-        return false;
+    size_t first;
+    size_t count;
+};
+
+static model_face_range_t CheckedModelFaceRange(const mbsp_t *bsp, const dmodelh2_t *model, size_t modelnum)
+{
+    if (bsp == nullptr || model == nullptr) {
+        FError("Embree model {} has no BSP data", modelnum);
+    }
+    if (model->firstface < 0 || model->numfaces < 0) {
+        FError("Embree model {} has an invalid face range ({}, {})", modelnum, model->firstface, model->numfaces);
     }
 
-    const auto &extended_content_flags = g_ctx->extended_content_flags;
-    if (extended_content_flags.empty()) {
-        return false;
+    const size_t first = static_cast<size_t>(model->firstface);
+    const size_t count = static_cast<size_t>(model->numfaces);
+    if (first > bsp->dfaces.size() || count > bsp->dfaces.size() - first) {
+        FError("Embree model {} face range ({}, {}) exceeds {} faces", modelnum, first, count, bsp->dfaces.size());
     }
-
-    const qvec3f center = Face_Centroid(bsp, face);
-    const qvec3f normal = qvec3f(Face_Normal(bsp, face));
-    constexpr float kOffset = 1.0f;
-
-    auto is_fence_leaf = [&](const qvec3f &point) -> bool {
-        const mleaf_t *leaf = Light_PointInLeaf(bsp, point);
-        const int leafnum = BSP_GetLeafNum(bsp, leaf);
-        if (leafnum < 0 || leafnum >= static_cast<int>(extended_content_flags.size())) {
-            return false;
-        }
-        return extended_content_flags[leafnum].is_fence();
-    };
-
-    return is_fence_leaf(center + (normal * kOffset)) || is_fence_leaf(center - (normal * kOffset));
+    return {first, count};
 }
 
-static bool PointIsDetailFenceForLighting(const mbsp_t *bsp, const qvec3f &point, const qvec3f &dir)
+static size_t CheckedFaceTexinfoIndex(const mbsp_t *bsp, const mface_t *face)
 {
-    if (bsp->loadversion->game->id == GAME_QUAKE_II) {
-        return false;
+    if (bsp == nullptr || face == nullptr) {
+        FError("Embree geometry has a null BSP or face");
+    }
+    if (face->texinfo < 0 || static_cast<size_t>(face->texinfo) >= bsp->texinfo.size()) {
+        FError("Embree face {} references invalid texinfo {}", Face_GetNum(bsp, face), face->texinfo);
+    }
+    if (g_ctx == nullptr || static_cast<size_t>(face->texinfo) >= g_ctx->extended_texinfo_flags.size()) {
+        FError("Embree face {} has no extended flags for texinfo {}", Face_GetNum(bsp, face), face->texinfo);
+    }
+    return static_cast<size_t>(face->texinfo);
+}
+
+static const surfflags_t &CheckedExtendedFlagsForFace(const mbsp_t *bsp, const mface_t *face)
+{
+    return g_ctx->extended_texinfo_flags[CheckedFaceTexinfoIndex(bsp, face)];
+}
+
+static void ValidateEmbreeInputs(const mbsp_t *bsp)
+{
+    if (bsp == nullptr || bsp->loadversion == nullptr || bsp->loadversion->game == nullptr) {
+        FError("Embree initialization requires a valid BSP and game version");
+    }
+    if (g_ctx == nullptr || g_ctx->bsp != bsp) {
+        FError("Embree initialization requires the matching light context");
+    }
+    if (bsp->dmodels.empty()) {
+        FError("Embree initialization requires at least one BSP model");
+    }
+    if (bsp->dfaces.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        FError("Embree initialization cannot address {} BSP faces", bsp->dfaces.size());
+    }
+    if (g_ctx->modelinfo.size() != bsp->dmodels.size()) {
+        FError("Embree initialization has {} model records for {} BSP models", g_ctx->modelinfo.size(),
+            bsp->dmodels.size());
+    }
+    if (g_ctx->face_textures.size() < bsp->dfaces.size()) {
+        FError("Embree initialization has {} cached face textures for {} BSP faces", g_ctx->face_textures.size(),
+            bsp->dfaces.size());
     }
 
-    const auto &extended_content_flags = g_ctx->extended_content_flags;
-    if (extended_content_flags.empty()) {
-        return false;
-    }
+    for (size_t modelnum = 0; modelnum < bsp->dmodels.size(); ++modelnum) {
+        const dmodelh2_t *model = &bsp->dmodels[modelnum];
+        CheckedModelFaceRange(bsp, model, modelnum);
 
-    constexpr float kEpsilon = 1.0f;
-    auto is_fence_leaf = [&](const qvec3f &probe) -> bool {
-        const mleaf_t *leaf = Light_PointInLeaf(bsp, probe);
-        const int leafnum = BSP_GetLeafNum(bsp, leaf);
-        if (leafnum < 0 || leafnum >= static_cast<int>(extended_content_flags.size())) {
-            return false;
+        const modelinfo_t *modelinfo = g_ctx->modelinfo[modelnum];
+        if (modelinfo == nullptr || modelinfo->bsp != bsp || modelinfo->model != model) {
+            FError("Embree model {} has inconsistent lighting metadata", modelnum);
         }
-        return extended_content_flags[leafnum].is_fence();
-    };
+    }
 
-    return is_fence_leaf(point + (dir * kEpsilon)) || is_fence_leaf(point - (dir * kEpsilon));
+    for (const mface_t &face : bsp->dfaces) {
+        CheckedFaceTexinfoIndex(bsp, &face);
+    }
+
+    for (const modelinfo_t *modelinfo : g_ctx->tracelist) {
+        if (modelinfo == nullptr || modelinfo->bsp != bsp || modelinfo->model == nullptr ||
+            std::find(g_ctx->modelinfo.begin(), g_ctx->modelinfo.end(), modelinfo) == g_ctx->modelinfo.end()) {
+            FError("Embree trace list contains inconsistent model metadata");
+        }
+    }
 }
 
 void ResetEmbree()
@@ -98,6 +138,7 @@ void ResetEmbree()
     skygeom = {};
     solidgeom = {};
     filtergeom = {};
+    skipgeom = {};
     shadow_casting_solid_faces = {};
 
     if (scene) {
@@ -124,8 +165,7 @@ const std::set<const mface_t *> &ShadowCastingSolidFacesSet()
  */
 static float Face_Alpha(const mbsp_t *bsp, const modelinfo_t *modelinfo, const mface_t *face)
 {
-    const auto &extended_texinfo_flags = g_ctx->extended_texinfo_flags;
-    const surfflags_t &extended_flags = extended_texinfo_flags[face->texinfo];
+    const surfflags_t &extended_flags = CheckedExtendedFlagsForFace(bsp, face);
     const int surf_flags = Face_ContentsOrSurfaceFlags(bsp, face);
     const bool is_q2 = bsp->loadversion->game->id == GAME_QUAKE_II;
 
@@ -152,38 +192,95 @@ static float Face_Alpha(const mbsp_t *bsp, const modelinfo_t *modelinfo, const m
     return 1.0f;
 }
 
+struct embree_vertex_t
+{
+    float point[4];
+};
+
+struct embree_triangle_t
+{
+    uint32_t v0, v1, v2;
+};
+
+class embree_geometry_guard_t
+{
+public:
+    explicit embree_geometry_guard_t(RTCGeometry geometry)
+        : geometry_(geometry)
+    {
+    }
+
+    ~embree_geometry_guard_t()
+    {
+        if (geometry_ != nullptr) {
+            rtcReleaseGeometry(geometry_);
+        }
+    }
+
+    embree_geometry_guard_t(const embree_geometry_guard_t &) = delete;
+    embree_geometry_guard_t &operator=(const embree_geometry_guard_t &) = delete;
+
+    [[nodiscard]] RTCGeometry get() const noexcept { return geometry_; }
+
+private:
+    RTCGeometry geometry_;
+};
+
+static void AddGeometryCount(size_t &total, size_t increment, std::string_view kind)
+{
+    if (increment > std::numeric_limits<size_t>::max() - total) {
+        FError("Embree {} count overflow", kind);
+    }
+    total += increment;
+}
+
+static size_t CheckedVertexCount(size_t triangle_count)
+{
+    constexpr size_t VERTICES_PER_TRIANGLE = 3;
+    if (triangle_count > std::numeric_limits<uint32_t>::max() / VERTICES_PER_TRIANGLE) {
+        FError("Embree geometry has too many triangles ({})", triangle_count);
+    }
+    return triangle_count * VERTICES_PER_TRIANGLE;
+}
+
 sceneinfo CreateGeometry(
     const mbsp_t *bsp, RTCDevice g_device, RTCScene scene, const std::vector<const mface_t *> &faces)
 {
-    const auto &extended_texinfo_flags = g_ctx->extended_texinfo_flags;
+    size_t triangle_count = 0;
+    for (const mface_t *face : faces) {
+        if (face == nullptr) {
+            continue;
+        }
+        CheckedFaceTexinfoIndex(bsp, face);
+        if (face->numedges < 3 || ModelInfoForFace(bsp, Face_GetNum(bsp, face)) == nullptr) {
+            continue;
+        }
+        AddGeometryCount(triangle_count, static_cast<size_t>(face->numedges - 2), "triangle");
+    }
+    const size_t vertex_count = CheckedVertexCount(triangle_count);
 
-    unsigned int geomID;
-    RTCGeometry geom_0 = rtcNewGeometry(g_device, RTC_GEOMETRY_TYPE_TRIANGLE);
-    // we're not using masks, but they need to be set to something or else all rays miss
-    // if embree is compiled with them
-    rtcSetGeometryMask(geom_0, 1);
-    rtcSetGeometryBuildQuality(geom_0, RTC_BUILD_QUALITY_MEDIUM);
-    rtcSetGeometryTimeStepCount(geom_0, 1);
-    geomID = rtcAttachGeometry(scene, geom_0);
-    rtcReleaseGeometry(geom_0);
+    embree_geometry_guard_t geometry(rtcNewGeometry(g_device, RTC_GEOMETRY_TYPE_TRIANGLE));
+    if (geometry.get() == nullptr) {
+        FError("Embree failed to create triangle geometry");
+    }
+    // We're not using masks, but they need to be set to something or else all
+    // rays miss when Embree is compiled with mask support.
+    rtcSetGeometryMask(geometry.get(), 1);
+    rtcSetGeometryBuildQuality(geometry.get(), RTC_BUILD_QUALITY_MEDIUM);
+    rtcSetGeometryTimeStepCount(geometry.get(), 1);
 
-    struct Vertex
-    {
-        float point[4];
-    }; // 4th element is padding
-    struct Triangle
-    {
-        int v0, v1, v2;
-    };
-
-    // temprary buffers used while gathering faces
-    std::vector<Vertex> vertices_temp;
-    std::vector<Triangle> tris_temp;
+    auto *vertices = static_cast<embree_vertex_t *>(rtcSetNewGeometryBuffer(
+        geometry.get(), RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, sizeof(embree_vertex_t), vertex_count));
+    auto *triangles = static_cast<embree_triangle_t *>(rtcSetNewGeometryBuffer(
+        geometry.get(), RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, sizeof(embree_triangle_t), triangle_count));
+    if ((vertex_count != 0 && vertices == nullptr) || (triangle_count != 0 && triangles == nullptr)) {
+        FError("Embree failed to allocate geometry buffers ({} vertices, {} triangles)", vertex_count, triangle_count);
+    }
 
     sceneinfo s;
-    s.geomID = geomID;
-
-    auto add_vert = [&](const qvec3f &pos) { vertices_temp.push_back({.point{pos[0], pos[1], pos[2], 0.0f}}); };
+    s.triInfo.reserve(triangle_count);
+    size_t vertex_index = 0;
+    size_t triangle_index = 0;
 
     // FIXME: reuse vertices
     auto add_tri = [&](const mface_t *face, int bsp_vert0, int bsp_vert1, int bsp_vert2, const modelinfo_t *modelinfo) {
@@ -191,24 +288,21 @@ sceneinfo CreateGeometry(
         const qvec3f final_pos1 = Vertex_GetPos(bsp, bsp_vert1) + modelinfo->offset;
         const qvec3f final_pos2 = Vertex_GetPos(bsp, bsp_vert2) + modelinfo->offset;
 
-        // push the 3 vertices
-        int first_vert_index = vertices_temp.size();
-        add_vert(final_pos0);
-        add_vert(final_pos1);
-        add_vert(final_pos2);
+        const uint32_t first_vertex_index = static_cast<uint32_t>(vertex_index);
+        vertices[vertex_index++] = {.point{final_pos0[0], final_pos0[1], final_pos0[2], 0.0f}};
+        vertices[vertex_index++] = {.point{final_pos1[0], final_pos1[1], final_pos1[2], 0.0f}};
+        vertices[vertex_index++] = {.point{final_pos2[0], final_pos2[1], final_pos2[2], 0.0f}};
+        triangles[triangle_index++] = {first_vertex_index, first_vertex_index + 1, first_vertex_index + 2};
 
-        tris_temp.push_back({first_vert_index, first_vert_index + 1, first_vert_index + 2});
+        const surfflags_t &extended_flags = CheckedExtendedFlagsForFace(bsp, face);
 
-        const surfflags_t &extended_flags = extended_texinfo_flags[face->texinfo];
-
-        triinfo info;
+        triinfo info{};
 
         info.face = face;
         info.modelinfo = modelinfo;
-        info.texinfo = &bsp->texinfo[face->texinfo];
+        info.texinfo = &bsp->texinfo[CheckedFaceTexinfoIndex(bsp, face)];
 
         info.texture = Face_Texture(bsp, face);
-        info.transparent_for_lighting = Face_IsDetailFenceForLighting(bsp, face);
 
         // FIXME: don't these need to check extended_flags?
         info.shadowworldonly = modelinfo->shadowworldonly.boolValue();
@@ -249,6 +343,9 @@ sceneinfo CreateGeometry(
 
     for (const mface_t *face : faces) {
         // NOTE: can be null for "skip" faces
+        if (face == nullptr) {
+            continue;
+        }
         const modelinfo_t *modelinfo = ModelInfoForFace(bsp, Face_GetNum(bsp, face));
 
         if (modelinfo) {
@@ -256,85 +353,115 @@ sceneinfo CreateGeometry(
         }
     }
 
-    // copy vertices, triangles from temporary buffers to embree-managed memory
-    Vertex *vertices = (Vertex *)rtcSetNewGeometryBuffer(
-        geom_0, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 4 * sizeof(float), vertices_temp.size());
+    Q_assert(vertex_index == vertex_count);
+    Q_assert(triangle_index == triangle_count);
+    Q_assert(s.triInfo.size() == triangle_count);
 
-    Triangle *triangles = (Triangle *)rtcSetNewGeometryBuffer(
-        geom_0, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3 * sizeof(int), tris_temp.size());
-
-    memcpy(vertices, vertices_temp.data(), sizeof(Vertex) * vertices_temp.size());
-    memcpy(triangles, tris_temp.data(), sizeof(Triangle) * tris_temp.size());
-
-    rtcCommitGeometry(geom_0);
+    rtcCommitGeometry(geometry.get());
+    s.geomID = rtcAttachGeometry(scene, geometry.get());
+    if (s.geomID == RTC_INVALID_GEOMETRY_ID) {
+        FError("Embree failed to attach triangle geometry");
+    }
     return s;
 }
 
-static void CreateGeometryFromWindings(
-    RTCDevice g_device, RTCScene scene, const std::vector<polylib::winding3f_t> &windings)
+static sceneinfo CreateGeometryFromWindings(RTCDevice g_device, RTCScene scene,
+    const std::vector<polylib::winding3f_t> &windings, const std::vector<const modelinfo_t *> &winding_models)
 {
-    if (windings.empty())
-        return;
-
-    // count triangles
-    int numtris = 0;
-    int numverts = 0;
-    for (const auto &winding : windings) {
-        Q_assert(winding.size() >= 3);
-        numtris += (winding.size() - 2);
-        numverts += winding.size();
+    if (windings.size() != winding_models.size()) {
+        FError("Embree skip geometry has {} windings but {} model records", windings.size(), winding_models.size());
     }
 
-    RTCGeometry geom_1 = rtcNewGeometry(g_device, RTC_GEOMETRY_TYPE_TRIANGLE);
-    rtcSetGeometryBuildQuality(geom_1, RTC_BUILD_QUALITY_MEDIUM);
-    rtcSetGeometryMask(geom_1, 1);
-    rtcSetGeometryTimeStepCount(geom_1, 1);
-    rtcAttachGeometry(scene, geom_1);
-    rtcReleaseGeometry(geom_1);
+    sceneinfo s;
+    if (windings.empty()) {
+        return s;
+    }
 
-    struct Vertex
-    {
-        float point[4];
-    }; // 4th element is padding
-    struct Triangle
-    {
-        int v0, v1, v2;
-    };
+    // Count first so Embree can own the only vertex/index buffers. Keep the
+    // arithmetic checked before converting indices to uint32_t.
+    size_t numtris = 0;
+    size_t numverts = 0;
+    for (size_t i = 0; i < windings.size(); ++i) {
+        const auto &winding = windings[i];
+        if (winding.size() < 3) {
+            FError("Embree skip winding has fewer than 3 vertices");
+        }
+        if (winding_models[i] == nullptr) {
+            FError("Embree skip winding {} has no model metadata", i);
+        }
+        AddGeometryCount(numtris, winding.size() - 2, "skip triangle");
+        AddGeometryCount(numverts, winding.size(), "skip vertex");
+    }
+    if (numverts > std::numeric_limits<uint32_t>::max()) {
+        FError("Embree skip geometry has too many vertices ({})", numverts);
+    }
+
+    embree_geometry_guard_t geometry(rtcNewGeometry(g_device, RTC_GEOMETRY_TYPE_TRIANGLE));
+    if (geometry.get() == nullptr) {
+        FError("Embree failed to create skip geometry");
+    }
+    rtcSetGeometryBuildQuality(geometry.get(), RTC_BUILD_QUALITY_MEDIUM);
+    rtcSetGeometryMask(geometry.get(), 1);
+    rtcSetGeometryTimeStepCount(geometry.get(), 1);
 
     // fill in vertices
-    Vertex *vertices = (Vertex *)rtcSetNewGeometryBuffer(
-        geom_1, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 4 * sizeof(float), numverts);
+    auto *vertices = static_cast<embree_vertex_t *>(rtcSetNewGeometryBuffer(
+        geometry.get(), RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, sizeof(embree_vertex_t), numverts));
+    auto *triangles = static_cast<embree_triangle_t *>(rtcSetNewGeometryBuffer(
+        geometry.get(), RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, sizeof(embree_triangle_t), numtris));
+    if (vertices == nullptr || triangles == nullptr) {
+        FError("Embree failed to allocate skip geometry buffers ({} vertices, {} triangles)", numverts, numtris);
+    }
+    s.triInfo.reserve(numtris);
     {
-        int vert_index = 0;
+        size_t vert_index = 0;
         for (const auto &winding : windings) {
-            for (int j = 0; j < winding.size(); j++) {
-                for (int k = 0; k < 3; k++) {
+            for (size_t j = 0; j < winding.size(); j++) {
+                for (size_t k = 0; k < 3; k++) {
                     vertices[vert_index + j].point[k] = winding.at(j)[k];
                 }
+                vertices[vert_index + j].point[3] = 0.0f;
             }
             vert_index += winding.size();
         }
+        Q_assert(vert_index == numverts);
     }
 
     // fill in triangles
-    Triangle *triangles = (Triangle *)rtcSetNewGeometryBuffer(
-        geom_1, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3 * sizeof(int), numtris);
-    int tri_index = 0;
-    int vert_index = 0;
-    for (const auto &winding : windings) {
-        for (int j = 2; j < winding.size(); j++) {
-            Triangle *tri = &triangles[tri_index];
-            tri->v0 = vert_index + (j - 1);
-            tri->v1 = vert_index + j;
-            tri->v2 = vert_index + 0;
+    size_t tri_index = 0;
+    uint32_t vert_index = 0;
+    for (size_t winding_index = 0; winding_index < windings.size(); ++winding_index) {
+        const auto &winding = windings[winding_index];
+        const modelinfo_t *modelinfo = winding_models[winding_index];
+        for (size_t j = 2; j < winding.size(); j++) {
+            embree_triangle_t *tri = &triangles[tri_index];
+            tri->v0 = vert_index + static_cast<uint32_t>(j - 1);
+            tri->v1 = vert_index + static_cast<uint32_t>(j);
+            tri->v2 = vert_index;
             tri_index++;
+
+            triinfo info{};
+            info.modelinfo = modelinfo;
+            info.alpha = 1.0f;
+            info.shadowworldonly = modelinfo->shadowworldonly.boolValue();
+            info.shadowself = modelinfo->shadowself.boolValue();
+            info.switchableshadow = modelinfo->switchableshadow.boolValue();
+            info.switchshadstyle = modelinfo->switchshadstyle.value();
+            info.channelmask = modelinfo->object_channel_mask.value();
+            s.triInfo.push_back(info);
         }
-        vert_index += winding.size();
+        vert_index += static_cast<uint32_t>(winding.size());
     }
     Q_assert(vert_index == numverts);
     Q_assert(tri_index == numtris);
+    Q_assert(s.triInfo.size() == numtris);
 
-    rtcCommitGeometry(geom_1);
+    rtcCommitGeometry(geometry.get());
+    s.geomID = rtcAttachGeometry(scene, geometry.get());
+    if (s.geomID == RTC_INVALID_GEOMETRY_ID) {
+        FError("Embree failed to attach skip geometry");
+    }
+    return s;
 }
 
 void ErrorCallback(void *userptr, const RTCError code, const char *str)
@@ -399,22 +526,6 @@ static void Embree_FilterFuncN(const struct RTCFilterFunctionNArguments *args)
             // reject hit (???)
             valid[i] = INVALID;
             continue;
-        }
-
-        if (hit_triinfo.transparent_for_lighting) {
-            // detail fence/illusionary: no shadowing
-            valid[i] = INVALID;
-            continue;
-        }
-
-        if (bsp_static->loadversion->game->id != GAME_QUAKE_II) {
-            qvec3f rayDir =
-                qv::normalize(qvec3f{RTCRayN_dir_x(ray, N, i), RTCRayN_dir_y(ray, N, i), RTCRayN_dir_z(ray, N, i)});
-            qvec3f hitpoint = Embree_RayEndpoint(ray, rayDir, N, i);
-            if (PointIsDetailFenceForLighting(bsp_static, hitpoint, rayDir)) {
-                valid[i] = INVALID;
-                continue;
-            }
         }
 
         if (hit_triinfo.shadowworldonly) {
@@ -532,22 +643,6 @@ static void PerRay_FilterFuncN(const struct RTCFilterFunctionNArguments *args)
             continue;
         }
 
-        if (hit_triinfo.transparent_for_lighting) {
-            // detail fence/illusionary: no shadowing
-            valid[i] = INVALID;
-            continue;
-        }
-
-        if (bsp_static->loadversion->game->id != GAME_QUAKE_II) {
-            qvec3f rayDir =
-                qv::normalize(qvec3f{RTCRayN_dir_x(ray, N, i), RTCRayN_dir_y(ray, N, i), RTCRayN_dir_z(ray, N, i)});
-            qvec3f hitpoint = Embree_RayEndpoint(ray, rayDir, N, i);
-            if (PointIsDetailFenceForLighting(bsp_static, hitpoint, rayDir)) {
-                valid[i] = INVALID;
-                continue;
-            }
-        }
-
         // accept hit
         // (just need to leave the `valid` value set to VALID)
     }
@@ -557,7 +652,10 @@ static void PerRay_FilterFuncN(const struct RTCFilterFunctionNArguments *args)
 
 qplane3f Node_Plane(const mbsp_t *bsp, const bsp2_dnode_t *node, bool side)
 {
-    qplane3f plane = bsp->dplanes[node->planenum];
+    if (node == nullptr) {
+        FError("Embree skip tree contains a null node");
+    }
+    qplane3f plane = *BSP_GetPlane(bsp, node->planenum);
 
     if (side) {
         return -plane;
@@ -572,11 +670,18 @@ qplane3f Node_Plane(const mbsp_t *bsp, const bsp2_dnode_t *node, bool side)
 static void Leaf_MakeFaces(const mbsp_t *bsp, const modelinfo_t *modelinfo, const mleaf_t *leaf,
     const std::vector<qplane3f> &planes, std::vector<polylib::winding3f_t> &result)
 {
+    if (bsp == nullptr || modelinfo == nullptr || leaf == nullptr) {
+        FError("Embree skip face generation requires valid BSP, model, and leaf data");
+    }
+
     for (const qplane3f &plane : planes) {
         // flip the inward-facing split plane to get the outward-facing plane of the face we're constructing
         qplane3f faceplane = -plane;
 
         std::optional<polylib::winding3f_t> winding = polylib::winding3f_t::from_plane(faceplane, 10e6);
+        if (!winding) {
+            continue;
+        }
 
         // clip `winding` by all of the other planes
         for (const qplane3f &plane2 : planes) {
@@ -602,33 +707,90 @@ static void Leaf_MakeFaces(const mbsp_t *bsp, const modelinfo_t *modelinfo, cons
 void MakeFaces_r(const mbsp_t *bsp, const modelinfo_t *modelinfo, const int nodenum, std::vector<qplane3f> *planes,
     std::vector<polylib::winding3f_t> &result)
 {
-    if (nodenum < 0) {
-        const int leafnum = -nodenum - 1;
-        const mleaf_t *leaf = &bsp->dleafs[leafnum];
-
-        if ((bsp->loadversion->game->id == GAME_QUAKE_II) ? (leaf->contents & Q2_CONTENTS_SOLID)
-                                                          : leaf->contents == CONTENTS_SOLID) {
-            Leaf_MakeFaces(bsp, modelinfo, leaf, *planes, result);
-        }
-        return;
+    if (bsp == nullptr || bsp->loadversion == nullptr || bsp->loadversion->game == nullptr || modelinfo == nullptr ||
+        planes == nullptr) {
+        FError("Embree skip face generation requires valid BSP, model, and plane-stack data");
     }
 
-    const bsp2_dnode_t *node = &bsp->dnodes[nodenum];
+    enum class traversal_state_t : uint8_t
+    {
+        ENTER,
+        FRONT_COMPLETE,
+        BACK_COMPLETE
+    };
+    struct traversal_frame_t
+    {
+        int nodenum;
+        traversal_state_t state = traversal_state_t::ENTER;
+    };
 
-    // go down the front side
-    planes->push_back(Node_Plane(bsp, node, false));
-    MakeFaces_r(bsp, modelinfo, node->children[0], planes, result);
-    planes->pop_back();
+    const size_t initial_plane_count = planes->size();
+    std::vector<traversal_frame_t> stack{{nodenum}};
+    std::vector<uint8_t> active_nodes(bsp->dnodes.size(), 0);
 
-    // go down the back side
-    planes->push_back(Node_Plane(bsp, node, true));
-    MakeFaces_r(bsp, modelinfo, node->children[1], planes, result);
-    planes->pop_back();
+    try {
+        while (!stack.empty()) {
+            traversal_frame_t &frame = stack.back();
+
+            if (frame.nodenum < 0) {
+                const mleaf_t *leaf = BSP_GetLeafFromNodeNum(bsp, frame.nodenum);
+                if ((bsp->loadversion->game->id == GAME_QUAKE_II) ? (leaf->contents & Q2_CONTENTS_SOLID)
+                                                                  : leaf->contents == CONTENTS_SOLID) {
+                    Leaf_MakeFaces(bsp, modelinfo, leaf, *planes, result);
+                }
+                stack.pop_back();
+                continue;
+            }
+
+            const size_t node_index = static_cast<size_t>(frame.nodenum);
+            if (node_index >= bsp->dnodes.size()) {
+                FError("Embree skip tree node {} is out of bounds", frame.nodenum);
+            }
+            const bsp2_dnode_t *node = &bsp->dnodes[node_index];
+
+            if (frame.state == traversal_state_t::ENTER) {
+                if (active_nodes[node_index]) {
+                    FError("Embree skip tree contains a cycle at node {}", frame.nodenum);
+                }
+                active_nodes[node_index] = 1;
+                frame.state = traversal_state_t::FRONT_COMPLETE;
+                planes->push_back(Node_Plane(bsp, node, false));
+                stack.push_back({node->children[0]});
+                continue;
+            }
+
+            if (planes->size() <= initial_plane_count) {
+                FError("Embree skip tree plane stack became unbalanced");
+            }
+            planes->pop_back();
+
+            if (frame.state == traversal_state_t::FRONT_COMPLETE) {
+                frame.state = traversal_state_t::BACK_COMPLETE;
+                planes->push_back(Node_Plane(bsp, node, true));
+                stack.push_back({node->children[1]});
+                continue;
+            }
+
+            active_nodes[node_index] = 0;
+            stack.pop_back();
+        }
+    } catch (...) {
+        planes->resize(initial_plane_count);
+        throw;
+    }
+
+    if (planes->size() != initial_plane_count) {
+        planes->resize(initial_plane_count);
+        FError("Embree skip tree plane stack became unbalanced");
+    }
 }
 
 static void MakeFaces(
     const mbsp_t *bsp, const modelinfo_t *modelinfo, const dmodelh2_t *model, std::vector<polylib::winding3f_t> &result)
 {
+    if (model == nullptr) {
+        FError("Embree skip face generation requires a valid model");
+    }
     std::vector<qplane3f> planes;
     MakeFaces_r(bsp, modelinfo, model->headnode[0], &planes, result);
     Q_assert(planes.empty());
@@ -636,158 +798,173 @@ static void MakeFaces(
 
 void Embree_TraceInit(const mbsp_t *bsp)
 {
-    bsp_static = bsp;
-    Q_assert(device == nullptr);
-
-    const auto &extended_texinfo_flags = g_ctx->extended_texinfo_flags;
+    if (device != nullptr || scene != nullptr) {
+        FError("Embree trace state is already initialized");
+    }
 
     std::vector<const mface_t *> skyfaces, solidfaces, filterfaces;
-
-    // check all modelinfos
-    for (size_t mi = 0; mi < bsp->dmodels.size(); mi++) {
-        const modelinfo_t *model = ModelInfoForModel(bsp, mi);
-
-        // check reasons that a bmodel can be shadow casting
-        const bool isWorld = model->isWorld();
-        const bool shadow = model->shadow.boolValue();
-        const bool shadowself = model->shadowself.boolValue();
-        const bool shadowworldonly = model->shadowworldonly.boolValue();
-        const bool switchableshadow = model->switchableshadow.boolValue();
-        const bool has_custom_channel_mask = (model->object_channel_mask.value() != CHANNEL_MASK_DEFAULT);
-
-        if (!(isWorld || shadow || shadowself || shadowworldonly || switchableshadow || has_custom_channel_mask))
-            continue;
-
-        for (int i = 0; i < model->model->numfaces; i++) {
-            const mface_t *face = BSP_GetFace(bsp, model->model->firstface + i);
-
-            // check for TEX_NOSHADOW
-            const surfflags_t &extended_flags = extended_texinfo_flags[face->texinfo];
-            if (extended_flags.no_shadow)
-                continue;
-
-            // handle switchableshadow
-            if (switchableshadow) {
-                filterfaces.push_back(face);
-                continue;
-            }
-
-            // non-default channel mask
-            if (model->object_channel_mask.value() != CHANNEL_MASK_DEFAULT ||
-                extended_flags.object_channel_mask.value_or(CHANNEL_MASK_DEFAULT) != CHANNEL_MASK_DEFAULT) {
-                filterfaces.push_back(face);
-                continue;
-            }
-
-            const int contents_or_surf_flags = Face_ContentsOrSurfaceFlags(bsp, face); // mxd
-            const mtexinfo_t *texinfo = Face_Texinfo(bsp, face);
-            const bool is_q2 = bsp->loadversion->game->id == GAME_QUAKE_II;
-
-            // mxd. Skip NODRAW faces, but not SKY ones (Q2's sky01.wal has both flags set)
-            if (is_q2 && (contents_or_surf_flags & Q2_SURF_NODRAW) && !(contents_or_surf_flags & Q2_SURF_SKY))
-                continue;
-
-            if (Face_IsDetailFenceForLighting(bsp, face)) {
-                // detail fences should not occlude lighting
-                continue;
-            }
-
-            // handle glass / water
-            const float alpha = Face_Alpha(bsp, model, face);
-            if (alpha < 1.0f ||
-                (is_q2 && (contents_or_surf_flags & (Q2_SURF_ALPHATEST | Q2_SURF_TRANS33 | Q2_SURF_TRANS66)))) {
-                filterfaces.push_back(face);
-                continue;
-            }
-
-            // fence
-            const char *texname = Face_TextureName(bsp, face);
-            if (texname[0] == '{') {
-                filterfaces.push_back(face);
-                continue;
-            }
-
-            // handle sky
-            if (is_q2) {
-                // Q2: arghrad compat: sky faces only emit sunlight if:
-                // sky flag set, light flag set, value nonzero
-                if ((contents_or_surf_flags & Q2_SURF_SKY) != 0 &&
-                    (!light_options.arghradcompat.value() ||
-                        ((contents_or_surf_flags & Q2_SURF_LIGHT) != 0 && texinfo->value != 0))) {
-                    skyfaces.push_back(face);
-                    continue;
-                }
-            } else {
-                // Q1
-                if (!Q_strncasecmp("sky", texname, 3)) {
-                    skyfaces.push_back(face);
-                    continue;
-                }
-            }
-
-            // liquids
-            if (/* texname[0] == '*' */ ContentsOrSurfaceFlags_IsTranslucent(bsp, contents_or_surf_flags)) { // mxd
-                if (!isWorld) {
-                    // world liquids never cast shadows; shadow casting bmodel liquids do
-                    solidfaces.push_back(face);
-                }
-                continue;
-            }
-
-            // solid faces
-
-            if (isWorld || shadow) {
-                solidfaces.push_back(face);
-            } else {
-                // shadowself or shadowworldonly
-                Q_assert(shadowself || shadowworldonly);
-                filterfaces.push_back(face);
-            }
-        }
-    }
-
-    /* Special handling of skip-textured bmodels */
     std::vector<polylib::winding3f_t> skipwindings;
-    for (const modelinfo_t *modelinfo : g_ctx->tracelist) {
-        if (modelinfo->model->numfaces == 0) {
-            MakeFaces(bsp, modelinfo, modelinfo->model, skipwindings);
+    std::vector<const modelinfo_t *> skipwinding_models;
+
+    try {
+        ValidateEmbreeInputs(bsp);
+        bsp_static = bsp;
+
+        // check all modelinfos
+        for (size_t mi = 0; mi < bsp->dmodels.size(); mi++) {
+            const modelinfo_t *model = g_ctx->modelinfo[mi];
+            const model_face_range_t face_range = CheckedModelFaceRange(bsp, model->model, mi);
+
+            // check reasons that a bmodel can be shadow casting
+            const bool isWorld = model->isWorld();
+            const bool shadow = model->shadow.boolValue();
+            const bool shadowself = model->shadowself.boolValue();
+            const bool shadowworldonly = model->shadowworldonly.boolValue();
+            const bool switchableshadow = model->switchableshadow.boolValue();
+            const bool has_custom_channel_mask = (model->object_channel_mask.value() != CHANNEL_MASK_DEFAULT);
+
+            if (!(isWorld || shadow || shadowself || shadowworldonly || switchableshadow || has_custom_channel_mask))
+                continue;
+
+            for (size_t i = 0; i < face_range.count; i++) {
+                const mface_t *face = &bsp->dfaces[face_range.first + i];
+
+                // check for TEX_NOSHADOW
+                const surfflags_t &extended_flags = CheckedExtendedFlagsForFace(bsp, face);
+                if (extended_flags.no_shadow)
+                    continue;
+
+                // handle switchableshadow
+                if (switchableshadow) {
+                    filterfaces.push_back(face);
+                    continue;
+                }
+
+                // non-default channel mask
+                if (model->object_channel_mask.value() != CHANNEL_MASK_DEFAULT ||
+                    extended_flags.object_channel_mask.value_or(CHANNEL_MASK_DEFAULT) != CHANNEL_MASK_DEFAULT) {
+                    filterfaces.push_back(face);
+                    continue;
+                }
+
+                const int contents_or_surf_flags = Face_ContentsOrSurfaceFlags(bsp, face); // mxd
+                const mtexinfo_t *texinfo = Face_Texinfo(bsp, face);
+                const bool is_q2 = bsp->loadversion->game->id == GAME_QUAKE_II;
+
+                // mxd. Skip NODRAW faces, but not SKY ones (Q2's sky01.wal has both flags set)
+                if (is_q2 && (contents_or_surf_flags & Q2_SURF_NODRAW) && !(contents_or_surf_flags & Q2_SURF_SKY))
+                    continue;
+
+                // handle glass / water
+                const float alpha = Face_Alpha(bsp, model, face);
+                if (alpha < 1.0f ||
+                    (is_q2 && (contents_or_surf_flags & (Q2_SURF_ALPHATEST | Q2_SURF_TRANS33 | Q2_SURF_TRANS66)))) {
+                    filterfaces.push_back(face);
+                    continue;
+                }
+
+                // fence
+                const char *texname = Face_TextureName(bsp, face);
+                if (texname[0] == '{') {
+                    filterfaces.push_back(face);
+                    continue;
+                }
+
+                // handle sky
+                if (is_q2) {
+                    // Q2: arghrad compat: sky faces only emit sunlight if:
+                    // sky flag set, light flag set, value nonzero
+                    if ((contents_or_surf_flags & Q2_SURF_SKY) != 0 &&
+                        (!light_options.arghradcompat.value() ||
+                            ((contents_or_surf_flags & Q2_SURF_LIGHT) != 0 && texinfo->value != 0))) {
+                        skyfaces.push_back(face);
+                        continue;
+                    }
+                } else {
+                    // Q1
+                    if (!Q_strncasecmp("sky", texname, 3)) {
+                        skyfaces.push_back(face);
+                        continue;
+                    }
+                }
+
+                // liquids
+                if (/* texname[0] == '*' */ ContentsOrSurfaceFlags_IsTranslucent(bsp, contents_or_surf_flags)) { // mxd
+                    if (!isWorld) {
+                        // world liquids never cast shadows; shadow casting bmodel liquids do
+                        solidfaces.push_back(face);
+                    }
+                    continue;
+                }
+
+                // solid faces
+
+                if (isWorld || shadow) {
+                    solidfaces.push_back(face);
+                } else {
+                    // shadowself or shadowworldonly
+                    Q_assert(shadowself || shadowworldonly);
+                    filterfaces.push_back(face);
+                }
+            }
         }
-    }
 
-    device = rtcNewDevice(NULL);
-    rtcSetDeviceErrorFunction(
-        device, ErrorCallback, nullptr); // mxd. Changed from rtcDeviceSetErrorFunction to silence compiler warning...
+        /* Special handling of skip-textured bmodels */
+        for (const modelinfo_t *modelinfo : g_ctx->tracelist) {
+            if (modelinfo->model->numfaces == 0) {
+                const size_t first_winding = skipwindings.size();
+                MakeFaces(bsp, modelinfo, modelinfo->model, skipwindings);
+                skipwinding_models.insert(skipwinding_models.end(), skipwindings.size() - first_winding, modelinfo);
+            }
+        }
 
-    // log version
-    const size_t ver_maj = rtcGetDeviceProperty(device, RTC_DEVICE_PROPERTY_VERSION_MAJOR);
-    const size_t ver_min = rtcGetDeviceProperty(device, RTC_DEVICE_PROPERTY_VERSION_MINOR);
-    const size_t ver_pat = rtcGetDeviceProperty(device, RTC_DEVICE_PROPERTY_VERSION_PATCH);
-    logging::funcprint("Embree version: {}.{}.{}\n", ver_maj, ver_min, ver_pat);
+        device = rtcNewDevice(nullptr);
+        if (device == nullptr) {
+            FError("failed to initialize Embree device");
+        }
+        rtcSetDeviceErrorFunction(device, ErrorCallback,
+            nullptr); // mxd. Changed from rtcDeviceSetErrorFunction to silence compiler warning...
 
-    scene = rtcNewScene(device);
-    // necessary for RTCOccludedArguments::filter and RTCIntersectArguments::filter
-    // to work, which we use (see: ray_source_info::setup_intersection_arguments() and
-    // ray_source_info::setup_occluded_arguments())
-    rtcSetSceneFlags(scene, RTC_SCENE_FLAG_FILTER_FUNCTION_IN_ARGUMENTS);
+        // log version
+        const size_t ver_maj = rtcGetDeviceProperty(device, RTC_DEVICE_PROPERTY_VERSION_MAJOR);
+        const size_t ver_min = rtcGetDeviceProperty(device, RTC_DEVICE_PROPERTY_VERSION_MINOR);
+        const size_t ver_pat = rtcGetDeviceProperty(device, RTC_DEVICE_PROPERTY_VERSION_PATCH);
+        logging::funcprint("Embree version: {}.{}.{}\n", ver_maj, ver_min, ver_pat);
 
-    rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_HIGH);
-    skygeom = CreateGeometry(bsp, device, scene, skyfaces);
-    solidgeom = CreateGeometry(bsp, device, scene, solidfaces);
-    filtergeom = CreateGeometry(bsp, device, scene, filterfaces);
-    CreateGeometryFromWindings(device, scene, skipwindings);
+        scene = rtcNewScene(device);
+        if (scene == nullptr) {
+            FError("failed to initialize Embree scene");
+        }
+        // necessary for RTCOccludedArguments::filter and RTCIntersectArguments::filter
+        // to work, which we use (see: ray_source_info::setup_intersection_arguments() and
+        // ray_source_info::setup_occluded_arguments())
+        rtcSetSceneFlags(scene, RTC_SCENE_FLAG_FILTER_FUNCTION_IN_ARGUMENTS);
 
-    rtcSetGeometryIntersectFilterFunction(rtcGetGeometry(scene, filtergeom.geomID), Embree_FilterFuncN);
-    rtcSetGeometryOccludedFilterFunction(rtcGetGeometry(scene, filtergeom.geomID), Embree_FilterFuncN);
-    if (bsp->loadversion->game->id != GAME_QUAKE_II) {
-        rtcSetGeometryIntersectFilterFunction(rtcGetGeometry(scene, solidgeom.geomID), Embree_FilterFuncN);
-        rtcSetGeometryOccludedFilterFunction(rtcGetGeometry(scene, solidgeom.geomID), Embree_FilterFuncN);
-    }
+        rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_HIGH);
+        skygeom = CreateGeometry(bsp, device, scene, skyfaces);
+        solidgeom = CreateGeometry(bsp, device, scene, solidfaces);
+        filtergeom = CreateGeometry(bsp, device, scene, filterfaces);
+        skipgeom = CreateGeometryFromWindings(device, scene, skipwindings, skipwinding_models);
 
-    rtcCommitScene(scene);
+        rtcSetGeometryIntersectFilterFunction(rtcGetGeometry(scene, filtergeom.geomID), Embree_FilterFuncN);
+        rtcSetGeometryOccludedFilterFunction(rtcGetGeometry(scene, filtergeom.geomID), Embree_FilterFuncN);
+        if (skipgeom.geomID != RTC_INVALID_GEOMETRY_ID) {
+            RTCGeometry skip_geometry = rtcGetGeometry(scene, skipgeom.geomID);
+            if (skip_geometry == nullptr) {
+                FError("Embree failed to retrieve attached skip geometry");
+            }
+            rtcSetGeometryIntersectFilterFunction(skip_geometry, Embree_FilterFuncN);
+            rtcSetGeometryOccludedFilterFunction(skip_geometry, Embree_FilterFuncN);
+        }
+        rtcCommitScene(scene);
 
-    // keep a backup of solidfaces
-    for (const mface_t *face : solidfaces) {
-        shadow_casting_solid_faces.insert(face);
+        // keep a backup of solidfaces
+        for (const mface_t *face : solidfaces) {
+            shadow_casting_solid_faces.insert(face);
+        }
+    } catch (...) {
+        ResetEmbree();
+        throw;
     }
 
     logging::funcprint("\n");

@@ -2,15 +2,14 @@ project(
   'jsoncpp',
   'cpp',
 
-  # Note: version must be updated in four places when doing a release. This
+  # Note: version must be updated in three places when doing a release. This
   # annoying process ensures that amalgamate, CMake, and meson all report the
   # correct version.
   # 1. /meson.build
   # 2. /include/json/version.h
   # 3. /CMakeLists.txt
-  # 4. /MODULE.bazel
   # IMPORTANT: also update the SOVERSION!!
-  version : '1.9.7',
+  version : '1.9.6',
   default_options : [
     'buildtype=release',
     'cpp_std=c++11',
@@ -51,7 +50,7 @@ jsoncpp_lib = library(
     'src/lib_json/json_value.cpp',
     'src/lib_json/json_writer.cpp',
   ]),
-  soversion : 27,
+  soversion : 26,
   install : true,
   include_directories : jsoncpp_include_directories,
   cpp_args: dll_export_flag)

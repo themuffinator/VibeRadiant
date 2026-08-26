@@ -12,7 +12,6 @@ set(LIGHT_INCLUDES
 	../include/light/trace.hh
 	../include/light/write.hh
 	../include/light/spatialindex.hh
-	../include/light/vibey_api.hh
 )
 
 set(LIGHT_SOURCES
@@ -26,7 +25,6 @@ set(LIGHT_SOURCES
 	surflight.cc
 	write.cc
 	spatialindex.cc
-	vibey_api.cc
 	${LIGHT_INCLUDES}
 )
 
@@ -47,47 +45,12 @@ if (embree_FOUND)
 	endif ()
 endif(embree_FOUND)
 
-find_package(CUDAToolkit)
-if(CUDAToolkit_FOUND)
-    message(STATUS "CUDA found. Checking for OptiX...")
-
-    # Simple check or manual variable
-    set(OPTIX_INCLUDE_DIR "$ENV{OPTIX_ROOT_DIR}/include" CACHE PATH "Path to OptiX include directory")
-
-    if(EXISTS "${OPTIX_INCLUDE_DIR}/optix.h")
-        message(STATUS "OptiX found at ${OPTIX_INCLUDE_DIR}")
-        include_directories(${OPTIX_INCLUDE_DIR} ${CUDAToolkit_INCLUDE_DIRS})
-        add_definitions(-DHAVE_OPTIX)
-
-        # Add trace_optix.cc
-        set(LIGHT_SOURCES ${LIGHT_SOURCES} trace_optix.cc)
-
-        # PTX Generation Rule (Simplified)
-        # In a real setup, use standard cuda_add_library or similar, but we need .ptx content embedded or loaded
-        # For now, we will assume headers are enough to compile host code.
-        # The .cu file compilation is tricky without full setup.
-        # We will add it to sources if possible or leave it manual.
-
-        # Link CUDA
-        target_link_libraries(liblight PRIVATE CUDA::cudart)
-    else()
-        message(WARNING "OptiX headers not found. trace_optix.cc will not be compiled.")
-    endif()
-endif()
-
 add_library(liblight STATIC ${LIGHT_SOURCES})
+target_include_directories(liblight PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>)
 
-# OIDN Integration
-find_package(OpenImageDenoise QUIET)
-if(OpenImageDenoise_FOUND)
-    message(STATUS "Intel OIDN found. Enabling AI denoising.")
-    target_link_libraries(liblight PRIVATE OpenImageDenoise)
-    target_compile_definitions(liblight PRIVATE HAVE_OIDN)
-else()
-    message(STATUS "Intel OIDN not found. AI denoising disabled.")
-endif()
-
-target_link_libraries(liblight PRIVATE common ${CMAKE_THREAD_LIBS_INIT} fmt::fmt jsoncpp_static)
+target_link_libraries(liblight PUBLIC common PRIVATE ${CMAKE_THREAD_LIBS_INIT} fmt::fmt jsoncpp_static)
 
 add_executable(vmt-light main.cc)
 target_link_libraries(vmt-light PRIVATE common liblight)
@@ -209,4 +172,4 @@ copy_mingw_dlls(vmt-light)
 add_loader_path_to_rpath(vmt-light)
 
 install(TARGETS vmt-light RUNTIME DESTINATION .)
-install(FILES ../COPYING DESTINATION . RENAME LICENSE.txt)
+install(FILES "${CMAKE_SOURCE_DIR}/COPYING" DESTINATION . RENAME LICENSE.txt)

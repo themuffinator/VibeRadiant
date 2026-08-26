@@ -850,7 +850,7 @@ static std::vector<compiled_brush_t> DecompileLeafTask(const mbsp_t *bsp, const 
         RemoveRedundantPlanes(task.allPlanes);
 
         if (task.allPlanes.empty()) {
-            printf("warning, skipping empty brush\n");
+            logging::print("warning, skipping empty brush\n");
             return {};
         }
 
@@ -920,7 +920,7 @@ static std::vector<compiled_brush_t> DecompileLeafTask(const mbsp_t *bsp, const 
                 } else if (finalSide.plane.source) {
                     ti = BSP_GetTexinfo(bsp, finalSide.plane.source->texinfo);
                     if (ti) {
-                        name = ti->texture.data();
+                        name = ti->texturename.c_str();
                     }
                 }
 
@@ -957,7 +957,7 @@ static std::vector<compiled_brush_t> DecompileLeafTaskLeafVisualization(
     RemoveRedundantPlanes(task.allPlanes);
 
     if (task.allPlanes.empty()) {
-        printf("warning, skipping empty brush\n");
+        logging::print("warning, skipping empty brush\n");
         return {};
     }
 
@@ -1249,11 +1249,8 @@ static void DecompileEntity(
                 brushes.begin(), brushes.end(), std::back_inserter(brushesVector), [](auto &v) { return v.second; });
 
             compiledBrushes.resize(brushes.size());
-            size_t t = brushes.size();
-
             tbb::parallel_for(static_cast<size_t>(0), brushes.size(), [&](size_t i) {
                 compiledBrushes[i] = DecompileBrushTask(bsp, options, brushesVector[i], brush_offset);
-                t--;
             });
         } else {
             // recursively visit the nodes to gather up a list of leafs to decompile

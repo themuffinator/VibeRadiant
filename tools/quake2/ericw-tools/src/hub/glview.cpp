@@ -20,7 +20,12 @@ See file, 'COPYING', for details.
 #include "glview.h"
 
 // #include <cstdio>
-#include <cassert>
+#include <array>
+#include <charconv>
+#include <cmath>
+#include <limits>
+#include <ranges>
+#include <stdexcept>
 #include <tuple>
 
 #include <QApplication>
@@ -34,8 +39,10 @@ See file, 'COPYING', for details.
 #include <QOpenGLDebugLogger>
 #include <QStandardPaths>
 #include <QDateTime>
+#include <QFocusEvent>
 #include <QMessageBox>
 #include <QPainter>
+#include <QScopeGuard>
 
 #include <common/decompile.hh>
 #include <common/bspfile.hh>
@@ -43,13 +50,45 @@ See file, 'COPYING', for details.
 #include <common/bspinfo.hh>
 #include <common/imglib.hh>
 #include <common/prtfile.hh>
+#include <hub/preview.hh>
 #include <light/light.hh>
 
 // given a width and height, returns the number of mips required
 // see https://registry.khronos.org/OpenGL/extensions/ARB/ARB_texture_non_power_of_two.txt
 static int GetMipLevelsForDimensions(int w, int h)
 {
+    if (w <= 0 || h <= 0) {
+        return 1;
+    }
     return 1 + static_cast<int>(std::floor(std::log2(std::max(w, h))));
+}
+
+static QImage FlipImage(const QImage &image, bool horizontal, bool vertical)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    Qt::Orientations orientations{};
+    if (horizontal) {
+        orientations |= Qt::Horizontal;
+    }
+    if (vertical) {
+        orientations |= Qt::Vertical;
+    }
+    return image.flipped(orientations);
+#else
+    return image.mirrored(horizontal, vertical);
+#endif
+}
+
+template<std::ranges::sized_range Range>
+static int OpenGLBufferByteSize(const Range &values, const char *description)
+{
+    using value_type = std::ranges::range_value_t<Range>;
+    const size_t count = std::ranges::size(values);
+    constexpr size_t element_size = sizeof(value_type);
+    if (count > static_cast<size_t>(std::numeric_limits<int>::max()) / element_size) {
+        throw std::runtime_error(fmt::format("{} is too large for a Qt OpenGL buffer", description));
+    }
+    return static_cast<int>(count * element_size);
 }
 
 GLView::GLView(QWidget *parent)
@@ -79,10 +118,21 @@ GLView::GLView(QWidget *parent)
 
 GLView::~GLView()
 {
+    if (!context() || !isValid()) {
+        delete m_program;
+        delete m_program_wireframe;
+        delete m_program_simple;
+        delete m_program_lightgrid;
+        delete m_skybox_program;
+        return;
+    }
+
     makeCurrent();
 
     delete m_program;
     delete m_program_wireframe;
+    delete m_program_simple;
+    delete m_program_lightgrid;
     delete m_skybox_program;
 
     m_vbo.destroy();
@@ -103,6 +153,10 @@ GLView::~GLView()
     m_frustumFacesIndexBuffer.destroy();
     m_frustumEdgesIndexBuffer.destroy();
     m_frustumVao.destroy();
+
+    m_lightgridVbo.destroy();
+    m_lightgridIndexBuffer.destroy();
+    m_lightgridVao.destroy();
 
     for (auto &hullVao : m_hullVaos) {
         hullVao.vbo.destroy();
@@ -185,7 +239,8 @@ in vec2 uv;
 in vec2 lightmap_uv;
 in vec3 normal;
 flat in vec3 flat_color;
-flat in uint styles;
+flat in uvec4 styles;
+flat in uint style_count;
 flat in int is_selected;
 
 out vec4 color;
@@ -215,16 +270,16 @@ void main() {
             discard;
         }
 
-        vec3 lmcolor = fullbright ? vec3(0.5) : vec3(0);
+        // Faces without atlas styles (sky, water, and other unlit special
+        // surfaces) use their authored texture at full brightness.
+        vec3 lmcolor = (fullbright || style_count == 0u) ? vec3(1.0 / lightmap_scale) : vec3(0);
 
-        if (!fullbright)
+        if (!fullbright && style_count != 0u)
         {
-            for (uint i = 0u; i < 32u; i += 8u)
+            for (uint i = 0u; i < style_count; ++i)
             {
-                uint style = (styles >> i) & 0xFFu;
-
-                if (style == 0xFFu)
-                    break;
+                uint packed = styles[int(i >> 2u)];
+                uint style = (packed >> ((i & 3u) * 8u)) & 0xFFu;
 
                 lmcolor += texture(lightmap_sampler, vec3(lightmap_uv, float(style))).rgb * style_scalars[style];
             }
@@ -251,14 +306,16 @@ layout (location = 1) in vec2 vertex_uv;
 layout (location = 2) in vec2 vertex_lightmap_uv;
 layout (location = 3) in vec3 vertex_normal;
 layout (location = 4) in vec3 vertex_flat_color;
-layout (location = 5) in uint vertex_styles;
+layout (location = 5) in uvec4 vertex_styles;
 layout (location = 6) in int face_index;
+layout (location = 7) in uint vertex_style_count;
 
 out vec2 uv;
 out vec2 lightmap_uv;
 out vec3 normal;
 flat out vec3 flat_color;
-flat out uint styles;
+flat out uvec4 styles;
+flat out uint style_count;
 flat out int is_selected;
 
 uniform mat4 MVP;
@@ -286,6 +343,7 @@ void main() {
     normal = vertex_normal;
     flat_color = vertex_flat_color;
     styles = vertex_styles;
+    style_count = vertex_style_count;
     is_selected = (face_index == selected_face ? 1 : 0);
 }
 )";
@@ -297,7 +355,8 @@ in vec3 fragment_world_pos;
 in vec2 lightmap_uv;
 in vec3 normal;
 flat in vec3 flat_color;
-flat in uint styles;
+flat in uvec4 styles;
+flat in uint style_count;
 flat in int is_selected;
 
 out vec4 color;
@@ -325,12 +384,10 @@ void main() {
         {
             vec3 lmcolor = vec3(0.5);
 
-            for (uint i = 0u; i < 32u; i += 8u)
+            for (uint i = 0u; i < style_count; ++i)
             {
-                uint style = (styles >> i) & 0xFFu;
-
-                if (style == 0xFFu)
-                    break;
+                uint packed = styles[int(i >> 2u)];
+                uint style = (packed >> ((i & 3u) * 8u)) & 0xFFu;
 
                 lmcolor += texture(lightmap_sampler, vec3(lightmap_uv, float(style))).rgb * style_scalars[style];
             }
@@ -361,14 +418,16 @@ layout (location = 1) in vec2 vertex_uv;
 layout (location = 2) in vec2 vertex_lightmap_uv;
 layout (location = 3) in vec3 vertex_normal;
 layout (location = 4) in vec3 vertex_flat_color;
-layout (location = 5) in uint vertex_styles;
+layout (location = 5) in uvec4 vertex_styles;
 layout (location = 6) in int face_index;
+layout (location = 7) in uint vertex_style_count;
 
 out vec3 fragment_world_pos;
 out vec2 lightmap_uv;
 out vec3 normal;
 flat out vec3 flat_color;
-flat out uint styles;
+flat out uvec4 styles;
+flat out uint style_count;
 flat out int is_selected;
 
 uniform mat4 MVP;
@@ -397,6 +456,7 @@ void main() {
     normal = vertex_normal;
     flat_color = vertex_flat_color;
     styles = vertex_styles;
+    style_count = vertex_style_count;
     is_selected = (face_index == selected_face ? 1 : 0);
 }
 )";
@@ -479,15 +539,17 @@ void main() {
 
 GLView::face_visibility_key_t GLView::desiredFaceVisibility() const
 {
-    face_visibility_key_t result;
-    result.show_bmodels = m_showBmodels;
+    face_visibility_key_t result{.show_bmodels = m_showBmodels, .leafnum = -1, .clusternum = -1};
 
-    if (m_visCulling) {
+    if (m_visCulling && m_bsp && !m_bsp->dmodels.empty() && !m_bsp->dleafs.empty()) {
         const mbsp_t &bsp = *m_bsp;
         const auto &world = bsp.dmodels.at(0);
         const auto &origin = m_keepCullOrigin ? m_cullOrigin : m_cameraOrigin;
 
         auto *leaf = BSP_FindLeafAtPoint(&bsp, &world, qvec3d{origin.x(), origin.y(), origin.z()});
+        if (!leaf || leaf < bsp.dleafs.data() || leaf >= bsp.dleafs.data() + bsp.dleafs.size()) {
+            return result;
+        }
 
         int leafnum = leaf - bsp.dleafs.data();
 
@@ -498,9 +560,6 @@ GLView::face_visibility_key_t GLView::desiredFaceVisibility() const
         } else {
             result.clusternum = leaf->visofs;
         }
-    } else {
-        result.leafnum = -1;
-        result.clusternum = -1;
     }
     return result;
 }
@@ -528,16 +587,20 @@ void GLView::updateFaceVisibility(const std::array<QVector4D, 4> &frustum)
         return;
 
     const mbsp_t &bsp = *m_bsp;
+    if (bsp.dmodels.empty() || bsp.dfaces.empty()) {
+        face_visibility_texture.reset();
+        face_visibility_buffer.reset();
+        return;
+    }
     const auto &world = bsp.dmodels.at(0);
 
     const face_visibility_key_t desired = desiredFaceVisibility();
 
     // qDebug() << "looking up pvs for clusternum " << desired.clusternum;
 
-    const int face_visibility_width = m_bsp->dfaces.size();
-
-    std::vector<uint8_t> face_flags;
-    face_flags.resize(face_visibility_width, 0);
+    const size_t face_visibility_width = bsp.dfaces.size();
+    m_faceVisibilityScratch.assign(face_visibility_width, 0);
+    auto &face_flags = m_faceVisibilityScratch;
 
     bool in_solid = false;
 
@@ -571,9 +634,17 @@ void GLView::updateFaceVisibility(const std::array<QVector4D, 4> &frustum)
                     return;
                 }
                 if (Pvs_LeafVisible(&bsp, pvs, &leaf) && isVolumeInFrustum(frustum, leaf.mins, leaf.maxs)) {
-                    for (int ms = 0; ms < leaf.nummarksurfaces; ++ms) {
-                        int fnum = bsp.dleaffaces[leaf.firstmarksurface + ms];
-                        face_flags[fnum] = 16;
+                    const size_t first_marksurface = leaf.firstmarksurface;
+                    if (first_marksurface > bsp.dleaffaces.size() ||
+                        leaf.nummarksurfaces > bsp.dleaffaces.size() - first_marksurface) {
+                        return;
+                    }
+                    const size_t end_marksurface = first_marksurface + leaf.nummarksurfaces;
+                    for (size_t marksurface = first_marksurface; marksurface < end_marksurface; ++marksurface) {
+                        const uint32_t fnum = bsp.dleaffaces[marksurface];
+                        if (fnum < face_flags.size()) {
+                            face_flags[fnum] = 16;
+                        }
                     }
                 }
             });
@@ -582,32 +653,41 @@ void GLView::updateFaceVisibility(const std::array<QVector4D, 4> &frustum)
 
     if (!found_visdata) {
         // mark all world faces
-        for (int fi = world.firstface; fi < (world.firstface + world.numfaces); ++fi) {
+        const int64_t face_count = static_cast<int64_t>(face_flags.size());
+        const int64_t first_face = std::clamp<int64_t>(world.firstface, 0, face_count);
+        const int64_t last_face =
+            std::clamp<int64_t>(static_cast<int64_t>(world.firstface) + world.numfaces, first_face, face_count);
+        for (int64_t fi = first_face; fi < last_face; ++fi) {
             face_flags[fi] = 16;
         }
     }
 
     // set all bmodel faces to visible
     if (m_showBmodels) {
-        for (int mi = 1; mi < bsp.dmodels.size(); ++mi) {
+        for (size_t mi = 1; mi < bsp.dmodels.size(); ++mi) {
             auto &model = bsp.dmodels[mi];
-            for (int fi = model.firstface; fi < (model.firstface + model.numfaces); ++fi) {
+            const int64_t face_count = static_cast<int64_t>(face_flags.size());
+            const int64_t first_face = std::clamp<int64_t>(model.firstface, 0, face_count);
+            const int64_t last_face =
+                std::clamp<int64_t>(static_cast<int64_t>(model.firstface) + model.numfaces, first_face, face_count);
+            for (int64_t fi = first_face; fi < last_face; ++fi) {
                 face_flags[fi] = 16;
             }
         }
     }
 
     if (m_textureFilter && !m_textureFilter->empty()) {
-        std::vector<uint8_t> filtered_flags(face_flags.size(), 0);
+        m_filteredFaceVisibilityScratch.assign(face_flags.size(), 0);
         auto it = m_facesByTexture.find(*m_textureFilter);
         if (it != m_facesByTexture.end()) {
             for (int face_index : it->second) {
-                if (face_index >= 0 && face_index < static_cast<int>(face_flags.size())) {
-                    filtered_flags[face_index] = face_flags[face_index];
+                if (face_index >= 0 && static_cast<size_t>(face_index) < face_flags.size()) {
+                    m_filteredFaceVisibilityScratch[static_cast<size_t>(face_index)] =
+                        face_flags[static_cast<size_t>(face_index)];
                 }
             }
         }
-        setFaceVisibilityArray(filtered_flags.data());
+        setFaceVisibilityArray(m_filteredFaceVisibilityScratch.data());
     } else {
         setFaceVisibilityArray(face_flags.data());
     }
@@ -739,6 +819,8 @@ void GLView::initializeGL()
     m_leakVao.create();
     m_clickVao.create();
     m_portalVao.create();
+    m_frustumVao.create();
+    m_lightgridVao.create();
     for (auto &hullVao : m_hullVaos) {
         hullVao.vao.create();
     }
@@ -783,7 +865,7 @@ void GLView::paintGL()
 
     const auto now = I_FloatTime();
     if (m_lastFrame) {
-        duration_seconds = (now - *m_lastFrame).count();
+        duration_seconds = std::clamp(static_cast<float>((now - *m_lastFrame).count()), 0.0f, 0.1f);
     } else {
         duration_seconds = 0;
     }
@@ -859,10 +941,8 @@ void GLView::paintGL()
             active_program->bind();
         }
 
-        if (draw.key.alpha_test) {
-            m_program->setUniformValue(m_program_alpha_test_location, true);
-        } else {
-            m_program->setUniformValue(m_program_alpha_test_location, false);
+        if (active_program == m_program) {
+            m_program->setUniformValue(m_program_alpha_test_location, draw.key.alpha_test);
         }
 
         draw.texture->bind(0 /* texture unit */);
@@ -897,10 +977,8 @@ void GLView::paintGL()
                 active_program->bind();
             }
 
-            if (draw.key.alpha_test) {
-                m_program->setUniformValue(m_program_alpha_test_location, true);
-            } else {
-                m_program->setUniformValue(m_program_alpha_test_location, false);
+            if (active_program == m_program) {
+                m_program->setUniformValue(m_program_alpha_test_location, draw.key.alpha_test);
             }
 
             draw.texture->bind(0 /* texture unit */);
@@ -1080,8 +1158,8 @@ void GLView::paintGL()
         QOpenGLVertexArrayObject::Binder vaoBinder(&m_lightgridVao);
 
         if (m_lightgridIndexBuffer.size() != -1) {
-            glDrawElements(GL_TRIANGLES, m_lightgridIndexBuffer.size() / sizeof(GLuint), GL_UNSIGNED_INT,
-                reinterpret_cast<void *>(0));
+            glDrawElements(GL_TRIANGLES, m_lightgridIndexBuffer.size() / static_cast<int>(sizeof(GLuint)),
+                GL_UNSIGNED_INT, reinterpret_cast<void *>(0));
         }
 
         m_program_lightgrid->release();
@@ -1156,7 +1234,10 @@ void GLView::setCamera(const qvec3d &origin)
 void GLView::setCamera(const qvec3d &origin, const qvec3d &fwd)
 {
     m_cameraOrigin = {(float)origin[0], (float)origin[1], (float)origin[2]};
-    m_cameraFwd = {(float)fwd[0], (float)fwd[1], (float)fwd[2]};
+    QVector3D new_forward{(float)fwd[0], (float)fwd[1], (float)fwd[2]};
+    if (!qFuzzyIsNull(new_forward.lengthSquared())) {
+        m_cameraFwd = new_forward.normalized();
+    }
     update();
     emit cameraMoved();
 }
@@ -1289,15 +1370,29 @@ void GLView::clearSelection()
 
 void GLView::setLightStyleIntensity(int style_id, int intensity)
 {
-    makeCurrent();
-    m_program->bind();
-    m_program->setUniformValue(m_program_style_scalars_location + style_id, intensity / 100.f);
-    m_program->release();
+    const auto *glContext = context();
+    if (!glContext || !glContext->isValid() || (!m_program && !m_program_lightgrid && !m_skybox_program) ||
+        style_id < 0) {
+        return;
+    }
 
-    m_program_lightgrid->bind();
-    m_program_lightgrid->setUniformValue(m_program_lightgrid_style_scalars_location + style_id, intensity / 100.f);
-    m_program_lightgrid->release();
-    doneCurrent();
+    makeCurrent();
+    const auto context_guard = qScopeGuard([this]() { doneCurrent(); });
+    if (const auto layer = m_lightStyleLayers.find(style_id); layer != m_lightStyleLayers.end()) {
+        if (m_program && m_program->bind()) {
+            m_program->setUniformValue(m_program_style_scalars_location + layer->second, intensity / 100.f);
+            m_program->release();
+        }
+        if (m_skybox_program && m_skybox_program->bind()) {
+            m_skybox_program->setUniformValue(
+                m_skybox_program_style_scalars_location + layer->second, intensity / 100.f);
+            m_skybox_program->release();
+        }
+    }
+    if (style_id < 256 && m_program_lightgrid && m_program_lightgrid->bind()) {
+        m_program_lightgrid->setUniformValue(m_program_lightgrid_style_scalars_location + style_id, intensity / 100.f);
+        m_program_lightgrid->release();
+    }
 
     update();
 }
@@ -1306,12 +1401,19 @@ void GLView::setMagFilter(QOpenGLTexture::Filter filter)
 {
     m_filter = filter;
 
+    if (!context() || (!placeholder_texture && m_drawcalls.empty())) {
+        update();
+        return;
+    }
+
+    makeCurrent();
     if (placeholder_texture)
         placeholder_texture->setMagnificationFilter(m_filter);
 
     for (auto &dc : m_drawcalls) {
         dc.texture->setMagnificationFilter(m_filter);
     }
+    doneCurrent();
 
     update();
 }
@@ -1335,12 +1437,17 @@ void GLView::setBrightness(float brightness)
     update();
 }
 
-void GLView::takeScreenshot(QString destPath, int w, int h)
+bool GLView::takeScreenshot(const QString &destPath, int w, int h)
 {
+    if (!context() || w <= 0 || h <= 0 || destPath.isEmpty()) {
+        return false;
+    }
+
     // update aspect ratio
     float backupDisplayAspect = m_displayAspect;
     m_displayAspect = static_cast<float>(w) / static_cast<float>(h);
 
+    bool saved = false;
     makeCurrent();
     {
         QOpenGLFramebufferObjectFormat format;
@@ -1348,42 +1455,51 @@ void GLView::takeScreenshot(QString destPath, int w, int h)
         format.setSamples(4);
 
         QOpenGLFramebufferObject fbo(w, h, format);
-        assert(fbo.bind());
+        if (fbo.isValid() && fbo.bind()) {
+            glViewport(0, 0, w, h);
+            paintGL();
 
-        glViewport(0, 0, w, h);
-        paintGL();
-
-        QImage image = fbo.toImage();
-        image.save(destPath);
-
-        assert(fbo.release());
+            const QImage image = fbo.toImage();
+            saved = !image.isNull() && image.save(destPath, "PNG");
+            fbo.release();
+        }
     }
     doneCurrent();
 
     // restore aspect ratio
     m_displayAspect = backupDisplayAspect;
     update();
+    return saved;
 }
 
-void GLView::setFaceVisibilityArray(uint8_t *data)
+void GLView::setFaceVisibilityArray(const uint8_t *data)
 {
     // one byte per face
-    int face_visibility_width = m_bsp->dfaces.size();
+    const int face_visibility_width = static_cast<int>(m_bsp->dfaces.size());
+    if (face_visibility_width <= 0 || !data) {
+        return;
+    }
 
-    face_visibility_texture.reset();
-    face_visibility_buffer.reset();
-
-    face_visibility_buffer = std::make_shared<QOpenGLBuffer>();
-    face_visibility_buffer->create();
+    if (!face_visibility_buffer) {
+        face_visibility_buffer = std::make_shared<QOpenGLBuffer>();
+        face_visibility_buffer->create();
+        face_visibility_buffer->setUsagePattern(QOpenGLBuffer::DynamicDraw);
+    }
     face_visibility_buffer->bind();
-    face_visibility_buffer->allocate(data, face_visibility_width);
+    if (face_visibility_buffer->size() != face_visibility_width) {
+        face_visibility_buffer->allocate(data, face_visibility_width);
+    } else {
+        face_visibility_buffer->write(0, data, face_visibility_width);
+    }
     face_visibility_buffer->release();
 
-    face_visibility_texture = std::make_shared<QOpenGLTexture>(QOpenGLTexture::TargetBuffer);
-    face_visibility_texture->create();
-    face_visibility_texture->bind();
-    glTexBuffer(GL_TEXTURE_BUFFER, GL_R8UI, face_visibility_buffer->bufferId());
-    face_visibility_texture->release();
+    if (!face_visibility_texture) {
+        face_visibility_texture = std::make_shared<QOpenGLTexture>(QOpenGLTexture::TargetBuffer);
+        face_visibility_texture->create();
+        face_visibility_texture->bind();
+        glTexBuffer(GL_TEXTURE_BUFFER, GL_R8UI, face_visibility_buffer->bufferId());
+        face_visibility_texture->release();
+    }
 }
 
 std::vector<QVector3D> GLView::getFrustumCorners(float displayAspect)
@@ -1417,18 +1533,36 @@ std::vector<QVector3D> GLView::getFrustumCorners(float displayAspect)
     return corners;
 }
 
-void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries_t &bspx,
+void GLView::renderBSP(const QString &file, std::shared_ptr<const mbsp_t> bsp_data, const bspxentries_t &bspx,
     const std::vector<entdict_t> &entities, const full_atlas_t &lightmap, const settings::common_settings &settings,
     bool use_bspx_normals)
 {
-    // copy the bsp for later use (FIXME: just store a pointer to MainWindow's?)
-    m_bsp = bsp;
+    if (!bsp_data) {
+        throw std::runtime_error("no BSP was provided for rendering");
+    }
+    const mbsp_t &bsp = *bsp_data;
+    if (bsp.loadversion == nullptr || bsp.loadversion->game == nullptr) {
+        throw std::runtime_error("BSP has no source format or game definition");
+    }
+    if (bsp.dmodels.empty()) {
+        throw std::runtime_error("BSP contains no models");
+    }
+    // Validate the complete world tree once during the fallible load path.
+    // Camera/PVS updates happen from Qt paint callbacks, where a malformed
+    // node, leaf, or plane must never be allowed to throw.
+    BSP_VisitAllLeafs(bsp, bsp.dmodels.front(), [](const mleaf_t &) { });
+    if (bsp.dfaces.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        bsp.dleafs.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        bsp.dmodels.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("BSP exceeds the Hub's 32-bit OpenGL index limits");
+    }
+
+    std::unordered_map<int, std::vector<uint8_t>> decompressed_vis;
     if (bsp.dvis.bits.empty()) {
         logging::print("no visdata\n");
-        m_decompressedVis.clear();
     } else {
         logging::print("decompressing visdata...\n");
-        m_decompressedVis = DecompressAllVis(&bsp, true);
+        decompressed_vis = DecompressAllVis(&bsp, true);
     }
 
     img::load_textures(&bsp, settings);
@@ -1438,44 +1572,143 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
     if (use_bspx_normals)
         facenormals = BSPX_FaceNormals(bsp, bspx);
 
+    // GLSL 3.30 guarantees enough components for 256 scalar fragment
+    // uniforms. Compact arbitrary 16-bit BSPX style identifiers into those
+    // layers and carry an explicit per-face count for all 16 packed slots.
+    if (lightmap.style_to_lightmap_atlas.size() > hub::MAX_PREVIEW_LIGHT_STYLES) {
+        throw std::runtime_error(fmt::format("lightmap uses {} styles; the Hub supports at most {}",
+            lightmap.style_to_lightmap_atlas.size(), hub::MAX_PREVIEW_LIGHT_STYLES));
+    }
+    std::vector<uint16_t> available_light_styles;
+    available_light_styles.reserve(lightmap.style_to_lightmap_atlas.size());
+    for (const auto &style_entry : lightmap.style_to_lightmap_atlas) {
+        const int style_id = style_entry.first;
+        if (style_id < 0 || style_id >= std::numeric_limits<uint16_t>::max()) {
+            throw std::runtime_error(fmt::format("invalid lightmap style {}", style_id));
+        }
+        available_light_styles.push_back(static_cast<uint16_t>(style_id));
+    }
+    hub::light_style_layers_t light_style_layers = hub::compact_light_styles(available_light_styles);
+    std::unordered_map<int, hub::packed_light_styles_t> packed_face_styles;
+    packed_face_styles.reserve(lightmap.facenum_to_lightmap_styles.size());
+    for (const auto &[face_num, styles] : lightmap.facenum_to_lightmap_styles) {
+        if (face_num < 0 || static_cast<size_t>(face_num) >= bsp.dfaces.size()) {
+            throw std::runtime_error(fmt::format("lightmap styles reference invalid face {}", face_num));
+        }
+        if (styles.size() > hub::MAX_PREVIEW_STYLES_PER_FACE) {
+            throw std::runtime_error(fmt::format("face {} uses {} lightmap styles; the Hub supports at most {}",
+                face_num, styles.size(), hub::MAX_PREVIEW_STYLES_PER_FACE));
+        }
+        if (!lightmap.facenum_to_lightmap_uvs.contains(face_num)) {
+            throw std::runtime_error(fmt::format("face {} has lightmap styles but no atlas coordinates", face_num));
+        }
+        for (const uint16_t style_id : styles) {
+            if (!light_style_layers.contains(style_id)) {
+                throw std::runtime_error(
+                    fmt::format("face {} references missing lightmap style {}", face_num, style_id));
+            }
+        }
+        packed_face_styles.emplace(face_num, hub::pack_face_light_styles(styles, light_style_layers));
+    }
+    for (const auto &uv_entry : lightmap.facenum_to_lightmap_uvs) {
+        const int face_num = uv_entry.first;
+        if (!lightmap.facenum_to_lightmap_styles.contains(face_num)) {
+            throw std::runtime_error(fmt::format("face {} has atlas coordinates but no lightmap styles", face_num));
+        }
+    }
+
     // NOTE: according to https://doc.qt.io/qt-6/qopenglwidget.html#resource-initialization-and-cleanup
     // we can only do this after `initializeGL()` has run once.
     makeCurrent();
+    const auto gl_context_guard = qScopeGuard([this]() { doneCurrent(); });
+    bool preview_committed = false;
+    const auto preview_failure_guard = qScopeGuard([this, &preview_committed]() {
+        if (preview_committed) {
+            return;
+        }
+
+        // A failed upload cannot safely retain a mixture of old and new CPU/GPU
+        // state. Keep the context current while releasing member GL resources,
+        // and leave the widget in a well-defined empty-preview state.
+        m_bsp.reset();
+        m_decompressedVis.clear();
+        m_lightStyleLayers.clear();
+        m_spatialindex->clear();
+        m_facesByTexture.clear();
+        m_faceVisibilityScratch.clear();
+        m_filteredFaceVisibilityScratch.clear();
+        placeholder_texture.reset();
+        lightmap_texture.reset();
+        face_visibility_texture.reset();
+        face_visibility_buffer.reset();
+        m_drawcalls.clear();
+        for (auto &hull_vao : m_hullVaos) {
+            hull_vao.num_indices = 0;
+        }
+        num_leak_points = 0;
+        num_portal_indices = 0;
+        m_totalFaces = 0;
+        m_totalLeafs = 0;
+        m_totalModels = 0;
+        m_portalCount = 0;
+        m_lightgridSampleCount = 0;
+    });
+
+    GLint max_texture_size = 0;
+    GLint max_array_layers = 0;
+    GLint max_texture_buffer_size = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
+    glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &max_array_layers);
+    glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &max_texture_buffer_size);
+    if (max_texture_buffer_size > 0 && bsp.dfaces.size() > static_cast<size_t>(max_texture_buffer_size)) {
+        throw std::runtime_error(fmt::format("BSP has {} faces, exceeding this GPU's {}-texel texture-buffer limit",
+            bsp.dfaces.size(), max_texture_buffer_size));
+    }
+    const auto validate_texture_dimensions = [max_texture_size](
+                                                 uint32_t width, uint32_t height, std::string_view description) {
+        if (width == 0 || height == 0 || width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+            height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+            (max_texture_size > 0 && (width > static_cast<uint32_t>(max_texture_size) ||
+                                         height > static_cast<uint32_t>(max_texture_size)))) {
+            throw std::runtime_error(
+                fmt::format("{} dimensions {}x{} exceed this GPU's texture limits", description, width, height));
+        }
+    };
 
     // clear old data
     m_spatialindex->clear();
     m_facesByTexture.clear();
+    m_faceVisibilityScratch.clear();
+    m_filteredFaceVisibilityScratch.clear();
 
     placeholder_texture.reset();
     lightmap_texture.reset();
     face_visibility_texture.reset();
     face_visibility_buffer.reset();
     m_drawcalls.clear();
-    m_vbo.bind();
-    m_vbo.allocate(0);
-    m_leakVbo.bind();
-    m_leakVbo.allocate(0);
-    m_indexBuffer.bind();
-    m_indexBuffer.allocate(0);
-    m_clickVbo.bind();
-    m_clickVbo.allocate(0);
-    m_portalVbo.bind();
-    m_portalVbo.allocate(0);
-    m_portalIndexBuffer.bind();
-    m_portalIndexBuffer.allocate(0);
+    auto clear_buffer = [](QOpenGLBuffer &buffer) {
+        if (buffer.isCreated() && buffer.bind()) {
+            buffer.allocate(0);
+            buffer.release();
+        }
+    };
+    clear_buffer(m_vbo);
+    clear_buffer(m_leakVbo);
+    clear_buffer(m_indexBuffer);
+    clear_buffer(m_clickVbo);
+    clear_buffer(m_portalVbo);
+    clear_buffer(m_portalIndexBuffer);
     for (auto &hullVao : m_hullVaos) {
-        hullVao.vbo.bind();
-        hullVao.vbo.allocate(0);
-        hullVao.indexBuffer.bind();
-        hullVao.indexBuffer.allocate(0);
+        clear_buffer(hullVao.vbo);
+        clear_buffer(hullVao.indexBuffer);
+        hullVao.num_indices = 0;
     }
 
-    m_frustumVbo.bind();
-    m_frustumVbo.allocate(0);
-    m_frustumFacesIndexBuffer.bind();
-    m_frustumFacesIndexBuffer.allocate(0);
-    m_frustumEdgesIndexBuffer.bind();
-    m_frustumEdgesIndexBuffer.allocate(0);
+    clear_buffer(m_frustumVbo);
+    clear_buffer(m_frustumFacesIndexBuffer);
+    clear_buffer(m_frustumEdgesIndexBuffer);
+    clear_buffer(m_lightgridVbo);
+    clear_buffer(m_lightgridIndexBuffer);
 
     num_leak_points = 0;
     num_portal_indices = 0;
@@ -1489,30 +1722,56 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
     m_portalCount = 0;
     m_lightgridSampleCount = 0;
 
-    int32_t highest_depth = 0;
-
-    for (auto &style : lightmap.style_to_lightmap_atlas) {
-        highest_depth = std::max(highest_depth, style.first);
-    }
-
     // upload lightmap atlases
     {
         m_is_hdr_lightmap = false;
-        for (auto &[style_index, style_atlas] : lightmap.style_to_lightmap_atlas) {
-            if (!style_atlas.e5brg9_samples.empty()) {
+        for (const auto &style_entry : lightmap.style_to_lightmap_atlas) {
+            if (!style_entry.second.e5brg9_samples.empty()) {
                 m_is_hdr_lightmap = true;
                 break;
             }
         }
 
-        lightmap_texture = std::make_shared<QOpenGLTexture>(QOpenGLTexture::Target2DArray);
-        if (lightmap.style_to_lightmap_atlas.empty()) {
-            lightmap_texture->setSize(1, 1);
-        } else {
-            const auto &lm_tex = lightmap.style_to_lightmap_atlas.begin()->second;
-            lightmap_texture->setSize(lm_tex.width, lm_tex.height);
+        int atlas_width = 1;
+        int atlas_height = 1;
+        if (!lightmap.style_to_lightmap_atlas.empty()) {
+            const auto &first_atlas = lightmap.style_to_lightmap_atlas.begin()->second;
+            atlas_width = first_atlas.width;
+            atlas_height = first_atlas.height;
+            if (atlas_width <= 0 || atlas_height <= 0) {
+                throw std::runtime_error("lightmap atlas has invalid dimensions");
+            }
+
+            if (static_cast<size_t>(atlas_width) >
+                std::numeric_limits<size_t>::max() / static_cast<size_t>(atlas_height)) {
+                throw std::runtime_error("lightmap atlas dimensions overflow the addressable range");
+            }
+            const size_t expected_samples = static_cast<size_t>(atlas_width) * static_cast<size_t>(atlas_height);
+            for (const auto &[style_index, style_atlas] : lightmap.style_to_lightmap_atlas) {
+                if (style_atlas.width != atlas_width || style_atlas.height != atlas_height) {
+                    throw std::runtime_error(
+                        fmt::format("lightmap style {} has inconsistent atlas dimensions", style_index));
+                }
+                const size_t actual_samples =
+                    m_is_hdr_lightmap ? style_atlas.e5brg9_samples.size() : style_atlas.rgba8_samples.size();
+                if (actual_samples != expected_samples) {
+                    throw std::runtime_error(fmt::format("lightmap style {} has {} samples; expected {}", style_index,
+                        actual_samples, expected_samples));
+                }
+            }
         }
-        lightmap_texture->setLayers(highest_depth + 1);
+
+        validate_texture_dimensions(
+            static_cast<uint32_t>(atlas_width), static_cast<uint32_t>(atlas_height), "lightmap atlas");
+        const int atlas_layers = std::max(1, static_cast<int>(lightmap.style_to_lightmap_atlas.size()));
+        if (max_array_layers > 0 && atlas_layers > max_array_layers) {
+            throw std::runtime_error(fmt::format("lightmap atlas {}x{}x{} exceeds this GPU's texture-array limits",
+                atlas_width, atlas_height, atlas_layers));
+        }
+
+        lightmap_texture = std::make_shared<QOpenGLTexture>(QOpenGLTexture::Target2DArray);
+        lightmap_texture->setSize(atlas_width, atlas_height);
+        lightmap_texture->setLayers(atlas_layers);
         if (m_is_hdr_lightmap)
             lightmap_texture->setFormat(QOpenGLTexture::TextureFormat::RGB9E5);
         else
@@ -1522,12 +1781,13 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         lightmap_texture->setMinificationFilter(QOpenGLTexture::Linear);
         lightmap_texture->allocateStorage();
 
-        for (auto &[style_index, style_atlas] : lightmap.style_to_lightmap_atlas) {
+        for (const auto &[style_index, style_atlas] : lightmap.style_to_lightmap_atlas) {
+            const int layer = light_style_layers.at(style_index);
             if (m_is_hdr_lightmap) {
-                lightmap_texture->setData(0, style_index, QOpenGLTexture::RGB, QOpenGLTexture::UInt32_RGB9_E5,
+                lightmap_texture->setData(0, layer, QOpenGLTexture::RGB, QOpenGLTexture::UInt32_RGB9_E5,
                     reinterpret_cast<const void *>(style_atlas.e5brg9_samples.data()));
             } else {
-                lightmap_texture->setData(0, style_index, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
+                lightmap_texture->setData(0, layer, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
                     reinterpret_cast<const void *>(style_atlas.rgba8_samples.data()));
             }
         }
@@ -1543,7 +1803,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         placeholder_texture->setMinificationFilter(QOpenGLTexture::Linear);
         placeholder_texture->allocateStorage();
 
-        uint8_t *data = new uint8_t[64 * 64 * 4];
+        std::array<uint8_t, 64 * 64 * 4> data{};
         for (int y = 0; y < 64; ++y) {
             for (int x = 0; x < 64; ++x) {
                 int i = ((y * 64) + x) * 4;
@@ -1562,14 +1822,14 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
             }
         }
         placeholder_texture->setData(
-            0, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, reinterpret_cast<const void *>(data));
-        delete[] data;
+            0, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, reinterpret_cast<const void *>(data.data()));
     }
 
     struct face_payload
     {
         const mface_t *face;
         qvec3d model_offset;
+        size_t model_index;
     };
 
     // collect faces grouped by material_key
@@ -1577,30 +1837,53 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
 
     bool needs_skybox = false;
 
+    std::unordered_map<size_t, qvec3f> bmodel_origins;
+    bmodel_origins.reserve(entities.size());
+    for (const entdict_t &entity : entities) {
+        const std::string &model = entity.get("model");
+        if (model.size() < 2 || model.front() != '*') {
+            continue;
+        }
+
+        size_t model_index = 0;
+        const char *begin = model.data() + 1;
+        const char *end = model.data() + model.size();
+        const auto [parsed_end, error] = std::from_chars(begin, end, model_index);
+        if (error != std::errc{} || parsed_end != end || model_index == 0) {
+            continue;
+        }
+
+        qvec3f origin{};
+        entity.get_vector("origin", origin);
+        bmodel_origins.try_emplace(model_index, origin);
+    }
+
     // collect entity bmodels
-    for (int mi = 0; mi < bsp.dmodels.size(); mi++) {
+    for (size_t mi = 0; mi < bsp.dmodels.size(); ++mi) {
         qvec3f origin{};
 
         if (mi != 0) {
-            // find matching entity
-            std::string modelStr = fmt::format("*{}", mi);
-            bool found = false;
-
-            for (auto &ent : entities) {
-                if (ent.get("model") == modelStr) {
-                    found = true;
-                    ent.get_vector("origin", origin);
-                    break;
-                }
-            }
-
-            if (!found)
+            const auto origin_it = bmodel_origins.find(mi);
+            if (origin_it == bmodel_origins.end())
                 continue;
+            origin = origin_it->second;
         }
 
-        auto &m = bsp.dmodels[mi];
+        const auto &m = bsp.dmodels[mi];
+        if (m.firstface < 0 || m.numfaces < 0) {
+            logging::print("warning, model {} has a negative face range; skipping it\n", mi);
+            continue;
+        }
 
-        for (int i = m.firstface; i < m.firstface + m.numfaces; ++i) {
+        const size_t first_face = static_cast<size_t>(m.firstface);
+        const size_t num_faces = static_cast<size_t>(m.numfaces);
+        if (first_face > bsp.dfaces.size() || num_faces > bsp.dfaces.size() - first_face ||
+            (num_faces != 0 && first_face + num_faces - 1 > static_cast<size_t>(std::numeric_limits<int>::max()))) {
+            logging::print("warning, model {} has a face range outside the BSP; skipping it\n", mi);
+            continue;
+        }
+
+        for (size_t i = first_face; i < first_face + num_faces; ++i) {
             auto &f = bsp.dfaces[i];
             std::string t = Face_TextureName(&bsp, &f);
             if (f.numedges < 3)
@@ -1610,7 +1893,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
             if (!texinfo)
                 continue; // FIXME: render as checkerboard?
 
-            m_facesByTexture[t].push_back(i);
+            m_facesByTexture[t].push_back(static_cast<int>(i));
 
             QOpenGLShaderProgram *program = m_program;
 
@@ -1646,7 +1929,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
             }
 
             material_key k = {.program = program, .texname = t, .opacity = opacity, .alpha_test = alpha_test};
-            faces_by_material_key[k].push_back({.face = &f, .model_offset = origin});
+            faces_by_material_key[k].push_back({.face = &f, .model_offset = origin, .model_index = mi});
         }
     }
 
@@ -1656,95 +1939,69 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         // load skybox
         std::string skybox = "unit1_"; // TODO: game-specific defaults
 
-        if (entities[0].has("sky")) {
+        if (!entities.empty() && entities[0].has("sky")) {
             skybox = entities[0].get("sky");
         }
 
+        auto load_skybox_image = [&](std::string_view suffix) {
+            auto load_result = img::load_texture(
+                fmt::format("env/{}{}", skybox, suffix), false, bsp.loadversion->game, settings, true);
+            const auto &loaded = std::get<0>(load_result);
+            if (!loaded || loaded->width == 0 || loaded->height == 0 ||
+                loaded->width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+                loaded->height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+                loaded->pixels.size() < static_cast<size_t>(loaded->width) * loaded->height) {
+                return QImage{};
+            }
+
+            // Detach the QImage from the temporary texture before returning it.
+            return QImage(reinterpret_cast<const uchar *>(loaded->pixels.data()), static_cast<int>(loaded->width),
+                static_cast<int>(loaded->height), QImage::Format_RGBA8888)
+                .copy();
+        };
+
+        std::array<QImage, 6> skybox_images = {load_skybox_image("up"), load_skybox_image("dn"),
+            load_skybox_image("lf"), load_skybox_image("rt"), load_skybox_image("ft"), load_skybox_image("bk")};
+
+        skybox_images[0] = FlipImage(skybox_images[0].transformed(QTransform().rotate(-90.0)), false, true);
+        skybox_images[1] = FlipImage(skybox_images[1].transformed(QTransform().rotate(90.0)), true, false);
+        skybox_images[2] = FlipImage(skybox_images[2].transformed(QTransform().rotate(-90.0)), true, false);
+        skybox_images[3] = FlipImage(skybox_images[3].transformed(QTransform().rotate(90.0)), true, false);
+        skybox_images[4] = FlipImage(skybox_images[4], true, false);
+        skybox_images[5] = FlipImage(skybox_images[5].transformed(QTransform().rotate(-180.0)), true, false);
+
+        const QSize skybox_size = skybox_images[0].size();
+        const bool complete_skybox =
+            !skybox_size.isEmpty() && std::ranges::all_of(skybox_images, [&](const QImage &image) {
+                return !image.isNull() && image.size() == skybox_size;
+            });
+        if (!complete_skybox) {
+            logging::print(
+                "warning, skybox '{}' is missing or has inconsistent face dimensions; using a fallback\n", skybox);
+            for (QImage &image : skybox_images) {
+                image = QImage(1, 1, QImage::Format_RGBA8888);
+                image.fill(QColor(32, 32, 32, 255));
+            }
+        }
+        validate_texture_dimensions(static_cast<uint32_t>(skybox_images[0].width()),
+            static_cast<uint32_t>(skybox_images[0].height()), "skybox");
+
         skybox_texture = std::make_shared<QOpenGLTexture>(QOpenGLTexture::TargetCubeMap);
+        skybox_texture->setSize(skybox_images[0].width(), skybox_images[0].height());
+        skybox_texture->setFormat(QOpenGLTexture::TextureFormat::RGBA8_UNorm);
+        skybox_texture->setAutoMipMapGenerationEnabled(true);
+        skybox_texture->setMagnificationFilter(m_filter);
+        skybox_texture->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
+        skybox_texture->setMaximumAnisotropy(16);
+        skybox_texture->allocateStorage();
+        skybox_texture->setWrapMode(QOpenGLTexture::ClampToEdge);
 
-        {
-            QImage up_img;
-            {
-                auto up =
-                    img::load_texture(fmt::format("env/{}up", skybox), false, bsp.loadversion->game, settings, true);
-                up_img = QImage((const uchar *)std::get<0>(up)->pixels.data(), std::get<0>(up)->width,
-                    std::get<0>(up)->height, QImage::Format_RGB32);
-                up_img = std::move(up_img.transformed(QTransform().rotate(-90.0)).mirrored(false, true));
-            }
-
-            skybox_texture->setSize(up_img.width(), up_img.height());
-            skybox_texture->setFormat(QOpenGLTexture::TextureFormat::RGBA8_UNorm);
-            skybox_texture->setAutoMipMapGenerationEnabled(true);
-            skybox_texture->setMagnificationFilter(m_filter);
-            skybox_texture->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
-            skybox_texture->setMaximumAnisotropy(16);
-            skybox_texture->allocateStorage();
-
-            skybox_texture->setWrapMode(QOpenGLTexture::ClampToEdge);
-
-            skybox_texture->setData(0, 0, QOpenGLTexture::CubeMapPositiveZ, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                up_img.constBits(), nullptr);
-        }
-        {
-            QImage down_img;
-            {
-                auto down =
-                    img::load_texture(fmt::format("env/{}dn", skybox), false, bsp.loadversion->game, settings, true);
-                down_img = QImage((const uchar *)std::get<0>(down)->pixels.data(), std::get<0>(down)->width,
-                    std::get<0>(down)->height, QImage::Format_RGB32);
-                down_img = std::move(down_img.transformed(QTransform().rotate(90.0)).mirrored(true, false));
-            }
-
-            skybox_texture->setData(0, 0, QOpenGLTexture::CubeMapNegativeZ, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                down_img.constBits(), nullptr);
-        }
-        {
-            QImage left_img;
-            {
-                auto left =
-                    img::load_texture(fmt::format("env/{}lf", skybox), false, bsp.loadversion->game, settings, true);
-                left_img = QImage((const uchar *)std::get<0>(left)->pixels.data(), std::get<0>(left)->width,
-                    std::get<0>(left)->height, QImage::Format_RGB32);
-                left_img = std::move(left_img.transformed(QTransform().rotate(-90.0)).mirrored(true, false));
-            }
-            skybox_texture->setData(0, 0, QOpenGLTexture::CubeMapNegativeX, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                left_img.constBits(), nullptr);
-        }
-        {
-            QImage right_img;
-            {
-                auto right =
-                    img::load_texture(fmt::format("env/{}rt", skybox), false, bsp.loadversion->game, settings, true);
-                right_img = QImage((const uchar *)std::get<0>(right)->pixels.data(), std::get<0>(right)->width,
-                    std::get<0>(right)->height, QImage::Format_RGB32);
-                right_img = std::move(right_img.transformed(QTransform().rotate(90.0)).mirrored(true, false));
-            }
-            skybox_texture->setData(0, 0, QOpenGLTexture::CubeMapPositiveX, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                right_img.constBits(), nullptr);
-        }
-        {
-            QImage front_img;
-            {
-                auto front =
-                    img::load_texture(fmt::format("env/{}ft", skybox), false, bsp.loadversion->game, settings, true);
-                front_img = QImage((const uchar *)std::get<0>(front)->pixels.data(), std::get<0>(front)->width,
-                    std::get<0>(front)->height, QImage::Format_RGB32);
-                front_img = front_img.mirrored(true, false);
-            }
-            skybox_texture->setData(0, 0, QOpenGLTexture::CubeMapNegativeY, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                front_img.constBits(), nullptr);
-        }
-        {
-            QImage back_img;
-            {
-                auto back =
-                    img::load_texture(fmt::format("env/{}bk", skybox), false, bsp.loadversion->game, settings, true);
-                back_img = QImage((const uchar *)std::get<0>(back)->pixels.data(), std::get<0>(back)->width,
-                    std::get<0>(back)->height, QImage::Format_RGB32);
-                back_img = std::move(back_img.transformed(QTransform().rotate(-180.0)).mirrored(true, false));
-            }
-            skybox_texture->setData(0, 0, QOpenGLTexture::CubeMapPositiveY, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                back_img.constBits(), nullptr);
+        constexpr std::array<QOpenGLTexture::CubeMapFace, 6> cube_faces = {QOpenGLTexture::CubeMapPositiveZ,
+            QOpenGLTexture::CubeMapNegativeZ, QOpenGLTexture::CubeMapNegativeX, QOpenGLTexture::CubeMapPositiveX,
+            QOpenGLTexture::CubeMapNegativeY, QOpenGLTexture::CubeMapPositiveY};
+        for (size_t i = 0; i < skybox_images.size(); ++i) {
+            skybox_texture->setData(0, 0, cube_faces[i], QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
+                skybox_images[i].constBits(), nullptr);
         }
     }
 
@@ -1756,11 +2013,33 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         qvec2f lightmap_uv;
         qvec3f normal;
         qvec3f flat_color;
-        uint32_t styles;
+        std::array<uint32_t, 4> styles;
         int32_t face_index;
+        uint32_t style_count;
     };
     std::vector<vertex_t> verts;
     std::vector<uint32_t> indexBuffer;
+
+    size_t total_vertices = 0;
+    size_t total_indices = 0;
+    for (const auto &entry : faces_by_material_key) {
+        const auto &faces = entry.second;
+        for (const face_payload &payload : faces) {
+            const size_t face_vertices = static_cast<size_t>(payload.face->numedges);
+            const size_t face_indices = (face_vertices - 2) * 3;
+            if (face_vertices >
+                    static_cast<size_t>(std::numeric_limits<int>::max()) / sizeof(vertex_t) - total_vertices ||
+                face_indices >
+                    static_cast<size_t>(std::numeric_limits<int>::max()) / sizeof(uint32_t) - total_indices) {
+                throw std::runtime_error("BSP geometry is too large for a Qt OpenGL buffer");
+            }
+            total_vertices += face_vertices;
+            total_indices += face_indices;
+        }
+    }
+    verts.reserve(total_vertices);
+    indexBuffer.reserve(total_indices);
+    m_drawcalls.reserve(faces_by_material_key.size());
 
     for (const auto &[k, faces] : faces_by_material_key) {
         // upload texture
@@ -1771,14 +2050,10 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         if (!texture) {
             logging::print("warning, couldn't locate {}\n", k.texname);
             qtexture = placeholder_texture;
-        }
-
-        if (!texture->width || !texture->height) {
+        } else if (!texture->width || !texture->height) {
             logging::print("warning, empty texture {}\n", k.texname);
             qtexture = placeholder_texture;
-        }
-
-        if (texture->pixels.empty()) {
+        } else if (texture->pixels.empty()) {
             logging::print("warning, empty texture pixels {}\n", k.texname);
             qtexture = placeholder_texture;
         }
@@ -1789,7 +2064,9 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
             qtexture = skybox_texture;
         }
 
-        for (const auto &[f, model_offset] : faces) {
+        for (const face_payload &face_payload : faces) {
+            const auto *f = face_payload.face;
+            const auto &model_offset = face_payload.model_offset;
             const int fnum = Face_GetNum(&bsp, f);
             const auto plane_normal = Face_Normal(&bsp, f);
             qvec3f flat_color = qvec3f{Random(), Random(), Random()};
@@ -1799,7 +2076,24 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
 
             const size_t first_vertex_of_face = verts.size();
 
-            const auto lm_uvs = lightmap.facenum_to_lightmap_uvs.at(fnum);
+            const auto lightmap_uvs_it = lightmap.facenum_to_lightmap_uvs.find(fnum);
+            if (lightmap_uvs_it != lightmap.facenum_to_lightmap_uvs.end() &&
+                lightmap_uvs_it->second.size() < static_cast<size_t>(f->numedges)) {
+                throw std::runtime_error(fmt::format("face {} has {} lightmap coordinates for {} vertices", fnum,
+                    lightmap_uvs_it->second.size(), f->numedges));
+            }
+
+            if (facenormals && (static_cast<size_t>(fnum) >= facenormals->per_face.size() ||
+                                   facenormals->per_face[static_cast<size_t>(fnum)].per_vert.size() <
+                                       static_cast<size_t>(f->numedges))) {
+                throw std::runtime_error(fmt::format("face {} has incomplete BSPX normal data", fnum));
+            }
+
+            hub::packed_light_styles_t packed_styles;
+            if (const auto packed_styles_it = packed_face_styles.find(fnum);
+                packed_styles_it != packed_face_styles.end()) {
+                packed_styles = packed_styles_it->second;
+            }
 
             // output a vertex for each vertex of the face
             for (int j = 0; j < f->numedges; ++j) {
@@ -1809,16 +2103,23 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
                 if (qtexture) {
                     uv[0] *= (1.0 / qtexture->width());
                     uv[1] *= (1.0 / qtexture->height());
-                } else {
+                } else if (texture) {
                     uv[0] *= (1.0 / texture->width);
                     uv[1] *= (1.0 / texture->height);
                 }
 
-                qvec2f lightmap_uv = lm_uvs.at(j);
+                qvec2f lightmap_uv{};
+                if (lightmap_uvs_it != lightmap.facenum_to_lightmap_uvs.end()) {
+                    lightmap_uv = lightmap_uvs_it->second[static_cast<size_t>(j)];
+                }
 
                 qvec3f vertex_normal;
                 if (facenormals) {
-                    auto normal_index = facenormals->per_face[fnum].per_vert[j].normal;
+                    const auto normal_index = facenormals->per_face[fnum].per_vert[j].normal;
+                    if (normal_index >= facenormals->normals.size()) {
+                        throw std::runtime_error(
+                            fmt::format("face {} references invalid BSPX normal {}", fnum, normal_index));
+                    }
                     vertex_normal = facenormals->normals[normal_index];
                 } else {
                     vertex_normal = plane_normal;
@@ -1829,9 +2130,9 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
                     .lightmap_uv = lightmap_uv,
                     .normal = vertex_normal,
                     .flat_color = flat_color,
-                    .styles = (uint32_t)(f->styles[0]) | (uint32_t)(f->styles[1] << 8) |
-                              (uint32_t)(f->styles[2] << 16) | (uint32_t)(f->styles[3] << 24),
-                    .face_index = fnum});
+                    .styles = packed_styles.words,
+                    .face_index = fnum,
+                    .style_count = packed_styles.count});
             }
 
             // output the vertex indices for this face
@@ -1843,6 +2144,17 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         }
 
         if (!qtexture) {
+            validate_texture_dimensions(texture->width, texture->height, "map texture");
+            if (static_cast<size_t>(texture->width) >
+                std::numeric_limits<size_t>::max() / static_cast<size_t>(texture->height)) {
+                throw std::runtime_error(
+                    fmt::format("texture {} dimensions overflow the addressable range", k.texname));
+            }
+            const size_t expected_pixels = static_cast<size_t>(texture->width) * texture->height;
+            if (texture->pixels.size() != expected_pixels) {
+                throw std::runtime_error(fmt::format(
+                    "texture {} has {} pixels; expected {}", k.texname, texture->pixels.size(), expected_pixels));
+            }
             qtexture = std::make_shared<QOpenGLTexture>(QOpenGLTexture::Target2D);
 
             int mipLevels = GetMipLevelsForDimensions(texture->width, texture->height);
@@ -1861,7 +2173,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
                 QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, reinterpret_cast<const void *>(texture->pixels.data()));
         }
 
-        const size_t dc_index_count = indexBuffer.size() - dc_first_index;
+        const int dc_index_count = static_cast<int>(indexBuffer.size() - dc_first_index);
 
         drawcall_t dc = {
             .key = k, .texture = std::move(qtexture), .first_index = dc_first_index, .index_count = dc_index_count};
@@ -1869,12 +2181,13 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
     }
 
     // populate spatial index
-    for (const auto &[k, faces] : faces_by_material_key) {
+    for (const auto &entry : faces_by_material_key) {
+        const auto &faces = entry.second;
         for (const face_payload &facePayload : faces) {
             int face_num = Face_GetNum(&bsp, facePayload.face);
-
-            // FIXME: face offset
-            m_spatialindex->add_poly(Face_Winding(&bsp, facePayload.face), std::make_any<int>(face_num));
+            const uint32_t geometry_mask = facePayload.model_index == 0 ? GEOM_MASK_WORLD : GEOM_MASK_BMODEL;
+            const auto world_winding = Face_Winding(&bsp, facePayload.face).translate(facePayload.model_offset);
+            m_spatialindex->add_poly(world_winding, std::make_any<int>(face_num), geometry_mask);
         }
     }
     m_spatialindex->commit();
@@ -1885,12 +2198,12 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         // upload index buffer
         m_indexBuffer.create();
         m_indexBuffer.bind();
-        m_indexBuffer.allocate(indexBuffer.data(), indexBuffer.size() * sizeof(indexBuffer[0]));
+        m_indexBuffer.allocate(indexBuffer.data(), OpenGLBufferByteSize(indexBuffer, "BSP index data"));
 
         // upload vertex buffer
         m_vbo.create();
         m_vbo.bind();
-        m_vbo.allocate(verts.data(), verts.size() * sizeof(verts[0]));
+        m_vbo.allocate(verts.data(), OpenGLBufferByteSize(verts, "BSP vertex data"));
 
         // positions
         glEnableVertexAttribArray(0 /* attrib */);
@@ -1918,11 +2231,16 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         // styles
         glEnableVertexAttribArray(5 /* attrib */);
         glVertexAttribIPointer(
-            5 /* attrib */, 1, GL_UNSIGNED_INT, sizeof(vertex_t), (void *)offsetof(vertex_t, styles));
+            5 /* attrib */, 4, GL_UNSIGNED_INT, sizeof(vertex_t), (void *)offsetof(vertex_t, styles));
 
         // face indices
         glEnableVertexAttribArray(6 /* attrib */);
         glVertexAttribIPointer(6 /* attrib */, 1, GL_INT, sizeof(vertex_t), (void *)offsetof(vertex_t, face_index));
+
+        // number of valid packed style layers
+        glEnableVertexAttribArray(7 /* attrib */);
+        glVertexAttribIPointer(
+            7 /* attrib */, 1, GL_UNSIGNED_INT, sizeof(vertex_t), (void *)offsetof(vertex_t, style_count));
     }
 
     // initialize style values
@@ -1931,6 +2249,12 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         m_program->setUniformValue(m_program_style_scalars_location + i, 1.f);
     }
     m_program->release();
+
+    m_skybox_program->bind();
+    for (int i = 0; i < 256; i++) {
+        m_skybox_program->setUniformValue(m_skybox_program_style_scalars_location + i, 1.f);
+    }
+    m_skybox_program->release();
 
     m_program_lightgrid->bind();
     for (int i = 0; i < 256; i++) {
@@ -1958,7 +2282,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
 
         m_frustumVbo.create();
         m_frustumVbo.bind();
-        m_frustumVbo.allocate(corners.data(), corners.size() * sizeof(QVector3D));
+        m_frustumVbo.allocate(corners.data(), OpenGLBufferByteSize(corners, "frustum vertex data"));
 
         glEnableVertexAttribArray(0 /* attrib */);
         glVertexAttribPointer(0 /* attrib */, 3, GL_FLOAT, GL_FALSE, sizeof(QVector3D), 0);
@@ -1999,30 +2323,36 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         std::ifstream f(leakFile);
         std::vector<simple_vertex_t> points;
 
-        while (!f.eof()) {
-            std::string line;
-            std::getline(f, line);
-
-            if (line.empty()) {
-                break;
+        std::string line;
+        while (std::getline(f, line)) {
+            const auto split = QString::fromStdString(line).split(' ', Qt::SkipEmptyParts);
+            if (split.size() < 3) {
+                continue;
             }
 
-            auto s = QString::fromStdString(line);
-            auto split = s.split(' ');
+            bool x_ok = false;
+            bool y_ok = false;
+            bool z_ok = false;
+            const double x = split[0].toDouble(&x_ok);
+            const double y = split[1].toDouble(&y_ok);
+            const double z = split[2].toDouble(&z_ok);
+            if (!x_ok || !y_ok || !z_ok || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+                continue;
+            }
 
-            double x = split[0].toDouble();
-            double y = split[1].toDouble();
-            double z = split[2].toDouble();
+            if (points.size() == static_cast<size_t>(std::numeric_limits<int>::max()) / sizeof(simple_vertex_t)) {
+                throw std::runtime_error("leak point data is too large for a Qt OpenGL buffer");
+            }
 
-            points.push_back(simple_vertex_t{qvec3f{(float)x, (float)y, (float)z}});
-
-            num_leak_points++;
+            points.push_back(
+                simple_vertex_t{qvec3f{static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)}});
         }
-
         // upload vertex buffer
         m_leakVbo.create();
         m_leakVbo.bind();
-        m_leakVbo.allocate(points.data(), points.size() * sizeof(points[0]));
+        const int leak_point_bytes = OpenGLBufferByteSize(points, "leak point data");
+        num_leak_points = static_cast<int>(points.size());
+        m_leakVbo.allocate(points.data(), leak_point_bytes);
 
         // positions
         glEnableVertexAttribArray(0 /* attrib */);
@@ -2037,18 +2367,28 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         QOpenGLVertexArrayObject::Binder portalVaoBinder(&m_portalVao);
 
         auto prt = LoadPrtFile(portalFile, bsp.loadversion);
-        m_portalCount = static_cast<int>(prt.portals.size());
+        m_portalCount = prt.portals.size();
         std::vector<GLuint> indices;
         std::vector<simple_vertex_t> points;
 
-        [[maybe_unused]] size_t total_points = 0;
-        [[maybe_unused]] size_t total_indices = 0;
-        size_t current_index = 0;
+        size_t total_points = 0;
+        size_t total_indices = 0;
+        const size_t max_points = static_cast<size_t>(std::numeric_limits<int>::max()) / sizeof(simple_vertex_t);
+        const size_t max_indices = static_cast<size_t>(std::numeric_limits<int>::max()) / sizeof(GLuint);
+        for (const auto &portal : prt.portals) {
+            const size_t portal_points = portal.winding.size();
+            if (portal_points > max_points - total_points || portal_points >= max_indices - total_indices) {
+                throw std::runtime_error("portal geometry is too large for a Qt OpenGL buffer");
+            }
+            total_points += portal_points;
+            total_indices += portal_points + 1;
+        }
+        points.reserve(total_points);
+        indices.reserve(total_indices);
+
+        GLuint current_index = 0;
 
         for (auto &portal : prt.portals) {
-            total_points += portal.winding.size();
-            total_indices += portal.winding.size() + 1;
-
             for (auto &pt : portal.winding) {
                 indices.push_back(current_index++);
                 points.push_back(simple_vertex_t{qvec3f{pt}});
@@ -2060,14 +2400,14 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         // upload index buffer
         m_portalIndexBuffer.create();
         m_portalIndexBuffer.bind();
-        m_portalIndexBuffer.allocate(indices.data(), indices.size() * sizeof(indices[0]));
+        m_portalIndexBuffer.allocate(indices.data(), OpenGLBufferByteSize(indices, "portal index data"));
 
-        num_portal_indices = indices.size();
+        num_portal_indices = static_cast<int>(indices.size());
 
         // upload vertex buffer
         m_portalVbo.create();
         m_portalVbo.bind();
-        m_portalVbo.allocate(points.data(), points.size() * sizeof(points[0]));
+        m_portalVbo.allocate(points.data(), OpenGLBufferByteSize(points, "portal vertex data"));
 
         // positions
         glEnableVertexAttribArray(0 /* attrib */);
@@ -2122,9 +2462,9 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         // upload index buffer
         vao.indexBuffer.create();
         vao.indexBuffer.bind();
-        vao.indexBuffer.allocate(indices.data(), indices.size() * sizeof(indices[0]));
+        vao.indexBuffer.allocate(indices.data(), OpenGLBufferByteSize(indices, "leaf hull index data"));
 
-        vao.num_indices = indices.size();
+        vao.num_indices = static_cast<int>(indices.size());
 
         logging::print(
             "set up leaf vao for {} with {} indices vao indices {}", hullnum, vao.num_indices, indices.size());
@@ -2132,7 +2472,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         // upload vertex buffer
         vao.vbo.create();
         vao.vbo.bind();
-        vao.vbo.allocate(points.data(), points.size() * sizeof(points[0]));
+        vao.vbo.allocate(points.data(), OpenGLBufferByteSize(points, "leaf hull vertex data"));
 
         // positions
         glEnableVertexAttribArray(0 /* attrib */);
@@ -2144,6 +2484,17 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
     {
         std::vector<GLuint> indices;
         std::vector<lightgridvertex_t> lightgrid_verts;
+        auto ensure_lightgrid_sample_capacity = [&]() {
+            constexpr size_t vertices_per_sample = 24;
+            constexpr size_t indices_per_sample = 36;
+            const size_t max_vertices =
+                static_cast<size_t>(std::numeric_limits<int>::max()) / sizeof(lightgridvertex_t);
+            const size_t max_indices = static_cast<size_t>(std::numeric_limits<int>::max()) / sizeof(GLuint);
+            if (lightgrid_verts.size() > max_vertices - vertices_per_sample ||
+                indices.size() > max_indices - indices_per_sample) {
+                throw std::runtime_error("lightgrid geometry is too large for a Qt OpenGL buffer");
+            }
+        };
 
         if (auto octree = BSPX_LightgridOctree(bspx)) {
             for (const auto &leaf : octree->leafs) {
@@ -2156,6 +2507,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
                             if (sample.occluded)
                                 continue;
 
+                            ensure_lightgrid_sample_capacity();
                             m_lightgridSampleCount++;
 
                             const qvec3f world_pos = leaf.world_pos(octree->header, x, y, z);
@@ -2167,7 +2519,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
                                 const auto &winding = windings[side];
 
                                 // push the 4 verts
-                                int first_vert_idx = lightgrid_verts.size();
+                                const GLuint first_vert_idx = static_cast<GLuint>(lightgrid_verts.size());
 
                                 for (int i = 0; i < 4; ++i) {
                                     lightgridvertex_t v{};
@@ -2211,6 +2563,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
                                 if (sample.occluded)
                                     continue;
 
+                                ensure_lightgrid_sample_capacity();
                                 m_lightgridSampleCount++;
 
                                 const qvec3f world_pos = leaf.world_pos(lightgrid.header, x, y, z);
@@ -2227,7 +2580,7 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
                                     Q_assert(qvec3f(winding.plane().normal) == BSPX_LIGHTGRIDS_NORMAL_ORDER[side]);
 
                                     // push the 4 verts
-                                    int first_vert_idx = lightgrid_verts.size();
+                                    const GLuint first_vert_idx = static_cast<GLuint>(lightgrid_verts.size());
 
                                     for (int i = 0; i < 4; ++i) {
                                         lightgridvertex_t v;
@@ -2267,12 +2620,12 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
         // upload index buffer
         m_lightgridIndexBuffer.create();
         m_lightgridIndexBuffer.bind();
-        m_lightgridIndexBuffer.allocate(indices.data(), indices.size() * sizeof(indices[0]));
+        m_lightgridIndexBuffer.allocate(indices.data(), OpenGLBufferByteSize(indices, "lightgrid index data"));
 
         // upload vertex buffer
         m_lightgridVbo.create();
         m_lightgridVbo.bind();
-        m_lightgridVbo.allocate(lightgrid_verts.data(), lightgrid_verts.size() * sizeof(lightgrid_verts[0]));
+        m_lightgridVbo.allocate(lightgrid_verts.data(), OpenGLBufferByteSize(lightgrid_verts, "lightgrid vertex data"));
 
         // vertex attributes
         glEnableVertexAttribArray(0 /* attrib */);
@@ -2315,7 +2668,13 @@ void GLView::renderBSP(const QString &file, const mbsp_t &bsp, const bspxentries
             (void *)offsetof(lightgridvertex_t, style3));
     }
 
-    doneCurrent();
+    // Commit CPU state only after every validation and GL upload succeeded.
+    // MainWindow owns the underlying bspdata_t; this alias avoids copying its
+    // potentially very large immutable BSP lumps.
+    m_bsp = std::move(bsp_data);
+    m_decompressedVis = std::move(decompressed_vis);
+    m_lightStyleLayers = std::move(light_style_layers);
+    preview_committed = true;
 
     // schedule repaint
     update();
@@ -2333,13 +2692,13 @@ void GLView::updateFrustumVBO()
 
 void GLView::resizeGL(int width, int height)
 {
-    m_displayAspect = static_cast<float>(width) / static_cast<float>(height);
+    m_displayAspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
     updateFrustumVBO();
 }
 
 void GLView::clickFace(QMouseEvent *event)
 {
-    if (m_spatialindex->get_state() != state_t::tracing)
+    if (m_spatialindex->get_state() != state_t::tracing || width() <= 0 || height() <= 0)
         return;
 
     // convert to click x, y to NDC
@@ -2353,7 +2712,11 @@ void GLView::clickFace(QMouseEvent *event)
 
     const auto [modelMatrix, viewMatrix, projectionMatrix, MVP] = getMatrices();
 
-    QMatrix4x4 MVP_Inverse = MVP.inverted();
+    bool invertible = false;
+    QMatrix4x4 MVP_Inverse = MVP.inverted(&invertible);
+    if (!invertible) {
+        return;
+    }
 
     QVector4D ws = MVP_Inverse * QVector4D(x_ndc, y_ndc, z_ndc, 1.0f /* ??? */);
     QVector4D ws2 = MVP_Inverse * QVector4D(x_ndc, y_ndc, 1.0f /* far plane */, 1.0f /* ??? */);
@@ -2370,8 +2733,13 @@ void GLView::clickFace(QMouseEvent *event)
     // ray direction
     QVector3D ray_dir = (ws2_a - ws_a).normalized();
 
-    // trace a ray
-    auto hit = m_spatialindex->trace_ray(qvec3f(ws_a[0], ws_a[1], ws_a[2]), qvec3f(ray_dir[0], ray_dir[1], ray_dir[2]));
+    // Match hit testing to the bmodel visibility toggle.
+    uint32_t ray_mask = GEOM_MASK_WORLD;
+    if (m_showBmodels) {
+        ray_mask |= GEOM_MASK_BMODEL;
+    }
+    auto hit = m_spatialindex->trace_ray(
+        qvec3f(ws_a[0], ws_a[1], ws_a[2]), qvec3f(ray_dir[0], ray_dir[1], ray_dir[2]), ray_mask);
 
     const int previous_selection = m_selected_face;
     if (hit.hit) {
@@ -2402,7 +2770,7 @@ void GLView::clickFace(QMouseEvent *event)
         // upload vertex buffer
         m_clickVbo.create();
         m_clickVbo.bind();
-        m_clickVbo.allocate(points.data(), points.size() * sizeof(points[0]));
+        m_clickVbo.allocate(points.data(), OpenGLBufferByteSize(points, "selection ray data"));
 
         // positions
         glEnableVertexAttribArray(0 /* attrib */);
@@ -2441,7 +2809,10 @@ void GLView::applyMouseMotion()
     mouseRotation.rotate(yawDegrees, QVector3D(0, 0, 1));
 
     // now rotate m_cameraFwd and m_cameraUp by mouseRotation
-    m_cameraFwd = mouseRotation * m_cameraFwd;
+    if (!qFuzzyIsNull(delta.x()) || !qFuzzyIsNull(delta.y())) {
+        m_cameraFwd = mouseRotation.map(m_cameraFwd).normalized();
+        emit cameraMoved();
+    }
 }
 
 static keys_t Qt_Key_To_keys_t(int key)
@@ -2481,6 +2852,13 @@ void GLView::keyReleaseEvent(QKeyEvent *event)
     keys_t key = Qt_Key_To_keys_t(event->key());
 
     m_keysPressed &= ~static_cast<uint32_t>(key);
+}
+
+void GLView::focusOutEvent(QFocusEvent *event)
+{
+    m_keysPressed = 0;
+    m_lastMouseDownPos.reset();
+    QOpenGLWidget::focusOutEvent(event);
 }
 
 void GLView::wheelEvent(QWheelEvent *event)
@@ -2538,4 +2916,3 @@ qvec3f GLView::cameraForward() const
 {
     return qvec3f{m_cameraFwd[0], m_cameraFwd[1], m_cameraFwd[2]};
 }
-

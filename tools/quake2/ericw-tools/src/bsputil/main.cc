@@ -19,11 +19,16 @@
 
 #include <bsputil/bsputil.hh>
 #include <common/log.hh>
+#include <common/settings.hh>
 
 int main(int argc, const char **argv)
 {
+    logging::preinitialize();
+
     try {
         return bsputil_main(argc, argv);
+    } catch (const settings::quit_after_help_exception &e) {
+        return e.exit_code();
     } catch (const std::exception &e) {
         exit_on_exception(e);
     }

@@ -152,28 +152,9 @@ static bool Welds(contentflags_t a, contentflags_t b)
     if (a.types_equal(b))
         return true;
 
-    // detail brushes never weld with non-detail brushes, or detail brushes
-    // of a different type.
-    if (a.is_any_detail() || b.is_any_detail()) {
-        if (!a.types_equal(b)) {
-            // New option: allow detail to weld against solid if requested
-            if (qbsp_options.tjunc_detail.value()) {
-                /*
-                 * Logic:
-                 * If one is detail and the other is solid, we allow it.
-                 * If both are detail but different types, we still reject (e.g. fence vs illusionary)
-                 */
-                bool a_is_solid = !a.is_any_detail();
-                bool b_is_solid = !b.is_any_detail();
-
-                // if one is solid and the other is detail, allow it
-                if (a_is_solid || b_is_solid) {
-                    return true;
-                }
-            }
-            return false;
-        }
-    }
+    // detail wall only welds with detail wall
+    if (a.is_detail_wall() || b.is_detail_wall())
+        return false;
 
     // no need to weld translucent to opaque
     // (because they could have void behind them due to visblocking.

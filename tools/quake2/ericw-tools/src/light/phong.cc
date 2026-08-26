@@ -34,10 +34,8 @@
 #include <unordered_map>
 #include <set>
 #include <algorithm>
-#include <mutex>
 
 #include <common/qvec.hh>
-#include <tbb/parallel_for_each.h>
 
 face_cache_t::face_cache_t() { };
 
@@ -179,7 +177,10 @@ static float AngleBetweenPoints(const qvec3f &p1, const qvec3f &p2, const qvec3f
 }
 
 static bool s_builtPhongCaches;
-static std::unordered_map<const mface_t *, std::vector<face_normal_t>> vertex_normals;
+// Indexed by BSP face number. Vertex normals are produced independently per
+// face, so a dense table avoids both a hash lookup in the sampling hot path
+// and a mutex around parallel construction.
+static std::vector<std::vector<face_normal_t>> vertex_normals;
 static std::map<const mface_t *, std::set<const mface_t *>> smoothFaces;
 static std::map<int, std::vector<const mface_t *>> vertsToFaces;
 static std::map<int, std::vector<const mface_t *>> planesToFaces;
@@ -278,13 +279,12 @@ const face_normal_t &GetSurfaceVertexNormal(const mbsp_t *bsp, const mface_t *f,
     Q_assert(s_builtPhongCaches);
 
     // handle degenerate faces
-    const auto it = vertex_normals.find(f);
-    if (it == vertex_normals.end()) {
+    const int facenum = Face_GetNum(bsp, f);
+    if (facenum < 0 || static_cast<size_t>(facenum) >= vertex_normals.size() || vertex_normals[facenum].empty()) {
         static const face_normal_t empty{};
         return empty;
     }
-    const auto &face_normals_vec = it->second;
-    return face_normals_vec.at(vertindex);
+    return vertex_normals[facenum].at(vertindex);
 }
 
 const mface_t *Face_EdgeIndexSmoothed(const mbsp_t *bsp, const mface_t *f, const int edgeindex)
@@ -371,7 +371,11 @@ static edgeToFaceMap_t MakeEdgeToFaceMap(const mbsp_t *bsp)
 static std::vector<face_normal_t> Face_VertexNormals(const mbsp_t *bsp, const mface_t *face)
 {
     std::vector<face_normal_t> normals(face->numedges);
-    tbb::parallel_for(0, face->numedges, [&](size_t i) { normals[i] = GetSurfaceVertexNormal(bsp, face, i); });
+    // This runs inside the parallel face-cache build. Spawning another task
+    // group for the usual 3-4 vertices costs more than the copies themselves.
+    for (size_t i = 0; i < normals.size(); ++i) {
+        normals[i] = GetSurfaceVertexNormal(bsp, face, static_cast<int>(i));
+    }
     return normals;
 }
 
@@ -542,10 +546,12 @@ void CalculateVertexNormals(const mbsp_t *bsp)
 
     logging::print(logging::flag::VERBOSE, "        {} faces for smoothing\n", smoothFaces.size());
 
-    // finally do the smoothing for each face
-    std::mutex normalsMutex;
+    // Finally do the smoothing for each face. Every worker owns one slot, so
+    // construction needs no shared-map lock.
+    vertex_normals.clear();
+    vertex_normals.resize(bsp->dfaces.size());
 
-    logging::parallel_for_each(bsp->dfaces, [bsp, &normalsMutex](const mface_t &f) {
+    logging::parallel_for_each(bsp->dfaces, [bsp](const mface_t &f) {
         if (f.numedges < 3) {
             logging::funcprint("face {} is degenerate with {} edges\n", Face_GetNum(bsp, &f), f.numedges);
             for (int j = 0; j < f.numedges; j++) {
@@ -670,10 +676,7 @@ void CalculateVertexNormals(const mbsp_t *bsp)
             face_normals.push_back(smoothedNormals[v]);
         }
 
-        // Single lock for entire face instead of per-vertex
-        normalsMutex.lock();
-        vertex_normals[&f] = std::move(face_normals);
-        normalsMutex.unlock();
+        vertex_normals[Face_GetNum(bsp, &f)] = std::move(face_normals);
     });
 
     FaceCache = MakeFaceCache(bsp);

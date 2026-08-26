@@ -24,6 +24,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring> // for memcpy()
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,12 +41,16 @@ bool string_iequals(std::string_view a, std::string_view b); // mxd
 
 struct case_insensitive_hash
 {
-    std::size_t operator()(const std::string &s) const noexcept;
+    using is_transparent = void;
+
+    std::size_t operator()(std::string_view s) const noexcept;
 };
 
 struct case_insensitive_equal
 {
-    bool operator()(const std::string &l, const std::string &r) const noexcept;
+    using is_transparent = void;
+
+    bool operator()(std::string_view l, std::string_view r) const noexcept;
 };
 
 struct case_insensitive_less
@@ -571,8 +577,6 @@ public:
     omemsizebuf(std::ios_base::openmode which = std::ios_base::out);
 
 protected:
-    void setpptrs(char *first, char *next, char *end);
-
     // seek operations
     pos_type seekpos(pos_type off, std::ios_base::openmode which = std::ios_base::in | std::ios_base::out) override;
 
@@ -583,6 +587,10 @@ protected:
     std::streamsize xsputn(const char_type *s, std::streamsize n) override;
 
     int_type overflow(int_type ch) override;
+
+private:
+    off_type position_ = 0;
+    off_type size_ = 0;
 };
 
 struct omemsizestream : virtual omemsizebuf, std::ostream
@@ -596,13 +604,24 @@ uint16_t CRC_Block(const uint8_t *start, int count);
 
 std::vector<uint8_t> StringToVector(const std::string &str);
 
+// Copy into a fixed-size, zero-filled C string. Returns false when truncation
+// was required to leave room for the terminator.
+bool string_copy_to_array_z(std::string_view in, std::span<char> out);
+
+// Copy a fixed-size C string into std::string. Unterminated input is preserved
+// in full and reported through success_out.
+std::string string_copy_from_array_z(std::span<const char> in, bool *success_out);
+
 template<class T>
 T deserialize(const std::vector<uint8_t> &bytes)
 {
     auto stream = imemstream(bytes.data(), bytes.size());
     stream >> endianness<std::endian::little>;
 
-    T result;
+    T result{};
     stream >= result;
+    if (!stream) {
+        throw std::runtime_error("truncated serialized data");
+    }
     return result;
 }

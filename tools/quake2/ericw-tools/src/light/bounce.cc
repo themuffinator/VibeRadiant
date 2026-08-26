@@ -158,7 +158,11 @@ static bool MakeBounceLightsThread(
     // grab the average color across the whole set of lightmaps for this face.
     // this doesn't change regardless of the above settings.
     std::unordered_map<int, qvec3f> sum;
-    float sample_divisor = surf.lightmapsByStyle.front().samples.size();
+    const size_t lightmap_sample_count = surf.lightmapsByStyle.front().samples.size();
+    if (lightmap_sample_count == 0) {
+        return false;
+    }
+    const float sample_divisor = static_cast<float>(lightmap_sample_count);
 
     bool has_any_color = false;
 
@@ -229,8 +233,11 @@ bool MakeBounceLights(const settings::worldspawn_keys &cfg, const mbsp_t *bsp, s
 
     std::atomic_bool any_to_bounce = false;
 
-    logging::parallel_for_each(bsp->dfaces,
-        [&](const mface_t &face) { any_to_bounce = MakeBounceLightsThread(cfg, bsp, face, depth) || any_to_bounce; });
+    logging::parallel_for_each(bsp->dfaces, [&](const mface_t &face) {
+        if (MakeBounceLightsThread(cfg, bsp, face, depth)) {
+            any_to_bounce.store(true, std::memory_order_relaxed);
+        }
+    });
 
-    return any_to_bounce.load();
+    return any_to_bounce.load(std::memory_order_relaxed);
 }
