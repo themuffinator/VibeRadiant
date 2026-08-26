@@ -34,9 +34,14 @@ void ModelBrowser_pausePendingFilterApply();
 
 void ModelBrowser_flushReferences();
 void ModelBrowser_mapReady();
+void ModelBrowser_prepareForFileSystemReload();
+void ModelBrowser_fileSystemReady();
+void ModelBrowser_dependenciesReady();
 void ModelBrowser_beginReferenceRefresh();
 void ModelBrowser_endReferenceRefresh();
 bool ModelBrowser_canRefreshReferences();
+bool ModelBrowser_canRestart();
+void ModelBrowser_resumeDeferredWork();
 
 #include "math/vectorfwd.h"
 

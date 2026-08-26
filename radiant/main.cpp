@@ -914,6 +914,8 @@ public:
 		removeLocalPid();
 		removeGlobalPid();
 
+		BrowserLifecycle_prepareForShutdown();
+
 		if ( g_pParentWnd != nullptr ) {
 			delete g_pParentWnd;
 			g_pParentWnd = nullptr;

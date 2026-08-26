@@ -36,6 +36,7 @@
 
 #include "preferences.h"
 #include "mainframe.h"
+#include "entitybrowser.h"
 
 
 namespace
@@ -241,6 +242,7 @@ public:
 			//globalOutputStream() << "Entity Classes: realise\n";
 			EntityClassQuake3_Construct();
 			m_observers.realise();
+			EntityBrowser_entityClassesReady();
 		}
 	}
 	void unrealise() override{

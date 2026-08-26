@@ -27,6 +27,8 @@ void SaveReferences();
 void FlushReferences();
 /// \brief Reloads all resource references that differ from the version on disk.
 void RefreshReferences();
+bool RefreshReferences_processPending();
+void RefreshReferences_cancelPending();
 
 #include "iscenegraph.h"
 namespace scene

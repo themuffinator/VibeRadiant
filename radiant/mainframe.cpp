@@ -50,6 +50,7 @@
 #include <string_view>
 #include <set>
 #include <cctype>
+#include <utility>
 
 #include <QWidget>
 #include <QAbstractButton>
@@ -161,10 +162,12 @@ public:
 		if ( --m_unrealised == 0 ) {
 			QE_InitVFS();
 			GlobalFileSystem().initialise();
+			ModelBrowser_fileSystemReady();
 		}
 	}
 	void unrealise() override {
 		if ( ++m_unrealised == 1 ) {
+			ModelBrowser_prepareForFileSystemReload();
 			GlobalFileSystem().shutdown();
 		}
 	}
@@ -313,6 +316,118 @@ void HomePaths_Destroy(){
 CopiedString g_strEnginePath;
 ModuleObservers g_enginePathObservers;
 std::size_t g_enginepath_unrealised = 1;
+bool g_radiantInitialising = false;
+
+namespace
+{
+struct PendingPathChange
+{
+	CopiedString* target;
+	CopiedString value;
+	std::size_t requestGeneration;
+};
+
+std::vector<PendingPathChange> g_pendingPathChanges;
+CopiedString g_pendingGameName;
+CopiedString g_pendingGameMode;
+bool g_pendingGameNameChange = false;
+bool g_pendingGameNameConfirmed = false;
+bool g_pendingGameNameConfirmationInProgress = false;
+bool g_pendingGameModeChange = false;
+bool g_browserModuleTransitionInProgress = false;
+bool g_radiantShuttingDown = false;
+bool g_deferredBrowserActionsScheduled = false;
+bool g_restartPending = false;
+bool g_restartInProgress = false;
+std::size_t g_deferredBrowserActionsGeneration = 0;
+std::size_t g_pendingPathRequestGeneration = 0;
+std::size_t g_pendingGameNameRequestGeneration = 0;
+std::size_t g_pendingGameModeRequestGeneration = 0;
+
+void BrowserLifecycle_tryDeferredActions();
+
+void BrowserLifecycle_cancelDeferredActions(){
+	++g_deferredBrowserActionsGeneration;
+	++g_pendingGameNameRequestGeneration;
+	g_deferredBrowserActionsScheduled = false;
+	g_pendingPathChanges.clear();
+	g_pendingGameName = "";
+	g_pendingGameMode = "";
+	g_pendingGameNameChange = false;
+	g_pendingGameNameConfirmed = false;
+	g_pendingGameNameConfirmationInProgress = false;
+	g_pendingGameModeChange = false;
+	g_restartPending = false;
+	Entity_cancelPendingDefinitionReload();
+	RefreshReferences_cancelPending();
+}
+}
+
+bool BrowserLifecycle_acceptsDeferredRequests(){
+	return !g_radiantShuttingDown && !g_restartInProgress;
+}
+
+bool BrowserLifecycle_browserWorkAllowed(){
+	return BrowserLifecycle_acceptsDeferredRequests()
+	    && !g_radiantInitialising
+	    && !g_browserModuleTransitionInProgress
+	    && g_enginepath_unrealised == 0
+	    && ScreenUpdates_Enabled();
+}
+
+bool BrowserLifecycle_canStartModuleTransition(){
+	return BrowserLifecycle_acceptsDeferredRequests()
+	    && !g_radiantInitialising
+	    && !g_browserModuleTransitionInProgress
+	    && !g_pendingGameNameConfirmationInProgress
+	    && g_enginepath_unrealised == 0
+	    && ScreenUpdates_Enabled()
+	    && ModelBrowser_canRestart()
+	    && EntityBrowser_canRestart();
+}
+
+bool BrowserLifecycle_moduleTransitionStillValid(){
+	return g_browserModuleTransitionInProgress
+	    && !g_radiantShuttingDown;
+}
+
+void BrowserLifecycle_prepareForShutdown(){
+	if ( g_radiantShuttingDown ) {
+		return;
+	}
+	g_radiantShuttingDown = true;
+	BrowserLifecycle_cancelDeferredActions();
+}
+
+void BrowserLifecycle_scheduleDeferredActions(){
+	if ( !BrowserLifecycle_acceptsDeferredRequests() || g_deferredBrowserActionsScheduled ) {
+		return;
+	}
+	QCoreApplication* application = QCoreApplication::instance();
+	if ( application == nullptr ) {
+		return;
+	}
+	const std::size_t generation = g_deferredBrowserActionsGeneration;
+	g_deferredBrowserActionsScheduled = true;
+	QTimer::singleShot( 0, application, [generation](){
+		if ( generation != g_deferredBrowserActionsGeneration ) {
+			return;
+		}
+		g_deferredBrowserActionsScheduled = false;
+		BrowserLifecycle_tryDeferredActions();
+	} );
+}
+
+void BrowserLifecycle_beginModuleTransition(){
+	ASSERT_MESSAGE( BrowserLifecycle_canStartModuleTransition(), "module transition started while browser lifecycle is busy" );
+	g_browserModuleTransitionInProgress = true;
+}
+
+void BrowserLifecycle_endModuleTransition(){
+	ASSERT_MESSAGE( g_browserModuleTransitionInProgress, "module transition ended while none was active" );
+	g_browserModuleTransitionInProgress = false;
+	BrowserLifecycle_scheduleDeferredActions();
+}
 
 void Radiant_attachEnginePathObserver( ModuleObserver& observer ){
 	g_enginePathObservers.attach( observer );
@@ -326,6 +441,10 @@ void Radiant_detachEnginePathObserver( ModuleObserver& observer ){
 void EnginePath_Realise(){
 	if ( --g_enginepath_unrealised == 0 ) {
 		g_enginePathObservers.realise();
+		if ( !g_radiantInitialising ) {
+			ModelBrowser_dependenciesReady();
+			EntityBrowser_dependenciesReady();
+		}
 	}
 }
 
@@ -337,6 +456,8 @@ const char* EnginePath_get(){
 
 void EnginePath_Unrealise(){
 	if ( ++g_enginepath_unrealised == 1 ) {
+		ModelBrowser_prepareForFileSystemReload();
+		EntityBrowser_prepareForModuleReload();
 		g_enginePathObservers.unrealise();
 	}
 }
@@ -372,7 +493,6 @@ struct DetectedEngineInstall
 };
 
 std::vector<DetectedEngineInstall> g_detectedEngineInstalls;
-int g_detectedEngineInstallInitialSelection = -1;
 
 std::string EnginePath_toLower( const std::string& value ){
 	std::string lower;
@@ -1052,7 +1172,6 @@ CopiedString EnginePath_detectedInstallLabel( const DetectedEngineInstall& insta
 
 void EnginePath_refreshDetectedInstalls(){
 	g_detectedEngineInstalls.clear();
-	g_detectedEngineInstallInitialSelection = -1;
 
 	const auto rule = EnginePath_buildInstallRule();
 	auto effectiveRule = rule;
@@ -1134,15 +1253,51 @@ std::vector<DetectedGameInstallPath> EnginePath_detectInstallationsForGame( cons
 	}
 	else{
 		g_detectedEngineInstalls.clear();
-		g_detectedEngineInstallInitialSelection = -1;
 	}
 
 	return installs;
 }
 
+namespace
+{
+void BrowserLifecycle_requestPathChange( CopiedString& target, const char* value ){
+	if ( !BrowserLifecycle_acceptsDeferredRequests() ) {
+		return;
+	}
+	auto pending = std::find_if( g_pendingPathChanges.begin(), g_pendingPathChanges.end(), [&target]( const PendingPathChange& change ){
+		return change.target == &target;
+	} );
+	if ( !g_browserModuleTransitionInProgress && path_equal( value, target.c_str() ) ) {
+		if ( pending != g_pendingPathChanges.end() ) {
+			g_pendingPathChanges.erase( pending );
+		}
+		return;
+	}
+	if ( pending != g_pendingPathChanges.end() ) {
+		if ( !path_equal( pending->value.c_str(), value ) ) {
+			pending->value = value;
+			pending->requestGeneration = ++g_pendingPathRequestGeneration;
+		}
+	}
+	else {
+		g_pendingPathChanges.push_back( PendingPathChange{ &target, CopiedString( value ), ++g_pendingPathRequestGeneration } );
+	}
+
+	if ( BrowserLifecycle_canStartModuleTransition() ) {
+		BrowserLifecycle_tryDeferredActions();
+	}
+	else {
+		BrowserLifecycle_scheduleDeferredActions();
+	}
+}
+}
+
 void setEnginePath( CopiedString& self, const char* value ){
 	const auto buffer = StringStream( DirectoryCleaned( value ) );
-	if ( !path_equal( buffer, self.c_str() ) ) {
+	if ( g_radiantInitialising ) {
+		if ( path_equal( buffer, self.c_str() ) ) {
+			return;
+		}
 #if 0
 		while ( !ConfirmModified( "Paths Changed" ) )
 		{
@@ -1156,24 +1311,17 @@ void setEnginePath( CopiedString& self, const char* value ){
 		}
 		Map_RegionOff();
 #endif
-
-		ScopeDisableScreenUpdates disableScreenUpdates( "Processing...", "Changing Engine Path" );
-
 		EnginePath_Unrealise();
-
 		self = buffer;
-
 		installDevFiles();
-
 		EnginePath_Realise();
+		return;
 	}
+	BrowserLifecycle_requestPathChange( self, buffer.c_str() );
 }
 typedef ReferenceCaller<CopiedString, void(const char*), setEnginePath> EnginePathImportCaller;
 
 void EnginePathDetectedInstall_import( int value ){
-	if ( value == g_detectedEngineInstallInitialSelection ) {
-		return;
-	}
 	if ( value >= 0 && value < static_cast<int>( g_detectedEngineInstalls.size() ) ) {
 		setEnginePath( g_strEnginePath, g_detectedEngineInstalls[value].path.c_str() );
 	}
@@ -1189,7 +1337,6 @@ void EnginePathDetectedInstall_export( const IntImportCallback& importCallback )
 			break;
 		}
 	}
-	g_detectedEngineInstallInitialSelection = selected;
 	importCallback( selected < 0? 0 : selected );
 }
 typedef FreeCaller<void(const IntImportCallback&), EnginePathDetectedInstall_export> EnginePathDetectedInstallExportCaller;
@@ -1539,6 +1686,204 @@ void gamemode_set( const char* gamemode ){
 	}
 }
 
+void EnginePath_requestGameNameChange( const char* gamename ){
+	if ( g_radiantInitialising ) {
+		gamename_set( gamename );
+		StartupGameInstallationSelectedGameName_set( gamename );
+		return;
+	}
+	if ( !BrowserLifecycle_acceptsDeferredRequests() ) {
+		return;
+	}
+	if ( !g_browserModuleTransitionInProgress && path_equal( gamename, gamename_get() ) ) {
+		if ( g_pendingGameNameChange ) {
+			++g_pendingGameNameRequestGeneration;
+			g_pendingGameNameChange = false;
+			g_pendingGameNameConfirmed = false;
+			g_pendingGameName = "";
+		}
+		return;
+	}
+	if ( !g_pendingGameNameChange || !path_equal( gamename, g_pendingGameName.c_str() ) ) {
+		++g_pendingGameNameRequestGeneration;
+		g_pendingGameName = gamename;
+		g_pendingGameNameConfirmed = false;
+	}
+	g_pendingGameNameChange = true;
+	if ( BrowserLifecycle_canStartModuleTransition() ) {
+		BrowserLifecycle_tryDeferredActions();
+	}
+	else {
+		BrowserLifecycle_scheduleDeferredActions();
+	}
+}
+
+void GameMode_requestChange( const char* gamemode ){
+	if ( g_radiantInitialising ) {
+		gamemode_set( gamemode );
+		return;
+	}
+	if ( !BrowserLifecycle_acceptsDeferredRequests() ) {
+		return;
+	}
+	if ( !g_browserModuleTransitionInProgress && string_equal( gamemode, gamemode_get() ) ) {
+		if ( g_pendingGameModeChange ) {
+			++g_pendingGameModeRequestGeneration;
+			g_pendingGameModeChange = false;
+			g_pendingGameMode = "";
+		}
+		return;
+	}
+	if ( !g_pendingGameModeChange || !string_equal( gamemode, g_pendingGameMode.c_str() ) ) {
+		++g_pendingGameModeRequestGeneration;
+		g_pendingGameMode = gamemode;
+	}
+	g_pendingGameModeChange = true;
+	if ( BrowserLifecycle_canStartModuleTransition() ) {
+		BrowserLifecycle_tryDeferredActions();
+	}
+	else {
+		BrowserLifecycle_scheduleDeferredActions();
+	}
+}
+
+namespace
+{
+class ScopedBrowserModuleTransition
+{
+public:
+	ScopedBrowserModuleTransition(){
+		BrowserLifecycle_beginModuleTransition();
+	}
+	~ScopedBrowserModuleTransition(){
+		BrowserLifecycle_endModuleTransition();
+	}
+};
+
+bool BrowserLifecycle_hasPendingSettings(){
+	return !g_pendingPathChanges.empty()
+	    || g_pendingGameNameChange
+	    || g_pendingGameModeChange;
+}
+
+bool BrowserLifecycle_tryApplyPendingSettings(){
+	if ( !BrowserLifecycle_canStartModuleTransition() ) {
+		return false;
+	}
+
+	g_pendingPathChanges.erase(
+		std::remove_if( g_pendingPathChanges.begin(), g_pendingPathChanges.end(), []( const PendingPathChange& change ){
+			return change.target == nullptr || path_equal( change.value.c_str(), change.target->c_str() );
+		} ),
+		g_pendingPathChanges.end()
+	);
+	if ( g_pendingGameNameChange && path_equal( g_pendingGameName.c_str(), gamename_get() ) ) {
+		g_pendingGameName = "";
+		g_pendingGameNameChange = false;
+		g_pendingGameNameConfirmed = false;
+	}
+	if ( g_pendingGameModeChange && string_equal( g_pendingGameMode.c_str(), gamemode_get() ) ) {
+		g_pendingGameMode = "";
+		g_pendingGameModeChange = false;
+	}
+
+	if ( g_pendingGameNameChange && !g_pendingGameNameConfirmed ) {
+		const std::size_t confirmationGeneration = g_deferredBrowserActionsGeneration;
+		const std::size_t requestGeneration = g_pendingGameNameRequestGeneration;
+		g_pendingGameNameConfirmationInProgress = true;
+		const bool confirmed = ConfirmModified( "Edit Project Settings" );
+		g_pendingGameNameConfirmationInProgress = false;
+		if ( confirmationGeneration != g_deferredBrowserActionsGeneration || g_radiantShuttingDown ) {
+			return false;
+		}
+		if ( requestGeneration != g_pendingGameNameRequestGeneration ) {
+			BrowserLifecycle_scheduleDeferredActions();
+			return false;
+		}
+		if ( !confirmed ) {
+			g_pendingGameNameChange = false;
+			g_pendingGameNameConfirmed = false;
+			g_pendingGameName = "";
+		}
+		else {
+			g_pendingGameNameConfirmed = true;
+		}
+		if ( !BrowserLifecycle_canStartModuleTransition() ) {
+			return false;
+		}
+	}
+
+	const bool changePaths = !g_pendingPathChanges.empty();
+	const bool changeGameName = g_pendingGameNameChange;
+	const bool changeGameMode = g_pendingGameModeChange;
+	if ( !changePaths && !changeGameName && !changeGameMode ) {
+		g_pendingGameNameConfirmed = false;
+		return false;
+	}
+
+	const std::vector<PendingPathChange> pathChanges( g_pendingPathChanges );
+	const CopiedString gameName( g_pendingGameName );
+	const CopiedString gameMode( g_pendingGameMode );
+	const std::size_t gameNameRequestGeneration = g_pendingGameNameRequestGeneration;
+	const std::size_t gameModeRequestGeneration = g_pendingGameModeRequestGeneration;
+
+	ScopedBrowserModuleTransition transition;
+	if ( changePaths || changeGameName ) {
+		const char* title = changePaths ? "Changing Engine Path" : "Changing Game Name";
+		ScopeDisableScreenUpdates disableScreenUpdates( "Processing...", title );
+		if ( !BrowserLifecycle_moduleTransitionStillValid() ) {
+			return false;
+		}
+		EnginePath_Unrealise();
+		for ( const PendingPathChange& change : pathChanges ) {
+			*change.target = change.value;
+		}
+		if ( changePaths ) {
+			installDevFiles();
+		}
+		if ( changeGameName ) {
+			gamename_set( gameName.c_str() );
+			StartupGameInstallationSelectedGameName_set( gameName.c_str() );
+		}
+		if ( changeGameMode ) {
+			gamemode_set( gameMode.c_str() );
+		}
+		EnginePath_Realise();
+	}
+	else {
+		ScopeDisableScreenUpdates disableScreenUpdates( "Processing...", "Changing Game Mode" );
+		if ( !BrowserLifecycle_moduleTransitionStillValid() ) {
+			return false;
+		}
+		gamemode_set( gameMode.c_str() );
+	}
+
+	for ( const PendingPathChange& applied : pathChanges ) {
+		g_pendingPathChanges.erase(
+			std::remove_if( g_pendingPathChanges.begin(), g_pendingPathChanges.end(), [&applied]( const PendingPathChange& pending ){
+				return pending.target == applied.target
+				    && pending.requestGeneration == applied.requestGeneration;
+			} ),
+			g_pendingPathChanges.end()
+		);
+	}
+	if ( changeGameName
+	  && g_pendingGameNameChange
+	  && g_pendingGameNameRequestGeneration == gameNameRequestGeneration ) {
+		g_pendingGameName = "";
+		g_pendingGameNameChange = false;
+		g_pendingGameNameConfirmed = false;
+	}
+	if ( changeGameMode
+	  && g_pendingGameModeChange
+	  && g_pendingGameModeRequestGeneration == gameModeRequestGeneration ) {
+		g_pendingGameMode = "";
+		g_pendingGameModeChange = false;
+	}
+	return true;
+}
+}
+
 #include "os/dir.h"
 
 const char* const c_library_extension =
@@ -1602,6 +1947,8 @@ void Radiant_detachGameToolsPathObserver( ModuleObserver& observer ){
 }
 
 void Radiant_Initialise(){
+	g_radiantShuttingDown = false;
+	g_radiantInitialising = true;
 	GlobalModuleServer_Initialise();
 
 	Radiant_loadModulesFromRoot( AppPath_get() );
@@ -1614,9 +1961,16 @@ void Radiant_Initialise(){
 	g_gameToolsPathObservers.realise();
 	g_gameModeObservers.realise();
 	g_gameNameObservers.realise();
+	g_radiantInitialising = false;
+	ModelBrowser_dependenciesReady();
+	EntityBrowser_dependenciesReady();
+	BrowserLifecycle_scheduleDeferredActions();
 }
 
 void Radiant_Shutdown(){
+	BrowserLifecycle_prepareForShutdown();
+	ModelBrowser_prepareForFileSystemReload();
+	EntityBrowser_prepareForModuleReload();
 	g_gameNameObservers.unrealise();
 	g_gameModeObservers.unrealise();
 	g_gameToolsPathObservers.unrealise();
@@ -1668,7 +2022,22 @@ void Radiant_Restart(){
 }
 
 
-void Restart(){
+namespace
+{
+void BrowserLifecycle_restartNow(){
+	ScopedBrowserModuleTransition transition;
+	class ScopedRestart
+	{
+	public:
+		ScopedRestart(){
+			g_restartInProgress = true;
+			BrowserLifecycle_prepareForShutdown();
+		}
+		~ScopedRestart(){
+			g_restartInProgress = false;
+		}
+	} restart;
+
 	// Freeze the current preference callbacks before modules register them again.
 	// Startup normally defers this dialog until first use, but an in-process module
 	// reload must preserve the single-construction lifecycle it historically had.
@@ -1683,6 +2052,45 @@ void Restart(){
 	PluginsMenu_populate();
 
 	PluginToolbar_populate();
+}
+}
+
+void Restart(){
+	if ( !BrowserLifecycle_acceptsDeferredRequests() ) {
+		return;
+	}
+	g_restartPending = true;
+	if ( BrowserLifecycle_canStartModuleTransition() ) {
+		BrowserLifecycle_tryDeferredActions();
+	}
+	else {
+		BrowserLifecycle_scheduleDeferredActions();
+	}
+}
+
+namespace
+{
+void BrowserLifecycle_tryDeferredActions(){
+	if ( BrowserLifecycle_tryApplyPendingSettings() ) {
+		return;
+	}
+	if ( BrowserLifecycle_hasPendingSettings() ) {
+		return;
+	}
+	if ( Entity_processPendingDefinitionReload() ) {
+		return;
+	}
+	if ( g_restartPending && BrowserLifecycle_canStartModuleTransition() ) {
+		g_restartPending = false;
+		BrowserLifecycle_restartNow();
+		return;
+	}
+	if ( RefreshReferences_processPending() ) {
+		return;
+	}
+	ModelBrowser_resumeDeferredWork();
+	EntityBrowser_resumeDeferredWork();
+}
 }
 
 
@@ -2029,6 +2437,7 @@ void ScreenUpdates_Enable(){
 		s_qe_every_second_timer.enable();
 
 		delete std::exchange( g_wait.m_window, nullptr );
+		BrowserLifecycle_scheduleDeferredActions();
 	}
 	else {
 		g_wait.m_label->setText( g_wait_stack.back().c_str() );

@@ -36,10 +36,6 @@ ModelModules& ReferenceAPI_getModelModules();
 #include "qerplugin.h"
 
 #include <list>
-#include <utility>
-
-#include <QCoreApplication>
-#include <QTimer>
 
 #include "container/cache.h"
 #include "container/hashfunc.h"
@@ -658,45 +654,66 @@ bool References_Saved(){
 	return true;
 }
 
-void RefreshReferences(){
-	static bool refreshInProgress = false;
-	static bool refreshQueued = false;
-	if ( refreshInProgress ) {
-		return;
+namespace
+{
+bool g_referenceRefreshInProgress = false;
+bool g_referenceRefreshPending = false;
+}
+
+bool RefreshReferences_processPending(){
+	if ( !g_referenceRefreshPending
+	  || g_referenceRefreshInProgress
+	  || !BrowserLifecycle_canStartModuleTransition() ) {
+		return false;
 	}
-	if ( !ModelBrowser_canRefreshReferences() || !EntityBrowser_canRefreshReferences() ) {
-		if ( !std::exchange( refreshQueued, true ) ) {
-			QTimer::singleShot( 0, QCoreApplication::instance(), [](){
-				if ( std::exchange( refreshQueued, false ) ) {
-					RefreshReferences();
-				}
-			} );
+	g_referenceRefreshPending = false;
+
+	class ScopedModuleTransition
+	{
+	public:
+		ScopedModuleTransition(){
+			BrowserLifecycle_beginModuleTransition();
 		}
-		return;
-	}
-	refreshQueued = false;
+		~ScopedModuleTransition(){
+			BrowserLifecycle_endModuleTransition();
+		}
+	} transition;
 
 	class ScopedBrowserReferenceRefresh
 	{
-		bool& m_refreshInProgress;
 	public:
-		explicit ScopedBrowserReferenceRefresh( bool& refreshInProgress )
-			: m_refreshInProgress( refreshInProgress ) {
-			m_refreshInProgress = true;
+		ScopedBrowserReferenceRefresh(){
+			g_referenceRefreshInProgress = true;
 			ModelBrowser_beginReferenceRefresh();
 			EntityBrowser_beginReferenceRefresh();
 		}
 		~ScopedBrowserReferenceRefresh(){
 			EntityBrowser_endReferenceRefresh();
 			ModelBrowser_endReferenceRefresh();
-			m_refreshInProgress = false;
+			g_referenceRefreshInProgress = false;
 		}
-	} browserRefresh( refreshInProgress );
+	} browserRefresh;
 
 	{
 		ScopeDisableScreenUpdates disableScreenUpdates( "Processing...", "Refreshing Models" );
+		if ( !BrowserLifecycle_moduleTransitionStillValid() ) {
+			return false;
+		}
 		g_referenceCache.refresh();
 	}
+	return true;
+}
+
+void RefreshReferences(){
+	if ( !BrowserLifecycle_acceptsDeferredRequests() ) {
+		return;
+	}
+	g_referenceRefreshPending = true;
+	BrowserLifecycle_scheduleDeferredActions();
+}
+
+void RefreshReferences_cancelPending(){
+	g_referenceRefreshPending = false;
 }
 
 

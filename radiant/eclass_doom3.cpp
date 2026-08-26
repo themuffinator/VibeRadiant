@@ -37,6 +37,7 @@
 #include "stream/stringstream.h"
 #include "moduleobservers.h"
 #include "stringio.h"
+#include "entitybrowser.h"
 
 class RawString
 {
@@ -734,6 +735,7 @@ public:
 			}
 
 			m_observers.realise();
+			EntityBrowser_entityClassesReady();
 		}
 	}
 	void unrealise() override {

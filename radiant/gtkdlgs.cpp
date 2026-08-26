@@ -252,7 +252,7 @@ static GameCombo s_gameCombo;
 
 
 void GameModeImport( int value ){
-	gamemode_set( value == 0? "sp" : "mp" );
+	GameMode_requestChange( value == 0? "sp" : "mp" );
 }
 typedef FreeCaller<void(int), GameModeImport> GameModeImportCaller;
 
@@ -377,19 +377,7 @@ void GameImport( int value ){
 	}
 
 	const char* new_gamename = dir.isEmpty() ? config.basegame_dir.c_str() : dir.constData();
-
-	if ( !path_equal( new_gamename, gamename_get() ) ) {
-		if ( ConfirmModified( "Edit Project Settings" ) ) {
-			ScopeDisableScreenUpdates disableScreenUpdates( "Processing...", "Changing Game Name" );
-
-			EnginePath_Unrealise();
-
-			gamename_set( new_gamename );
-			StartupGameInstallationSelectedGameName_set( new_gamename );
-
-			EnginePath_Realise();
-		}
-	}
+	EnginePath_requestGameNameChange( new_gamename );
 }
 typedef FreeCaller<void(int), GameImport> GameImportCaller;
 

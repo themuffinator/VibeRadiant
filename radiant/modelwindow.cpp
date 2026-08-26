@@ -67,6 +67,7 @@
 #include <QSplitter>
 #include <QTreeView>
 #include <QHeaderView>
+#include <QHideEvent>
 #include <QStandardItemModel>
 #include <QScrollBar>
 #include <QOpenGLWidget>
@@ -94,6 +95,7 @@ namespace {
 	constexpr float kAssetBrowserHoverEpsilon = 0.001f;
 	constexpr float kAssetBrowserHoverRotateDegrees = 12.0f;
 	constexpr float kAssetBrowserHoverSpinDegreesPerSecond = 90.0f;
+	void ModelBrowser_previewRebuildFinished();
 
 	class ScopedModelPreviewRebuild
 	{
@@ -104,6 +106,7 @@ namespace {
 		}
 		~ScopedModelPreviewRebuild(){
 			m_inProgress = false;
+			ModelBrowser_previewRebuildFinished();
 		}
 	};
 
@@ -676,8 +679,13 @@ public:
 	bool m_filterApplyPending = false;
 	bool m_previewsDirty = false;
 	bool m_previewRefreshReady = true;
+	bool m_fileSystemReady = false;
+	bool m_dependenciesReady = false;
 	bool m_previewRebuildInProgress = false;
 	bool m_referenceRefreshInProgress = false;
+	bool m_treeReloadAfterReferenceRefresh = false;
+	std::size_t m_fileSystemGeneration = 0;
+	std::size_t m_previewGraphRevision = 0;
 
 	int m_width;
 	int m_height;
@@ -715,6 +723,14 @@ public:
 	}
 	void clearHover(){
 		setHoverId( -1 );
+	}
+	void resetHover(){
+		m_hoverModelId = -1;
+		m_hoverScale = 1.0f;
+		m_hoverScaleTarget = 1.0f;
+		m_hoverRotate = 0.0f;
+		m_hoverRotateTarget = 0.0f;
+		m_hoverSpin = 0.0f;
 	}
 	CopiedString modelPathForIndex( int index ) const {
 		if ( index < 0 || index >= static_cast<int>( m_visibleModelPaths.size() ) ) {
@@ -948,6 +964,18 @@ public:
 
 ModelBrowser g_ModelBrowser;
 static bool g_modelBrowserTreeConstructed = false;
+static void ModelBrowser_scheduleEnsureTreeIfVisible();
+
+static void ModelBrowser_clearPreviewGraph(){
+	++g_ModelBrowser.m_previewGraphRevision;
+	if ( g_modelGraph != nullptr ) {
+		ModelGraph_clear();
+	}
+	g_ModelBrowser.m_visibleModelPaths.clear();
+	g_ModelBrowser.m_currentModelId = -1;
+	g_ModelBrowser.resetHover();
+	g_ModelBrowser.m_originInvalid = true;
+}
 
 using ModelPathSet = std::set<CopiedString, StringLessNoCase>;
 
@@ -1060,12 +1088,21 @@ void ModelBrowser_pausePendingFilterApply(){
 
 void ModelBrowser_scheduleFilterApply(){
 	g_ModelBrowser.m_filterApplyPending = true;
-	if ( g_ModelBrowser.m_filterApplyTimer != nullptr && !g_ModelBrowser.m_referenceRefreshInProgress ) {
+	if ( g_ModelBrowser.m_filterApplyTimer != nullptr
+	  && BrowserLifecycle_browserWorkAllowed()
+	  && g_ModelBrowser.m_previewRefreshReady
+	  && g_ModelBrowser.m_fileSystemReady
+	  && g_ModelBrowser.m_dependenciesReady
+	  && !g_ModelBrowser.m_previewRebuildInProgress
+	  && !g_ModelBrowser.m_referenceRefreshInProgress
+	  && !g_ModelBrowser.m_treeReloadAfterReferenceRefresh
+	  && g_ModelBrowser.m_treeView != nullptr
+	  && g_ModelBrowser.m_treeView->isVisible() ) {
 		g_ModelBrowser.m_filterApplyTimer->start( kModelFilterApplyDelayMilliseconds );
 	}
 }
 
-void ModelBrowser_rebuildVisibleModels();
+bool ModelBrowser_rebuildVisibleModels();
 
 static QRect ModelBrowser_cellRectPixels( const ModelBrowser& browser, int index ){
 	const CellPos cellPos = browser.constructCellPos();
@@ -1168,17 +1205,24 @@ public:
 	}
 };
 
-void ModelBrowser_rebuildVisibleModels(){
-	if ( !g_ModelBrowser.m_previewRefreshReady ) {
-		return;
+bool ModelBrowser_rebuildVisibleModels(){
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_ModelBrowser.m_previewRefreshReady
+	  || !g_ModelBrowser.m_fileSystemReady
+	  || !g_ModelBrowser.m_dependenciesReady
+	  || g_ModelBrowser.m_treeReloadAfterReferenceRefresh
+	  || g_ModelBrowser.m_treeView == nullptr
+	  || !g_ModelBrowser.m_treeView->isVisible() ) {
+		g_ModelBrowser.m_filterApplyPending = true;
+		return false;
 	}
 	if ( g_ModelBrowser.m_referenceRefreshInProgress ) {
 		g_ModelBrowser.m_filterApplyPending = true;
-		return;
+		return false;
 	}
 	if ( g_ModelBrowser.m_previewRebuildInProgress ) {
 		ModelBrowser_scheduleFilterApply();
-		return;
+		return false;
 	}
 	const bool forceReload = std::exchange( g_ModelBrowser.m_previewsDirty, false );
 	ScopedModelPreviewRebuild rebuildGuard( g_ModelBrowser.m_previewRebuildInProgress );
@@ -1217,22 +1261,38 @@ void ModelBrowser_rebuildVisibleModels(){
 	if ( !forceReload && visibleModelPaths == g_ModelBrowser.m_visibleModelPaths ) {
 		ModelBrowser_updateClearFiltersButton();
 		g_ModelBrowser.queueDraw();
-		return;
+		return true;
 	}
 
-	ModelGraph_clear();
+	ModelBrowser_clearPreviewGraph();
 	g_ModelBrowser.m_visibleModelPaths = std::move( visibleModelPaths );
-	g_ModelBrowser.m_currentModelId = -1;
-	g_ModelBrowser.clearHover();
+	const std::size_t graphRevision = g_ModelBrowser.m_previewGraphRevision;
 
 	if ( scene::Traversable* traversable = Node_getTraversable( g_modelGraph->root() ) ) {
-		const char* status = g_ModelBrowser.m_filterGlobal ? "All Objects" : g_ModelBrowser.m_currentFolderPath.c_str();
-		ScopeDisableScreenUpdates disableScreenUpdates( status, "Loading Objects" );
+		const CopiedString status( g_ModelBrowser.m_filterGlobal
+		                         ? "All Objects"
+		                         : g_ModelBrowser.m_currentFolderPath.c_str() );
+		ScopeDisableScreenUpdates disableScreenUpdates( status.c_str(), "Loading Objects" );
 		for ( const CopiedString& path : g_ModelBrowser.m_visibleModelPaths ) {
+			if ( graphRevision != g_ModelBrowser.m_previewGraphRevision
+			  || !g_ModelBrowser.m_previewRefreshReady
+			  || !g_ModelBrowser.m_fileSystemReady
+			  || !g_ModelBrowser.m_dependenciesReady ) {
+				return false;
+			}
 			auto *modelNode = new ModelNode;
-			modelNode->setModel( path.c_str() );
 			NodeSmartReference node( modelNode->node() );
+			modelNode->setModel( path.c_str() );
+			if ( graphRevision != g_ModelBrowser.m_previewGraphRevision
+			  || !g_ModelBrowser.m_previewRefreshReady
+			  || !g_ModelBrowser.m_fileSystemReady
+			  || !g_ModelBrowser.m_dependenciesReady ) {
+				return false;
+			}
 			traversable->insert( node );
+		}
+		if ( graphRevision != g_ModelBrowser.m_previewGraphRevision ) {
+			return false;
 		}
 		g_ModelBrowser.forEachModelInstance( models_set_transforms( ModelBrowser_baseScale() ) );
 	}
@@ -1241,6 +1301,7 @@ void ModelBrowser_rebuildVisibleModels(){
 	g_ModelBrowser.m_originInvalid = true;
 	ModelBrowser_updateClearFiltersButton();
 	g_ModelBrowser.queueDraw();
+	return true;
 }
 
 
@@ -1722,7 +1783,17 @@ protected:
 
 
 
-static void TreeView_onRowActivated( const QModelIndex& index ){
+static bool TreeView_onRowActivated( const QModelIndex& index ){
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_ModelBrowser.m_previewRefreshReady
+	  || !g_ModelBrowser.m_fileSystemReady
+	  || !g_ModelBrowser.m_dependenciesReady
+	  || g_ModelBrowser.m_referenceRefreshInProgress
+	  || g_ModelBrowser.m_previewRebuildInProgress
+	  || g_ModelBrowser.m_treeReloadAfterReferenceRefresh ) {
+		g_ModelBrowser.m_filterApplyPending = true;
+		return false;
+	}
 	StringOutputStream sstream( 64 );
 	const ModelFS *modelFS = &g_ModelBrowser.m_modelFS;
 	{
@@ -1743,10 +1814,11 @@ static void TreeView_onRowActivated( const QModelIndex& index ){
 //%						globalOutputStream() << sstream << " sstream\n";
 	g_ModelBrowser.m_currentFolder = modelFS;
 	g_ModelBrowser.m_currentFolderPath = sstream;
-	ModelBrowser_rebuildVisibleModels();
+	const bool rebuilt = ModelBrowser_rebuildVisibleModels();
 
 	//deactivate, so SPACE and RETURN wont be broken for 2d
 	g_ModelBrowser.m_treeView->clearFocus();
+	return rebuilt;
 }
 
 
@@ -1850,27 +1922,34 @@ void ModelPaths_addFromArchive( ModelPaths_ArchiveVisitor& visitor, const char *
 typedef ReferenceCaller<ModelPaths_ArchiveVisitor, void(const char*), ModelPaths_addFromArchive> ModelPaths_addFromArchiveCaller;
 
 void ModelBrowser_constructTree(){
-	if ( g_ModelBrowser.m_referenceRefreshInProgress ) {
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || g_ModelBrowser.m_referenceRefreshInProgress
+	  || g_ModelBrowser.m_treeReloadAfterReferenceRefresh ) {
 		g_modelBrowserTreeConstructed = false;
 		return;
 	}
-	if ( !g_ModelBrowser.m_previewRefreshReady ) {
+	if ( !g_ModelBrowser.m_previewRefreshReady
+	  || !g_ModelBrowser.m_fileSystemReady
+	  || !g_ModelBrowser.m_dependenciesReady ) {
+		g_modelBrowserTreeConstructed = false;
 		return;
 	}
 	if ( g_ModelBrowser.m_previewRebuildInProgress ) {
 		g_modelBrowserTreeConstructed = false;
 		return;
 	}
-	ModelBrowser_cancelPendingFilterApply();
-	if ( g_ModelBrowser.m_treeView == nullptr ) {
+	if ( g_ModelBrowser.m_treeView == nullptr || !g_ModelBrowser.m_treeView->isVisible() ) {
+		g_modelBrowserTreeConstructed = false;
 		return;
 	}
+	ModelBrowser_cancelPendingFilterApply();
+	const std::size_t fileSystemGeneration = g_ModelBrowser.m_fileSystemGeneration;
 
 	g_ModelBrowser.m_currentFolder = nullptr;
 	g_ModelBrowser.m_currentFolderPath = "";
 	g_ModelBrowser.m_modelFS.m_folders.clear();
 	g_ModelBrowser.m_modelFS.m_files.clear();
-	ModelGraph_clear();
+	ModelBrowser_clearPreviewGraph();
 	g_ModelBrowser.queueDraw();
 
 	class : public IFileTypeList
@@ -1909,15 +1988,23 @@ void ModelBrowser_constructTree(){
 			ModelBrowser_constructTreeModel( m, model, model->invisibleRootItem() );
 	}
 
+	bool previewsReady = true;
 	if ( model->rowCount() > 0 ) {
 		const QModelIndex first = model->index( 0, 0 );
 		g_ModelBrowser.m_treeView->setCurrentIndex( first );
-		TreeView_onRowActivated( first );
+		previewsReady = TreeView_onRowActivated( first );
 	}
 	else {
 		g_ModelBrowser.m_previewsDirty = false;
 	}
-	g_modelBrowserTreeConstructed = true;
+	if ( previewsReady
+	  && fileSystemGeneration == g_ModelBrowser.m_fileSystemGeneration
+	  && BrowserLifecycle_browserWorkAllowed()
+	  && g_ModelBrowser.m_previewRefreshReady
+	  && g_ModelBrowser.m_fileSystemReady
+	  && g_ModelBrowser.m_dependenciesReady ) {
+		g_modelBrowserTreeConstructed = true;
+	}
 }
 
 class TexBro_QTreeView : public QTreeView
@@ -1933,7 +2020,14 @@ protected:
 };
 
 void ModelBrowser_EnsureTree(){
-	if ( !g_ModelBrowser.m_previewRefreshReady || g_ModelBrowser.m_referenceRefreshInProgress ) {
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_ModelBrowser.m_previewRefreshReady
+	  || !g_ModelBrowser.m_fileSystemReady
+	  || !g_ModelBrowser.m_dependenciesReady
+	  || g_ModelBrowser.m_referenceRefreshInProgress
+	  || g_ModelBrowser.m_treeReloadAfterReferenceRefresh
+	  || g_ModelBrowser.m_treeView == nullptr
+	  || !g_ModelBrowser.m_treeView->isVisible() ) {
 		return;
 	}
 	if ( g_ModelBrowser.m_previewRebuildInProgress ) {
@@ -1958,6 +2052,10 @@ protected:
 				ModelBrowser_EnsureTree();
 			}
 		} );
+	}
+	void hideEvent( QHideEvent* event ) override {
+		ModelBrowser_pausePendingFilterApply();
+		QSplitter::hideEvent( event );
 	}
 };
 
@@ -2009,8 +2107,8 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		toolbar_append_button( toolbar, "Find / Replace...", "texbro_find-replace.png", "FindReplaceObjects" );
 		toolbar_append_button( toolbar, "Flush / Reload Objects", "refresh_models.png", makeCallbackF( +[](){
 			ModelBrowser_cancelPendingFilterApply();
+			g_ModelBrowser.m_treeReloadAfterReferenceRefresh = true;
 			RefreshReferences();
-			ModelBrowser_constructTree();
 		} ) );
 	}
 	{	// filter bar
@@ -2055,7 +2153,7 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		auto* filterApplyTimer = g_ModelBrowser.m_filterApplyTimer = new QTimer( filterBar );
 		filterApplyTimer->setSingleShot( true );
 		QObject::connect( filterApplyTimer, &QTimer::timeout, [](){
-			ModelBrowser_rebuildVisibleModels();
+			ModelBrowser_EnsureTree();
 		} );
 
 		QObject::connect( clearButton, &QToolButton::clicked, [entry, globalButton, usedButton](){
@@ -2105,7 +2203,9 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		g_ModelBrowser.m_treeView->header()->setSectionResizeMode( QHeaderView::ResizeMode::ResizeToContents );
 
 
-		QObject::connect( g_ModelBrowser.m_treeView, &QAbstractItemView::activated, TreeView_onRowActivated );
+		QObject::connect( g_ModelBrowser.m_treeView, &QAbstractItemView::activated, []( const QModelIndex& index ){
+			TreeView_onRowActivated( index );
+		} );
 
 		vbox->addWidget( g_ModelBrowser.m_treeView );
 	}
@@ -2156,6 +2256,7 @@ void ModelBrowser_destroyWindow(){
 	g_ModelBrowser.m_previewRefreshReady = true;
 	g_ModelBrowser.m_previewRebuildInProgress = false;
 	g_ModelBrowser.m_referenceRefreshInProgress = false;
+	g_ModelBrowser.m_treeReloadAfterReferenceRefresh = false;
 	g_modelBrowserTreeConstructed = false;
 }
 
@@ -2209,6 +2310,49 @@ void ModelBrowser_registerPreferencesPage(){
 	PreferencesDialog_addSettingsPage( makeCallbackF( ModelBrowser_constructPage ) );
 }
 
+static void ModelBrowser_fileSystemUnrealise(){
+	ModelBrowser_pausePendingFilterApply();
+	g_ModelBrowser.m_dependenciesReady = false;
+	if ( !g_ModelBrowser.m_fileSystemReady ) {
+		g_ModelBrowser.m_previewsDirty = true;
+		g_modelBrowserTreeConstructed = false;
+		return;
+	}
+	g_ModelBrowser.m_fileSystemReady = false;
+	++g_ModelBrowser.m_fileSystemGeneration;
+	g_ModelBrowser.m_previewsDirty = true;
+	g_modelBrowserTreeConstructed = false;
+	ModelBrowser_clearPreviewGraph();
+	g_ModelBrowser.m_currentFolder = nullptr;
+	g_ModelBrowser.m_currentFolderPath = "";
+	g_ModelBrowser.m_modelFS.m_folders.clear();
+	g_ModelBrowser.m_modelFS.m_files.clear();
+	if ( g_ModelBrowser.m_treeView != nullptr ) {
+		if ( auto* model = qobject_cast<QStandardItemModel*>( g_ModelBrowser.m_treeView->model() ) ) {
+			model->clear();
+		}
+	}
+	g_ModelBrowser.queueDraw();
+}
+
+void ModelBrowser_prepareForFileSystemReload(){
+	ModelBrowser_fileSystemUnrealise();
+}
+
+void ModelBrowser_fileSystemReady(){
+	g_ModelBrowser.m_fileSystemReady = true;
+	g_ModelBrowser.m_previewsDirty = true;
+	g_modelBrowserTreeConstructed = false;
+	// Scheduling waits for the enclosing engine/module lifecycle to finish.
+	BrowserLifecycle_scheduleDeferredActions();
+}
+
+void ModelBrowser_dependenciesReady(){
+	g_ModelBrowser.m_dependenciesReady = true;
+	ModelBrowser_scheduleEnsureTreeIfVisible();
+	BrowserLifecycle_scheduleDeferredActions();
+}
+
 void ModelBrowser_Construct(){
 	GlobalPreferenceSystem().registerPreference( "ModelBrowserFolders", CopiedStringImportStringCaller( g_ModelBrowser.m_prefFoldersToLoad ), CopiedStringExportStringCaller( g_ModelBrowser.m_prefFoldersToLoad ) );
 	GlobalPreferenceSystem().registerPreference( "ModelBrowserCellSize", IntImportStringCaller( g_ModelBrowser.m_cellSize ), IntExportStringCaller( g_ModelBrowser.m_cellSize ) );
@@ -2226,28 +2370,41 @@ void ModelBrowser_Construct(){
 
 	ModelBrowser_registerPreferencesPage();
 
+	g_ModelBrowser.m_fileSystemReady = false;
+	g_ModelBrowser.m_dependenciesReady = false;
+	g_ModelBrowser.m_previewsDirty = true;
+	g_ModelBrowser.m_treeReloadAfterReferenceRefresh = false;
+	g_modelBrowserTreeConstructed = false;
 	g_modelGraph = new ModelGraph( g_ModelBrowser );
 	g_modelGraph->insert_root( ( new ModelGraphRoot )->node() );
 }
 
 void ModelBrowser_Destroy(){
 	ModelBrowser_cancelPendingFilterApply();
-	g_modelGraph->erase_root();
-	delete g_modelGraph;
-	g_modelGraph = nullptr;
+	ModelBrowser_fileSystemUnrealise();
+	if ( g_modelGraph != nullptr ) {
+		g_modelGraph->erase_root();
+		delete g_modelGraph;
+		g_modelGraph = nullptr;
+	}
 }
 
 void ModelBrowser_flushReferences(){
 	ModelBrowser_cancelPendingFilterApply();
 	g_ModelBrowser.m_previewRefreshReady = false;
-	ModelGraph_clear();
+	ModelBrowser_clearPreviewGraph();
 	g_ModelBrowser.m_previewsDirty = true;
 	g_ModelBrowser.queueDraw();
 }
 
 static void ModelBrowser_scheduleEnsureTreeIfVisible(){
-	if ( !g_ModelBrowser.m_previewRefreshReady
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_ModelBrowser.m_previewRefreshReady
+	  || !g_ModelBrowser.m_fileSystemReady
+	  || !g_ModelBrowser.m_dependenciesReady
 	  || g_ModelBrowser.m_referenceRefreshInProgress
+	  || g_ModelBrowser.m_previewRebuildInProgress
+	  || g_ModelBrowser.m_treeReloadAfterReferenceRefresh
 	  || ( g_modelBrowserTreeConstructed
 	    && !g_ModelBrowser.m_filterApplyPending
 	    && !g_ModelBrowser.m_previewsDirty ) ) {
@@ -2257,8 +2414,13 @@ static void ModelBrowser_scheduleEnsureTreeIfVisible(){
 	if ( QTreeView* treeView = g_ModelBrowser.m_treeView; treeView != nullptr && treeView->isVisible() ) {
 		QTimer::singleShot( 0, treeView, [treeView](){
 			if ( treeView->isVisible()
+			  && BrowserLifecycle_browserWorkAllowed()
 			  && g_ModelBrowser.m_previewRefreshReady
+			  && g_ModelBrowser.m_fileSystemReady
+			  && g_ModelBrowser.m_dependenciesReady
 			  && !g_ModelBrowser.m_referenceRefreshInProgress
+			  && !g_ModelBrowser.m_previewRebuildInProgress
+			  && !g_ModelBrowser.m_treeReloadAfterReferenceRefresh
 			  && ( !g_modelBrowserTreeConstructed
 			    || g_ModelBrowser.m_filterApplyPending
 			    || g_ModelBrowser.m_previewsDirty ) ) {
@@ -2268,9 +2430,29 @@ static void ModelBrowser_scheduleEnsureTreeIfVisible(){
 	}
 }
 
+void ModelBrowser_resumeDeferredWork(){
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || g_ModelBrowser.m_treeReloadAfterReferenceRefresh ) {
+		return;
+	}
+	if ( g_ModelBrowser.m_filterApplyPending ) {
+		ModelBrowser_scheduleFilterApply();
+	}
+	ModelBrowser_scheduleEnsureTreeIfVisible();
+}
+
+namespace {
+void ModelBrowser_previewRebuildFinished(){
+	if ( g_ModelBrowser.m_filterApplyPending || g_ModelBrowser.m_previewsDirty ) {
+		ModelBrowser_scheduleEnsureTreeIfVisible();
+	}
+}
+}
+
 void ModelBrowser_mapReady(){
 	g_ModelBrowser.m_previewRefreshReady = true;
 	ModelBrowser_scheduleEnsureTreeIfVisible();
+	BrowserLifecycle_scheduleDeferredActions();
 }
 
 void ModelBrowser_beginReferenceRefresh(){
@@ -2279,16 +2461,27 @@ void ModelBrowser_beginReferenceRefresh(){
 }
 
 bool ModelBrowser_canRefreshReferences(){
-	return !g_ModelBrowser.m_previewRebuildInProgress;
+	return !g_ModelBrowser.m_previewRebuildInProgress
+	    && !g_ModelBrowser.m_referenceRefreshInProgress;
+}
+
+bool ModelBrowser_canRestart(){
+	return g_ModelBrowser.m_previewRefreshReady
+	    && g_ModelBrowser.m_fileSystemReady
+	    && g_ModelBrowser.m_dependenciesReady
+	    && ModelBrowser_canRefreshReferences();
 }
 
 void ModelBrowser_endReferenceRefresh(){
 	g_ModelBrowser.m_referenceRefreshInProgress = false;
+	if ( std::exchange( g_ModelBrowser.m_treeReloadAfterReferenceRefresh, false ) ) {
+		g_modelBrowserTreeConstructed = false;
+		g_ModelBrowser.m_previewsDirty = true;
+	}
 	if ( g_ModelBrowser.m_previewsDirty && g_modelGraph != nullptr ) {
-		ModelGraph_clear();
-		g_ModelBrowser.m_currentModelId = -1;
-		g_ModelBrowser.clearHover();
+		ModelBrowser_clearPreviewGraph();
 		g_ModelBrowser.queueDraw();
 	}
 	ModelBrowser_scheduleEnsureTreeIfVisible();
+	BrowserLifecycle_scheduleDeferredActions();
 }

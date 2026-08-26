@@ -42,3 +42,5 @@ void Entity_registerShortcuts();
 
 void Entity_Construct();
 void Entity_Destroy();
+bool Entity_processPendingDefinitionReload();
+void Entity_cancelPendingDefinitionReload();

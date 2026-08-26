@@ -43,6 +43,7 @@
 #include "iscenegraph.h"
 #include "instancelib.h"
 #include "mainframe.h"
+#include "moduleobserver.h"
 #include "commands.h"
 #include "renderable.h"
 #include "renderer.h"
@@ -767,12 +768,15 @@ public:
 	bool m_filterUsed = false;
 	bool m_listMode = false;
 	bool m_mapReady = true;
+	bool m_entityClassesReady = false;
+	bool m_dependenciesReady = false;
 	bool m_usedFilterDirty = false;
 	bool m_referenceRefreshInProgress = false;
 	bool m_referencesDirty = false;
 	bool m_previewLoadInProgress = false;
 	bool m_treeReloadPending = false;
 	bool m_treeReloadQueued = false;
+	std::size_t m_lifecycleGeneration = 0;
 	std::size_t m_previewGraphRevision = 0;
 	int m_loadedPreviewCount = 0;
 
@@ -805,6 +809,14 @@ public:
 	}
 	void clearHover(){
 		setHoverId( -1 );
+	}
+	void resetHover(){
+		m_hoverEntityId = -1;
+		m_hoverScale = 1.0f;
+		m_hoverScaleTarget = 1.0f;
+		m_hoverRotate = 0.0f;
+		m_hoverRotateTarget = 0.0f;
+		m_hoverSpin = 0.0f;
 	}
 	int hoverEntityId() const {
 		return m_hoverEntityId;
@@ -1049,12 +1061,13 @@ static bool g_entityBrowserTreeConstructed = false;
 
 static void EntityBrowser_clearPreviewGraph(){
 	++g_EntityBrowser.m_previewGraphRevision;
+	g_EntityBrowser.m_treeReloadQueued = false;
 	if ( g_entityGraph != nullptr ) {
 		EntityGraph_clear();
 	}
 	g_EntityBrowser.m_loadedPreviewCount = 0;
 	g_EntityBrowser.m_currentEntityId = -1;
-	g_EntityBrowser.clearHover();
+	g_EntityBrowser.resetHover();
 	g_EntityBrowser.m_originInvalid = true;
 }
 
@@ -1105,7 +1118,10 @@ void EntityBrowser_cancelPendingFilterApply(){
 void EntityBrowser_scheduleFilterApply(){
 	g_EntityBrowser.m_filterApplyPending = true;
 	if ( g_EntityBrowser.m_filterApplyTimer != nullptr
+	  && BrowserLifecycle_browserWorkAllowed()
 	  && g_EntityBrowser.m_mapReady
+	  && g_EntityBrowser.m_entityClassesReady
+	  && g_EntityBrowser.m_dependenciesReady
 	  && !g_EntityBrowser.m_referenceRefreshInProgress
 	  && !g_EntityBrowser.m_previewLoadInProgress
 	  && g_EntityBrowser.m_treeView != nullptr
@@ -1710,7 +1726,10 @@ static int EntityBrowser_visiblePreviewTargetCount(){
 }
 
 static void EntityBrowser_insertPreviewNodesUpTo( int targetCount ){
-	if ( g_entityGraph == nullptr || g_EntityBrowser.m_listMode || g_EntityBrowser.m_previewLoadInProgress ) {
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || g_entityGraph == nullptr
+	  || g_EntityBrowser.m_listMode
+	  || g_EntityBrowser.m_previewLoadInProgress ) {
 		return;
 	}
 	targetCount = std::max( 0, std::min( targetCount, static_cast<int>( g_EntityBrowser.visibleClasses().size() ) ) );
@@ -1739,8 +1758,10 @@ static void EntityBrowser_insertPreviewNodesUpTo( int targetCount ){
 			}
 		} previewLoad( g_EntityBrowser.m_previewLoadInProgress );
 
-		const char* status = g_EntityBrowser.currentCategory() != nullptr ? g_EntityBrowser.currentCategory()->name.c_str() : "Entities";
-		ScopeDisableScreenUpdates disableScreenUpdates( status, "Loading Entity Previews" );
+		const CopiedString status( g_EntityBrowser.currentCategory() != nullptr
+		                         ? g_EntityBrowser.currentCategory()->name.c_str()
+		                         : "Entities" );
+		ScopeDisableScreenUpdates disableScreenUpdates( status.c_str(), "Loading Entity Previews" );
 		for ( int i = g_EntityBrowser.m_loadedPreviewCount; i < targetCount; ++i ) {
 			if ( graphRevision != g_EntityBrowser.m_previewGraphRevision
 			  || i >= static_cast<int>( g_EntityBrowser.visibleClasses().size() ) ) {
@@ -1761,7 +1782,10 @@ static void EntityBrowser_insertPreviewNodesUpTo( int targetCount ){
 }
 
 static void EntityBrowser_ensureVisiblePreviews(){
-	if ( !g_EntityBrowser.m_mapReady
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_EntityBrowser.m_mapReady
+	  || !g_EntityBrowser.m_entityClassesReady
+	  || !g_EntityBrowser.m_dependenciesReady
 	  || g_EntityBrowser.m_referenceRefreshInProgress
 	  || g_EntityBrowser.m_gl_widget == nullptr
 	  || !g_EntityBrowser.m_gl_widget->isVisible() ) {
@@ -1783,12 +1807,15 @@ static void EntityBrowser_rebuildListWidget(){
 	}
 }
 
-static void EntityBrowser_selectCategory( const QString& name ){
-	if ( !g_EntityBrowser.m_mapReady
+static bool EntityBrowser_selectCategory( const QString& name ){
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_EntityBrowser.m_mapReady
+	  || !g_EntityBrowser.m_entityClassesReady
+	  || !g_EntityBrowser.m_dependenciesReady
 	  || g_EntityBrowser.m_referenceRefreshInProgress
 	  || g_EntityBrowser.m_previewLoadInProgress ) {
 		g_EntityBrowser.m_filterApplyPending = true;
-		return;
+		return false;
 	}
 	EntityBrowser_cancelPendingFilterApply();
 	const EntityCategory* category = g_EntityBrowser.findCategory( name.toLatin1().constData() );
@@ -1809,6 +1836,7 @@ static void EntityBrowser_selectCategory( const QString& name ){
 	}
 
 	EntityBrowser_clearPreviewGraph();
+	const std::size_t previewGraphRevision = g_EntityBrowser.m_previewGraphRevision;
 	g_EntityBrowser.visibleClasses().clear();
 	g_EntityBrowser.m_originZ = 0;
 	g_EntityBrowser.m_originInvalid = true;
@@ -1826,11 +1854,23 @@ static void EntityBrowser_selectCategory( const QString& name ){
 	g_EntityBrowser.m_usedFilterDirty = false;
 	EntityBrowser_rebuildListWidget();
 	EntityBrowser_ensureVisiblePreviews();
+	if ( previewGraphRevision != g_EntityBrowser.m_previewGraphRevision
+	  || !BrowserLifecycle_browserWorkAllowed()
+	  || !g_EntityBrowser.m_mapReady
+	  || !g_EntityBrowser.m_entityClassesReady
+	  || !g_EntityBrowser.m_dependenciesReady ) {
+		EntityBrowser_scheduleFilterApply();
+		return false;
+	}
 	g_EntityBrowser.queueDraw();
+	return true;
 }
 
 static void EntityBrowser_applyCurrentFilterNow(){
-	if ( !g_EntityBrowser.m_mapReady
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_EntityBrowser.m_mapReady
+	  || !g_EntityBrowser.m_entityClassesReady
+	  || !g_EntityBrowser.m_dependenciesReady
 	  || g_EntityBrowser.m_referenceRefreshInProgress
 	  || g_EntityBrowser.m_previewLoadInProgress
 	  || g_EntityBrowser.m_treeView == nullptr
@@ -1899,10 +1939,19 @@ static void EntityBrowser_constructCategories(){
 }
 
 static void EntityBrowser_constructTree(){
-	EntityBrowser_cancelPendingFilterApply();
-	if ( g_EntityBrowser.m_treeView == nullptr ) {
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_EntityBrowser.m_mapReady
+	  || !g_EntityBrowser.m_entityClassesReady
+	  || !g_EntityBrowser.m_dependenciesReady
+	  || g_EntityBrowser.m_referenceRefreshInProgress
+	  || g_EntityBrowser.m_previewLoadInProgress
+	  || g_EntityBrowser.m_treeView == nullptr
+	  || !g_EntityBrowser.m_treeView->isVisible() ) {
+		g_entityBrowserTreeConstructed = false;
 		return;
 	}
+	EntityBrowser_cancelPendingFilterApply();
+	const std::size_t lifecycleGeneration = g_EntityBrowser.m_lifecycleGeneration;
 
 	g_EntityBrowser.setCurrentCategory( nullptr );
 	EntityBrowser_constructCategories();
@@ -1919,17 +1968,28 @@ static void EntityBrowser_constructTree(){
 		model->invisibleRootItem()->appendRow( new QStandardItem( category.name.c_str() ) );
 	}
 
+	bool categoryReady = true;
 	if ( model->rowCount() > 0 ) {
 		const QModelIndex first = model->index( 0, 0 );
 		g_EntityBrowser.m_treeView->setCurrentIndex( first );
-		EntityBrowser_selectCategory( first.data( Qt::ItemDataRole::DisplayRole ).toString() );
+		categoryReady = EntityBrowser_selectCategory( first.data( Qt::ItemDataRole::DisplayRole ).toString() );
 	}
 
-	g_entityBrowserTreeConstructed = true;
+	if ( categoryReady
+	  && lifecycleGeneration == g_EntityBrowser.m_lifecycleGeneration
+	  && BrowserLifecycle_browserWorkAllowed()
+	  && g_EntityBrowser.m_mapReady
+	  && g_EntityBrowser.m_entityClassesReady
+	  && g_EntityBrowser.m_dependenciesReady ) {
+		g_entityBrowserTreeConstructed = true;
+	}
 }
 
 static void EntityBrowser_reloadTree(){
-	if ( !g_EntityBrowser.m_mapReady
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_EntityBrowser.m_mapReady
+	  || !g_EntityBrowser.m_entityClassesReady
+	  || !g_EntityBrowser.m_dependenciesReady
 	  || g_EntityBrowser.m_referenceRefreshInProgress
 	  || g_EntityBrowser.m_previewLoadInProgress ) {
 		g_EntityBrowser.m_treeReloadPending = true;
@@ -1942,14 +2002,32 @@ static void EntityBrowser_reloadTree(){
 }
 
 static void EntityBrowser_queuePendingTreeReload(){
-	if ( !g_EntityBrowser.m_treeReloadPending || g_EntityBrowser.m_treeReloadQueued ) {
+	if ( !g_EntityBrowser.m_treeReloadPending
+	  || g_EntityBrowser.m_treeReloadQueued
+	  || !BrowserLifecycle_browserWorkAllowed()
+	  || !g_EntityBrowser.m_mapReady
+	  || !g_EntityBrowser.m_entityClassesReady
+	  || !g_EntityBrowser.m_dependenciesReady
+	  || g_EntityBrowser.m_referenceRefreshInProgress
+	  || g_EntityBrowser.m_previewLoadInProgress ) {
 		return;
 	}
-	if ( QTreeView* treeView = g_EntityBrowser.m_treeView; treeView != nullptr ) {
+	if ( QTreeView* treeView = g_EntityBrowser.m_treeView; treeView != nullptr && treeView->isVisible() ) {
+		const std::size_t graphRevision = g_EntityBrowser.m_previewGraphRevision;
 		g_EntityBrowser.m_treeReloadQueued = true;
-		QTimer::singleShot( 0, treeView, [](){
+		QTimer::singleShot( 0, treeView, [treeView, graphRevision](){
+			if ( graphRevision != g_EntityBrowser.m_previewGraphRevision ) {
+				return;
+			}
 			g_EntityBrowser.m_treeReloadQueued = false;
-			if ( std::exchange( g_EntityBrowser.m_treeReloadPending, false ) ) {
+			if ( g_EntityBrowser.m_treeReloadPending
+			  && treeView->isVisible()
+			  && BrowserLifecycle_browserWorkAllowed()
+			  && g_EntityBrowser.m_mapReady
+			  && g_EntityBrowser.m_entityClassesReady
+			  && g_EntityBrowser.m_dependenciesReady
+			  && !g_EntityBrowser.m_referenceRefreshInProgress
+			  && !g_EntityBrowser.m_previewLoadInProgress ) {
 				EntityBrowser_reloadTree();
 			}
 		} );
@@ -2095,7 +2173,7 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 		auto* filterApplyTimer = g_EntityBrowser.m_filterApplyTimer = new QTimer( filterBar );
 		filterApplyTimer->setSingleShot( true );
 		QObject::connect( filterApplyTimer, &QTimer::timeout, [](){
-			EntityBrowser_applyCurrentFilterNow();
+			EntityBrowser_EnsureTree();
 		} );
 
 		QObject::connect( clearButton, &QToolButton::clicked, [entry, globalButton, usedButton](){
@@ -2203,9 +2281,14 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 }
 
 void EntityBrowser_EnsureTree(){
-	if ( !g_EntityBrowser.m_mapReady
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_EntityBrowser.m_mapReady
+	  || !g_EntityBrowser.m_entityClassesReady
+	  || !g_EntityBrowser.m_dependenciesReady
 	  || g_EntityBrowser.m_referenceRefreshInProgress
-	  || g_EntityBrowser.m_previewLoadInProgress ) {
+	  || g_EntityBrowser.m_previewLoadInProgress
+	  || g_EntityBrowser.m_treeView == nullptr
+	  || !g_EntityBrowser.m_treeView->isVisible() ) {
 		return;
 	}
 	if ( g_EntityBrowser.m_treeReloadPending ) {
@@ -2218,10 +2301,16 @@ void EntityBrowser_EnsureTree(){
 	else if ( g_EntityBrowser.m_filterApplyPending || g_EntityBrowser.m_usedFilterDirty ) {
 		EntityBrowser_applyCurrentFilterNow();
 	}
+	else {
+		EntityBrowser_ensureVisiblePreviews();
+	}
 }
 
 static void EntityBrowser_scheduleEnsureTreeIfVisible(){
-	if ( !g_EntityBrowser.m_mapReady
+	if ( !BrowserLifecycle_browserWorkAllowed()
+	  || !g_EntityBrowser.m_mapReady
+	  || !g_EntityBrowser.m_entityClassesReady
+	  || !g_EntityBrowser.m_dependenciesReady
 	  || g_EntityBrowser.m_referenceRefreshInProgress
 	  || g_EntityBrowser.m_previewLoadInProgress ) {
 		return;
@@ -2229,13 +2318,30 @@ static void EntityBrowser_scheduleEnsureTreeIfVisible(){
 	if ( QTreeView* treeView = g_EntityBrowser.m_treeView; treeView != nullptr && treeView->isVisible() ) {
 		QTimer::singleShot( 0, treeView, [treeView](){
 			if ( treeView->isVisible()
+			  && BrowserLifecycle_browserWorkAllowed()
 			  && g_EntityBrowser.m_mapReady
+			  && g_EntityBrowser.m_entityClassesReady
+			  && g_EntityBrowser.m_dependenciesReady
 			  && !g_EntityBrowser.m_referenceRefreshInProgress
 			  && !g_EntityBrowser.m_previewLoadInProgress ) {
 				EntityBrowser_EnsureTree();
 			}
 		} );
 	}
+}
+
+void EntityBrowser_resumeDeferredWork(){
+	if ( !BrowserLifecycle_browserWorkAllowed() ) {
+		return;
+	}
+	if ( g_EntityBrowser.m_treeReloadPending ) {
+		EntityBrowser_queuePendingTreeReload();
+		return;
+	}
+	if ( g_EntityBrowser.m_filterApplyPending ) {
+		EntityBrowser_scheduleFilterApply();
+	}
+	EntityBrowser_scheduleEnsureTreeIfVisible();
 }
 
 void EntityBrowser_destroyWindow(){
@@ -2293,6 +2399,7 @@ void EntityBrowser_mapReady(){
 	else {
 		g_EntityBrowser.queueDraw();
 	}
+	BrowserLifecycle_scheduleDeferredActions();
 }
 
 void EntityBrowser_beginReferenceRefresh(){
@@ -2301,7 +2408,15 @@ void EntityBrowser_beginReferenceRefresh(){
 }
 
 bool EntityBrowser_canRefreshReferences(){
-	return !g_EntityBrowser.m_previewLoadInProgress;
+	return !g_EntityBrowser.m_previewLoadInProgress
+	    && !g_EntityBrowser.m_referenceRefreshInProgress;
+}
+
+bool EntityBrowser_canRestart(){
+	return g_EntityBrowser.m_mapReady
+	    && g_EntityBrowser.m_entityClassesReady
+	    && g_EntityBrowser.m_dependenciesReady
+	    && EntityBrowser_canRefreshReferences();
 }
 
 void EntityBrowser_endReferenceRefresh(){
@@ -2321,7 +2436,70 @@ void EntityBrowser_endReferenceRefresh(){
 	if ( !g_entityBrowserTreeConstructed ) {
 		EntityBrowser_scheduleEnsureTreeIfVisible();
 	}
+	BrowserLifecycle_scheduleDeferredActions();
 }
+
+static void EntityBrowser_entityClassesUnrealise(){
+	EntityBrowser_pausePendingFilterApply();
+	if ( !g_EntityBrowser.m_entityClassesReady ) {
+		g_EntityBrowser.m_treeReloadPending = true;
+		g_entityBrowserTreeConstructed = false;
+		return;
+	}
+	g_EntityBrowser.m_entityClassesReady = false;
+	++g_EntityBrowser.m_lifecycleGeneration;
+	g_EntityBrowser.m_treeReloadPending = true;
+	g_entityBrowserTreeConstructed = false;
+	EntityBrowser_clearPreviewGraph();
+	g_EntityBrowser.setCurrentCategory( nullptr );
+	g_EntityBrowser.visibleClasses().clear();
+	g_EntityBrowser.setCategories( {} );
+	EntityBrowser_rebuildListWidget();
+	if ( g_EntityBrowser.m_treeView != nullptr ) {
+		if ( auto* model = qobject_cast<QStandardItemModel*>( g_EntityBrowser.m_treeView->model() ) ) {
+			model->clear();
+		}
+	}
+	g_EntityBrowser.queueDraw();
+}
+
+void EntityBrowser_entityClassesReady(){
+	g_EntityBrowser.m_entityClassesReady = true;
+	EntityBrowser_scheduleEnsureTreeIfVisible();
+	BrowserLifecycle_scheduleDeferredActions();
+}
+
+void EntityBrowser_prepareForEntityClassReload(){
+	EntityBrowser_entityClassesUnrealise();
+}
+
+void EntityBrowser_prepareForModuleReload(){
+	EntityBrowser_pausePendingFilterApply();
+	g_EntityBrowser.m_dependenciesReady = false;
+	EntityBrowser_clearPreviewGraph();
+	g_EntityBrowser.queueDraw();
+}
+
+void EntityBrowser_dependenciesReady(){
+	g_EntityBrowser.m_dependenciesReady = true;
+	EntityBrowser_scheduleEnsureTreeIfVisible();
+	g_EntityBrowser.queueDraw();
+	BrowserLifecycle_scheduleDeferredActions();
+}
+
+class EntityBrowserEntityClassObserver final : public ModuleObserver
+{
+public:
+	void realise() override {
+		// The manager calls EntityBrowser_entityClassesReady after every
+		// observer has finished realising against the replacement classes.
+	}
+	void unrealise() override {
+		EntityBrowser_entityClassesUnrealise();
+	}
+};
+
+EntityBrowserEntityClassObserver g_EntityBrowserEntityClassObserver;
 
 #include "preferencesystem.h"
 #include "stringio.h"
@@ -2339,14 +2517,23 @@ void EntityBrowser_Construct(){
 	GlobalPreferenceSystem().registerPreference( "EntityBrowserListMode",
 	                                             BoolImportStringCaller( g_EntityBrowser.m_listMode ),
 	                                             BoolExportStringCaller( g_EntityBrowser.m_listMode ) );
+	g_EntityBrowser.m_entityClassesReady = false;
+	g_EntityBrowser.m_dependenciesReady = false;
+	g_EntityBrowser.m_treeReloadPending = true;
+	g_entityBrowserTreeConstructed = false;
 	g_entityGraph = new EntityGraph( g_EntityBrowser );
 	g_entityGraph->insert_root( ( new EntityGraphRoot )->node() );
+	GlobalEntityClassManager().attach( g_EntityBrowserEntityClassObserver );
 }
 
 void EntityBrowser_Destroy(){
+	GlobalEntityClassManager().detach( g_EntityBrowserEntityClassObserver );
 	EntityBrowser_cancelPendingFilterApply();
-	++g_EntityBrowser.m_previewGraphRevision;
-	g_entityGraph->erase_root();
-	delete g_entityGraph;
-	g_entityGraph = nullptr;
+	g_EntityBrowser.m_dependenciesReady = false;
+	EntityBrowser_entityClassesUnrealise();
+	if ( g_entityGraph != nullptr ) {
+		g_entityGraph->erase_root();
+		delete g_entityGraph;
+		g_entityGraph = nullptr;
+	}
 }

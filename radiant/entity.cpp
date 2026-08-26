@@ -20,6 +20,7 @@
  */
 
 #include "entity.h"
+#include "entitybrowser.h"
 
 #include "ientity.h"
 #include "iselection.h"
@@ -744,11 +745,65 @@ const char* misc_model_dialog( QWidget* parent, const char* filepath ){
 	return 0;
 }
 
-void Entity_reloadDefinitions(){
-	if( ConfirmModified( "Reload Entity Definitions" ) ){
-		GlobalEntityClassManager().unrealise();
-		GlobalEntityClassManager().realise();
+namespace {
+enum class EntityDefinitionReloadState
+{
+	None,
+	NeedsConfirmation,
+};
+
+EntityDefinitionReloadState g_entityDefinitionReloadState = EntityDefinitionReloadState::None;
+bool g_entityDefinitionReloadConfirmationInProgress = false;
+}
+
+bool Entity_processPendingDefinitionReload(){
+	if ( g_entityDefinitionReloadState == EntityDefinitionReloadState::None
+	  || g_entityDefinitionReloadConfirmationInProgress
+	  || !BrowserLifecycle_canStartModuleTransition() ) {
+		return false;
 	}
+
+	BrowserLifecycle_beginModuleTransition();
+	class ScopedModuleTransition
+	{
+	public:
+		~ScopedModuleTransition(){
+			BrowserLifecycle_endModuleTransition();
+		}
+	} transition;
+	if ( g_entityDefinitionReloadState == EntityDefinitionReloadState::NeedsConfirmation ) {
+		g_entityDefinitionReloadConfirmationInProgress = true;
+		const bool confirmed = ConfirmModified( "Reload Entity Definitions" );
+		g_entityDefinitionReloadConfirmationInProgress = false;
+		if ( !BrowserLifecycle_moduleTransitionStillValid() ) {
+			return false;
+		}
+		if ( !confirmed ) {
+			g_entityDefinitionReloadState = EntityDefinitionReloadState::None;
+			return false;
+		}
+	}
+
+	g_entityDefinitionReloadState = EntityDefinitionReloadState::None;
+	EntityBrowser_prepareForEntityClassReload();
+	GlobalEntityClassManager().unrealise();
+	GlobalEntityClassManager().realise();
+	return true;
+}
+
+void Entity_cancelPendingDefinitionReload(){
+	g_entityDefinitionReloadState = EntityDefinitionReloadState::None;
+	g_entityDefinitionReloadConfirmationInProgress = false;
+}
+
+void Entity_reloadDefinitions(){
+	if ( !BrowserLifecycle_acceptsDeferredRequests() ) {
+		return;
+	}
+	if ( g_entityDefinitionReloadState == EntityDefinitionReloadState::None ) {
+		g_entityDefinitionReloadState = EntityDefinitionReloadState::NeedsConfirmation;
+	}
+	BrowserLifecycle_scheduleDeferredActions();
 }
 
 /*
@@ -886,6 +941,7 @@ void Entity_registerShortcuts(){
 #include "stringio.h"
 
 void Entity_Construct(){
+	Entity_cancelPendingDefinitionReload();
 	GlobalCommands_insert( "EntityColorSet", makeCallbackF( Entity_setColour ), QKeySequence( "K" ) );
 	GlobalCommands_insert( "EntityColorNormalize", makeCallbackF( Entity_normalizeColor ) );
 	GlobalCommands_insert( "EntitiesConnect", makeCallbackF( Entity_connectSelected ), QKeySequence( "Ctrl+K" ) );
@@ -907,4 +963,5 @@ void Entity_Construct(){
 }
 
 void Entity_Destroy(){
+	Entity_cancelPendingDefinitionReload();
 }

@@ -157,6 +157,15 @@ void ScreenUpdates_Enable();
 bool ScreenUpdates_Enabled();
 void ScreenUpdates_process();
 
+bool BrowserLifecycle_canStartModuleTransition();
+bool BrowserLifecycle_acceptsDeferredRequests();
+bool BrowserLifecycle_browserWorkAllowed();
+bool BrowserLifecycle_moduleTransitionStillValid();
+void BrowserLifecycle_beginModuleTransition();
+void BrowserLifecycle_endModuleTransition();
+void BrowserLifecycle_scheduleDeferredActions();
+void BrowserLifecycle_prepareForShutdown();
+
 class ScopeDisableScreenUpdates
 {
 public:
@@ -171,6 +180,8 @@ public:
 
 void EnginePath_Realise();
 void EnginePath_Unrealise();
+void EnginePath_requestGameNameChange( const char* gamename );
+void GameMode_requestChange( const char* gamemode );
 
 class ModuleObserver;
 
