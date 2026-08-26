@@ -1,0 +1,107 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Radiant (gdb, msys2)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\\\install\\\\radiant.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "VIBERADIANT_CRASH_DIR",
+          "value": "${workspaceFolder}\\\\install\\\\crashdumps"
+        }
+      ],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "${config:netradiant.msys2Root}\\\\${config:netradiant.msys2Subsystem}\\\\bin\\\\gdb.exe",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "name": "Q3Map2 (gdb, msys2)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\\\install\\\\q3map2.exe",
+      "args": [
+        "-help"
+      ],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "VIBERADIANT_CRASH_DIR",
+          "value": "${workspaceFolder}\\\\install\\\\crashdumps"
+        }
+      ],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "${config:netradiant.msys2Root}\\\\${config:netradiant.msys2Subsystem}\\\\bin\\\\gdb.exe",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "name": "Radiant (gdb, msys2, extradebug)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\\\install\\\\radiant.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "VIBERADIANT_CRASH_DIR",
+          "value": "${workspaceFolder}\\\\install\\\\crashdumps"
+        }
+      ],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "${config:netradiant.msys2Root}\\\\${config:netradiant.msys2Subsystem}\\\\bin\\\\gdb.exe",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "name": "Radiant (gdb, msys2, extradebug_quicker)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\\\install\\\\radiant.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "VIBERADIANT_CRASH_DIR",
+          "value": "${workspaceFolder}\\\\install\\\\crashdumps"
+        }
+      ],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "${config:netradiant.msys2Root}\\\\${config:netradiant.msys2Subsystem}\\\\bin\\\\gdb.exe",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ]
+}

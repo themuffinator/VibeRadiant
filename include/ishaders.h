@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include "generic/constant.h"
 #include "generic/callback.h"
 #include "math/matrix.h"
@@ -161,12 +163,17 @@ public:
 	virtual void IncRef() = 0;
 // Decrement the reference count
 	virtual void DecRef() = 0;
-// get/set the qtexture_t* Radiant uses to represent this shader object
+	// Fully realise and return the qtexture_t Radiant uses to represent this shader.
 	virtual qtexture_t* getTexture() const = 0;
+	// Return a renderable texture, which may be a placeholder while passive
+	// realisation is pending.
+	virtual qtexture_t* getTextureForRendering() const = 0;
 	virtual qtexture_t* getSkyBox() = 0;
 	virtual qtexture_t* getDiffuse() const = 0;
 	virtual qtexture_t* getBump() const = 0;
 	virtual qtexture_t* getSpecular() const = 0;
+	virtual bool isTextureRealised() const = 0;
+	virtual void requestTextureRealise() = 0;
 // get shader name
 	virtual const char* getName() const = 0;
 	virtual bool IsInUse() const = 0;
@@ -202,7 +209,7 @@ class ModuleObserver;
 class ShaderSystem
 {
 public:
-	INTEGER_CONSTANT( Version, 1 );
+	INTEGER_CONSTANT( Version, 3 );
 	STRING_CONSTANT( Name, "shaders" );
 // NOTE: shader and texture names used must be full path.
 // Shaders usable as textures have prefix equal to getTexturePrefix()
@@ -229,6 +236,9 @@ public:
 	virtual void detach( ModuleObserver& observer ) = 0;
 
 	virtual void setLightingEnabled( bool enabled ) = 0;
+	virtual void setPassiveAssetCachingEnabled( bool enabled ) = 0;
+	virtual bool passiveAssetCachingEnabled() const = 0;
+	virtual void pumpPassiveAssetCaching( std::size_t maxShaders ) = 0;
 
 	virtual const char* getTexturePrefix() const = 0;
 };

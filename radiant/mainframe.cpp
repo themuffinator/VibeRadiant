@@ -555,8 +555,14 @@ void EnginePath_applyLegacyHints( GameInstallRule& rule ){
 		addAlias( "Quake" );
 	}
 	else if ( gameFileLower == "q3.game" ) {
+		addRequired( "pak0.pk3" );
 		addAlias( "Quake 3" );
 		addAlias( "Quake III Arena" );
+	}
+	else if ( gameFileLower == "quakelive.game" ) {
+		addRequired( "pak00.pk3" );
+		addAlias( "Quake Live" );
+		addAlias( "QuakeLive" );
 	}
 	else if ( gameFileLower == "heretic2.game" ) {
 		addAlias( "Heretic 2" );
@@ -720,7 +726,7 @@ bool EnginePath_hasGameDataAt( const char* installRoot, const GameInstallRule& r
 				return false;
 			}
 		}
-		return true;
+		return hasBaseDir;
 	}
 
 	return hasBaseDir && ( hasEngine || hasArchives || hasContent );
@@ -1476,9 +1482,28 @@ const char* basegame_get(){
 	return g_pGameDescription->getRequiredKeyValue( "basegame" );
 }
 
+static const char* default_gamename_get(){
+	if ( g_pGameDescription == nullptr ) {
+		return "";
+	}
+
+	if ( const char* startupGameName = StartupGameInstallationGameName_get(); !string_empty( startupGameName )
+	  && ( g_gamename.empty() || path_equal( g_gamename.c_str(), basegame_get() ) ) ) {
+		return startupGameName;
+	}
+
+	const char* defaultGameName = g_pGameDescription->getKeyValue( "defaultgamename" );
+	if ( !string_empty( defaultGameName )
+	  && ( g_gamename.empty() || path_equal( g_gamename.c_str(), basegame_get() ) ) ) {
+		return defaultGameName;
+	}
+
+	return basegame_get();
+}
+
 const char* gamename_get(){
 	if ( g_gamename.empty() ) {
-		return basegame_get();
+		return default_gamename_get();
 	}
 	return g_gamename.c_str();
 }
@@ -2199,6 +2224,7 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 		create_check_menu_item_with_mnemonic( submenu, "Show C&oordinates", "ShowCoordinates" );
 		create_check_menu_item_with_mnemonic( submenu, "Show Window Outline", "ShowWindowOutline" );
 		create_check_menu_item_with_mnemonic( submenu, "Show Axes", "ShowAxes" );
+		create_check_menu_item_with_mnemonic( submenu, "Show Camera Ortho Lines", "ShowCameraOrthoLines" );
 		create_check_menu_item_with_mnemonic( submenu, "Show 2D Workzone", "ShowWorkzone2d" );
 		create_check_menu_item_with_mnemonic( submenu, "Show Clipper Ortho Debug", "ShowClipperOrthoDebug" );
 		create_check_menu_item_with_mnemonic( submenu, "Show 3D Workzone", "ShowWorkzone3d" );
@@ -3645,6 +3671,16 @@ void FocusAllViews(){
 #include "preferencesystem.h"
 #include "stringio.h"
 
+void ConsoleCollapsedImport( bool value ){
+	Console_setCollapsed( value );
+}
+typedef FreeCaller<void(bool), ConsoleCollapsedImport> ConsoleCollapsedImportCaller;
+
+void ConsoleCollapsedExport( const BoolImportCallback& importer ){
+	importer( Console_isCollapsed() );
+}
+typedef FreeCaller<void(const BoolImportCallback&), ConsoleCollapsedExport> ConsoleCollapsedExportCaller;
+
 void MainFrame_Construct(){
 	GlobalCommands_insert( "OpenManual", makeCallbackF( OpenHelpURL ), QKeySequence( "F1" ) );
 
@@ -3706,6 +3742,7 @@ void MainFrame_Construct(){
 	GlobalPreferenceSystem().registerPreference( "ToolbarHiddenButtons", CopiedStringImportStringCaller( g_toolbarHiddenButtons ), CopiedStringExportStringCaller( g_toolbarHiddenButtons ) );
 	GlobalPreferenceSystem().registerPreference( "OpenGLFont", CopiedStringImportStringCaller( g_OpenGLFont ), CopiedStringExportStringCaller( g_OpenGLFont ) );
 	GlobalPreferenceSystem().registerPreference( "OpenGLFontSize", IntImportStringCaller( g_OpenGLFontSize ), IntExportStringCaller( g_OpenGLFontSize ) );
+	GlobalPreferenceSystem().registerPreference( "ConsoleCollapsed", makeBoolStringImportCallback( ConsoleCollapsedImportCaller() ), makeBoolStringExportCallback( ConsoleCollapsedExportCaller() ) );
 	GlobalPreferenceSystem().registerPreference( "StartupOnboardingCompleted", BoolImportStringCaller( g_startup_onboarding_completed ), BoolExportStringCaller( g_startup_onboarding_completed ) );
 	GlobalPreferenceSystem().registerPreference( "StartupOnboardingDone", BoolImportStringCaller( g_startup_onboarding_completed ), BoolExportStringCaller( g_startup_onboarding_completed ) ); // legacy compatibility
 	GlobalPreferenceSystem().registerPreference( "EditorStyle", IntImportStringCaller( g_editor_style_preference ), IntExportStringCaller( g_editor_style_preference ) );

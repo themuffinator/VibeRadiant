@@ -847,6 +847,7 @@ private:
 	OpenGLState m_state;
 	Renderables m_renderables;
 	const IShader* m_stageShader = 0;
+	IShader* m_dynamicTextureShader = 0;
 	std::size_t m_stageIndex = 0;
 
 public:
@@ -860,6 +861,9 @@ public:
 	void setStage( const IShader* shader, std::size_t stageIndex ){
 		m_stageShader = shader;
 		m_stageIndex = stageIndex;
+	}
+	void setDynamicTextureShader( IShader* shader ){
+		m_dynamicTextureShader = shader;
 	}
 
 	void render( OpenGLState& current, unsigned int globalstate, const Vector3& viewer );
@@ -978,6 +982,7 @@ public:
 	void incrementUsed() override {
 		if ( ++m_used == 1 && m_shader != 0 ) {
 			m_shader->SetInUse( true );
+			m_shader->requestTextureRealise();
 		}
 	}
 	void decrementUsed() override {
@@ -1029,8 +1034,11 @@ public:
 		return *m_shader->getTexture();
 	}
 	unsigned int getFlags() const override {
-		ASSERT_NOTNULL( m_shader );
-		return m_shader->getFlags();
+		// Editor-only helper renderstates (for example $POINT/$TEXT and similar
+		// hardcoded OpenGL states) intentionally have no backing IShader.
+		// Callers use flags as a feature query, so treat those states as
+		// carrying no material flags instead of asserting during startup/render.
+		return m_shader != 0 ? m_shader->getFlags() : 0;
 	}
 	IShader& getShader() const {
 		ASSERT_NOTNULL( m_shader );
@@ -1199,6 +1207,9 @@ public:
 #if 0
 		//qglGetFloatv( GL_MODELVIEW_MATRIX, reinterpret_cast<float*>( &modelview ) );
 #endif
+
+		// Keep deferred texture uploads progressing while the editor is in use.
+		GlobalShaderSystem().pumpPassiveAssetCaching( 1 );
 
 		ASSERT_MESSAGE( realised(), "render states are not realised" );
 
@@ -2031,6 +2042,28 @@ void OpenGLStateBucket::render( OpenGLState& current, unsigned int globalstate, 
 		bool texgenEnabled = false;
 		bool texMatrixPushed = false;
 
+		if ( m_stageShader == 0
+		  && m_dynamicTextureShader != 0
+		  && ( current.m_state & RENDER_TEXTURE ) != 0 ) {
+			m_dynamicTextureShader->requestTextureRealise();
+			qtexture_t* texture = m_dynamicTextureShader->getTextureForRendering();
+			const GLint textureId = texture != nullptr ? texture->texture_number : 0;
+			setTextureState( current.m_texture, textureId, GL_TEXTURE0 );
+			gl().glActiveTexture( GL_TEXTURE0 );
+			gl().glClientActiveTexture( GL_TEXTURE0 );
+			gl().glBindTexture( GL_TEXTURE_2D, textureId );
+			if ( ( current.m_state & RENDER_COLOURWRITE ) != 0 ) {
+				const float alpha = m_state.m_colour[3];
+				const Vector4 colour = texture != nullptr
+				                       ? Vector4( texture->color, alpha )
+				                       : Vector4( 1, 1, 1, alpha );
+				if ( colour != current.m_colour ) {
+					gl().glColor4f( colour[0], colour[1], colour[2], colour[3] );
+					current.m_colour = colour;
+				}
+			}
+		}
+
 		if ( m_stageShader != 0 ) {
 			ShaderStage stage;
 			const bool stageFound = ShaderStage_getAtIndex( *m_stageShader, ShaderCache_getShaderTime(), m_stageIndex, stage );
@@ -2481,185 +2514,188 @@ void OpenGLShader::construct( const char* name ){
 			state.m_sort = OpenGLState::eSortFirst;
 		}
 		break;
-	default:
-		// construction from IShader
-		m_shader = QERApp_Shader_ForName( name );
+		default:
+			// construction from IShader
+			m_shader = QERApp_Shader_ForName( name );
+			m_shader->requestTextureRealise();
 
-		if ( g_ShaderCache->lightingEnabled() && m_shader->getBump() != 0 && m_shader->getBump()->texture_number != 0 ) { // is a bump shader
-			state.m_state = RENDER_FILL | RENDER_CULLFACE | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_DEPTHWRITE | RENDER_COLOURWRITE | RENDER_PROGRAM;
-			state.m_colour = Vector4( 0, 0, 0, 1 );
-			state.m_sort = OpenGLState::eSortOpaque;
+			if ( g_ShaderCache->lightingEnabled() && m_shader->getBump() != 0 && m_shader->getBump()->texture_number != 0 ) { // is a bump shader
+				state.m_state = RENDER_FILL | RENDER_CULLFACE | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_DEPTHWRITE | RENDER_COLOURWRITE | RENDER_PROGRAM;
+				state.m_colour = Vector4( 0, 0, 0, 1 );
+				state.m_sort = OpenGLState::eSortOpaque;
 
-			state.m_program = &g_depthFillGLSL;
+				state.m_program = &g_depthFillGLSL;
 
-			OpenGLState& bumpPass = appendDefaultPass();
-			bumpPass.m_texture = m_shader->getDiffuse()->texture_number;
-			bumpPass.m_texture1 = m_shader->getBump()->texture_number;
-			bumpPass.m_texture2 = m_shader->getSpecular()->texture_number;
+				OpenGLState& bumpPass = appendDefaultPass();
+				bumpPass.m_texture = m_shader->getDiffuse()->texture_number;
+				bumpPass.m_texture1 = m_shader->getBump()->texture_number;
+				bumpPass.m_texture2 = m_shader->getSpecular()->texture_number;
 
-			bumpPass.m_state = RENDER_BLEND | RENDER_FILL | RENDER_CULLFACE | RENDER_DEPTHTEST | RENDER_COLOURWRITE | RENDER_SMOOTH | RENDER_BUMP | RENDER_PROGRAM | RENDER_LIGHTING;
+				bumpPass.m_state = RENDER_BLEND | RENDER_FILL | RENDER_CULLFACE | RENDER_DEPTHTEST | RENDER_COLOURWRITE | RENDER_SMOOTH | RENDER_BUMP | RENDER_PROGRAM | RENDER_LIGHTING;
 
-			bumpPass.m_program = &g_bumpGLSL;
+				bumpPass.m_program = &g_bumpGLSL;
 
-			bumpPass.m_depthfunc = GL_LEQUAL;
-			bumpPass.m_sort = OpenGLState::eSortMultiFirst;
-			bumpPass.m_blend_src = GL_ONE;
-			bumpPass.m_blend_dst = GL_ONE;
-		}
-		else if( m_shader->getSkyBox() != nullptr && m_shader->getSkyBox()->texture_number != 0 )
-		{
-			state.m_texture = m_shader->getTexture()->texture_number;
-			state.m_textureSkyBox = m_shader->getSkyBox()->texture_number;
-
-			state.m_state = RENDER_FILL | RENDER_CULLFACE | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_DEPTHWRITE | RENDER_COLOURWRITE | RENDER_PROGRAM;
-			state.m_colour = Vector4( m_shader->getTexture()->color, 1 );
-			state.m_sort = OpenGLState::eSortFullbright;
-
-			state.m_program = &g_skyboxGLSL;
-		}
-		else if ( shader_is_quake2_sky_surface( *m_shader )
-		       && ( m_quake2SkyBox = capture_quake2_worldspawn_skybox() ) != nullptr
-		       && m_quake2SkyBox->texture_number != 0 )
-		{
-			state.m_texture = m_shader->getTexture()->texture_number;
-			state.m_textureSkyBox = m_quake2SkyBox->texture_number;
-
-			state.m_state = RENDER_FILL | RENDER_CULLFACE | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_DEPTHWRITE | RENDER_COLOURWRITE | RENDER_PROGRAM;
-			state.m_colour = Vector4( m_shader->getTexture()->color, 1 );
-			state.m_sort = OpenGLState::eSortFullbright;
-
-			state.m_program = &g_skyboxGLSL;
-		}
-		else if ( m_shader->hasStages() )
-		{
-			std::vector<ShaderStage> stages;
-			struct StageCollector
-			{
-				std::vector<ShaderStage>* m_stages;
-				void operator()( const ShaderStage& stage ){
-					m_stages->push_back( stage );
-				}
-			} collector{ &stages };
-			m_shader->forEachStage( 0.0f, makeCallback( collector ) );
-
-			if ( stages.empty() ) {
-				return;
+				bumpPass.m_depthfunc = GL_LEQUAL;
+				bumpPass.m_sort = OpenGLState::eSortMultiFirst;
+				bumpPass.m_blend_src = GL_ONE;
+				bumpPass.m_blend_dst = GL_ONE;
 			}
-
-			for ( std::size_t i = 0; i < stages.size(); ++i )
+			else if ( m_shader->getSkyBox() != nullptr && m_shader->getSkyBox()->texture_number != 0 )
 			{
-				const ShaderStage& stage = stages[i];
-				OpenGLState& pass = ( i == 0 ) ? state : appendDefaultPass();
-				OpenGLStateBucket* bucket = m_passes.back();
-				bucket->setStage( m_shader, i );
+				state.m_texture = m_shader->getTextureForRendering()->texture_number;
+				state.m_textureSkyBox = m_shader->getSkyBox()->texture_number;
 
-				pass.m_state = RENDER_FILL | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_COLOURWRITE | RENDER_LIGHTING | RENDER_SMOOTH;
+				state.m_state = RENDER_FILL | RENDER_CULLFACE | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_DEPTHWRITE | RENDER_COLOURWRITE | RENDER_PROGRAM;
+				state.m_colour = Vector4( m_shader->getTextureForRendering()->color, 1 );
+				state.m_sort = OpenGLState::eSortFullbright;
+
+				state.m_program = &g_skyboxGLSL;
+				m_passes.back()->setDynamicTextureShader( m_shader );
+			}
+			else if ( shader_is_quake2_sky_surface( *m_shader )
+			       && ( m_quake2SkyBox = capture_quake2_worldspawn_skybox() ) != nullptr
+			       && m_quake2SkyBox->texture_number != 0 )
+			{
+				state.m_texture = m_shader->getTextureForRendering()->texture_number;
+				state.m_textureSkyBox = m_quake2SkyBox->texture_number;
+
+				state.m_state = RENDER_FILL | RENDER_CULLFACE | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_DEPTHWRITE | RENDER_COLOURWRITE | RENDER_PROGRAM;
+				state.m_colour = Vector4( m_shader->getTextureForRendering()->color, 1 );
+				state.m_sort = OpenGLState::eSortFullbright;
+
+				state.m_program = &g_skyboxGLSL;
+				m_passes.back()->setDynamicTextureShader( m_shader );
+			}
+			else if ( m_shader->hasStages() )
+			{
+				std::vector<ShaderStage> stages;
+				struct StageCollector
+				{
+					std::vector<ShaderStage>* m_stages;
+					void operator()( const ShaderStage& stage ){
+						m_stages->push_back( stage );
+					}
+				} collector{ &stages };
+				m_shader->forEachStage( 0.0f, makeCallback( collector ) );
+
+				if ( stages.empty() ) {
+					return;
+				}
+
+				for ( std::size_t i = 0; i < stages.size(); ++i )
+				{
+					const ShaderStage& stage = stages[i];
+					OpenGLState& pass = ( i == 0 ) ? state : appendDefaultPass();
+					OpenGLStateBucket* bucket = m_passes.back();
+					bucket->setStage( m_shader, i );
+
+					pass.m_state = RENDER_FILL | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_COLOURWRITE | RENDER_LIGHTING | RENDER_SMOOTH;
+					if ( ( m_shader->getFlags() & QER_CULL ) != 0 ) {
+						if ( m_shader->getCull() == IShader::eCullBack ) {
+							pass.m_state |= RENDER_CULLFACE;
+						}
+					}
+					else
+					{
+						pass.m_state |= RENDER_CULLFACE;
+					}
+					if ( stage.usesVertexColour ) {
+						pass.m_state |= RENDER_COLOURARRAY;
+					}
+					if ( stage.depthWrite ) {
+						pass.m_state |= RENDER_DEPTHWRITE;
+					}
+					if ( stage.hasBlendFunc ) {
+						pass.m_state |= RENDER_BLEND;
+					}
+					if ( stage.alphaFunc != eStageAlphaNone ) {
+						pass.m_state |= RENDER_ALPHATEST;
+					}
+
+					pass.m_texture = stage.texture != 0 ? stage.texture->texture_number : 0;
+					pass.m_colour = stage.colour;
+					pass.m_blend_src = convertBlendFactor( stage.blendFunc.m_src );
+					pass.m_blend_dst = convertBlendFactor( stage.blendFunc.m_dst );
+					pass.m_depthfunc = convertStageDepthFunc( stage.depthFunc );
+					pass.m_alphafunc = convertStageAlphaFunc( stage.alphaFunc );
+					pass.m_alpharef = stage.alphaRef;
+					pass.m_sort = stage.hasBlendFunc ? OpenGLState::eSortTranslucent : OpenGLState::eSortFullbright;
+				}
+			}
+			else
+			{
+				state.m_texture = m_shader->getTextureForRendering()->texture_number;
+
+				state.m_state = RENDER_FILL | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_COLOURWRITE | RENDER_LIGHTING | RENDER_SMOOTH;
 				if ( ( m_shader->getFlags() & QER_CULL ) != 0 ) {
 					if ( m_shader->getCull() == IShader::eCullBack ) {
-						pass.m_state |= RENDER_CULLFACE;
+						state.m_state |= RENDER_CULLFACE;
 					}
 				}
 				else
 				{
-					pass.m_state |= RENDER_CULLFACE;
-				}
-				if ( stage.usesVertexColour ) {
-					pass.m_state |= RENDER_COLOURARRAY;
-				}
-				if ( stage.depthWrite ) {
-					pass.m_state |= RENDER_DEPTHWRITE;
-				}
-				if ( stage.hasBlendFunc ) {
-					pass.m_state |= RENDER_BLEND;
-				}
-				if ( stage.alphaFunc != eStageAlphaNone ) {
-					pass.m_state |= RENDER_ALPHATEST;
-				}
-
-				pass.m_texture = stage.texture != 0 ? stage.texture->texture_number : 0;
-				pass.m_colour = stage.colour;
-				pass.m_blend_src = convertBlendFactor( stage.blendFunc.m_src );
-				pass.m_blend_dst = convertBlendFactor( stage.blendFunc.m_dst );
-				pass.m_depthfunc = convertStageDepthFunc( stage.depthFunc );
-				pass.m_alphafunc = convertStageAlphaFunc( stage.alphaFunc );
-				pass.m_alpharef = stage.alphaRef;
-				pass.m_sort = stage.hasBlendFunc ? OpenGLState::eSortTranslucent : OpenGLState::eSortFullbright;
-			}
-		}
-		else
-		{
-			state.m_texture = m_shader->getTexture()->texture_number;
-
-			state.m_state = RENDER_FILL | RENDER_TEXTURE | RENDER_DEPTHTEST | RENDER_COLOURWRITE | RENDER_LIGHTING | RENDER_SMOOTH;
-			if ( ( m_shader->getFlags() & QER_CULL ) != 0 ) {
-				if ( m_shader->getCull() == IShader::eCullBack ) {
 					state.m_state |= RENDER_CULLFACE;
 				}
-			}
-			else
-			{
-				state.m_state |= RENDER_CULLFACE;
-			}
-			if ( ( m_shader->getFlags() & QER_ALPHATEST ) != 0 ) {
-				state.m_state |= RENDER_ALPHATEST;
-				IShader::EAlphaFunc alphafunc;
-				m_shader->getAlphaFunc( &alphafunc, &state.m_alpharef );
-				switch ( alphafunc )
-				{
-				case IShader::eAlways:
-					state.m_alphafunc = GL_ALWAYS;
-					break;
-				case IShader::eEqual:
-					state.m_alphafunc = GL_EQUAL;
-					break;
-				case IShader::eLess:
-					state.m_alphafunc = GL_LESS;
-					break;
-				case IShader::eGreater:
-					state.m_alphafunc = GL_GREATER;
-					break;
-				case IShader::eLEqual:
-					state.m_alphafunc = GL_LEQUAL;
-					break;
-				case IShader::eGEqual:
-					state.m_alphafunc = GL_GEQUAL;
-					break;
+				if ( ( m_shader->getFlags() & QER_ALPHATEST ) != 0 ) {
+					state.m_state |= RENDER_ALPHATEST;
+					IShader::EAlphaFunc alphafunc;
+					m_shader->getAlphaFunc( &alphafunc, &state.m_alpharef );
+					switch ( alphafunc )
+					{
+					case IShader::eAlways:
+						state.m_alphafunc = GL_ALWAYS;
+						break;
+					case IShader::eEqual:
+						state.m_alphafunc = GL_EQUAL;
+						break;
+					case IShader::eLess:
+						state.m_alphafunc = GL_LESS;
+						break;
+					case IShader::eGreater:
+						state.m_alphafunc = GL_GREATER;
+						break;
+					case IShader::eLEqual:
+						state.m_alphafunc = GL_LEQUAL;
+						break;
+					case IShader::eGEqual:
+						state.m_alphafunc = GL_GEQUAL;
+						break;
+					}
 				}
-			}
-			state.m_colour = Vector4( m_shader->getTexture()->color, 1 );
+				state.m_colour = Vector4( m_shader->getTextureForRendering()->color, 1 );
 
-			if ( ( m_shader->getFlags() & QER_TRANS ) != 0 ) {
-				state.m_state |= RENDER_BLEND;
-				state.m_colour[3] = m_shader->getTrans();
-				state.m_sort = OpenGLState::eSortTranslucent;
-				BlendFunc blendFunc = m_shader->getBlendFunc();
-				state.m_blend_src = convertBlendFactor( blendFunc.m_src );
-				state.m_blend_dst = convertBlendFactor( blendFunc.m_dst );
-				state.m_depthfunc = GL_LEQUAL;
-//				if ( state.m_blend_src == GL_SRC_ALPHA || state.m_blend_dst == GL_SRC_ALPHA ) {
-//					state.m_state |= RENDER_DEPTHWRITE;
-//				}
-			}
-			else
-			{
-				state.m_state |= RENDER_DEPTHWRITE;
-				state.m_sort = OpenGLState::eSortFullbright;
-			}
+				if ( ( m_shader->getFlags() & QER_TRANS ) != 0 ) {
+					state.m_state |= RENDER_BLEND;
+					state.m_colour[3] = m_shader->getTrans();
+					state.m_sort = OpenGLState::eSortTranslucent;
+					BlendFunc blendFunc = m_shader->getBlendFunc();
+					state.m_blend_src = convertBlendFactor( blendFunc.m_src );
+					state.m_blend_dst = convertBlendFactor( blendFunc.m_dst );
+					state.m_depthfunc = GL_LEQUAL;
+				}
+				else
+				{
+					state.m_state |= RENDER_DEPTHWRITE;
+					state.m_sort = OpenGLState::eSortFullbright;
+				}
 
-			if ( g_ShaderCache->lightingEnabled() && g_pGameDescription->mGameType != "doom3" && g_previewLightGLSL.isValid() ) {
-				OpenGLState& lightPass = appendDefaultPass();
-				lightPass = state;
-				lightPass.m_state |= RENDER_BLEND | RENDER_BUMP | RENDER_PROGRAM;
-				lightPass.m_state &= ~RENDER_DEPTHWRITE;
-				lightPass.m_program = &g_previewLightGLSL;
-				lightPass.m_blend_src = GL_ONE;
-				lightPass.m_blend_dst = GL_ONE;
-				lightPass.m_depthfunc = GL_LEQUAL;
-				lightPass.m_sort = OpenGLState::eSortTranslucent;
+				if ( g_ShaderCache->lightingEnabled() && g_pGameDescription->mGameType != "doom3" && g_previewLightGLSL.isValid() ) {
+					OpenGLState& lightPass = appendDefaultPass();
+					lightPass = state;
+					lightPass.m_state |= RENDER_BLEND | RENDER_BUMP | RENDER_PROGRAM;
+					lightPass.m_state &= ~RENDER_DEPTHWRITE;
+					lightPass.m_program = &g_previewLightGLSL;
+					lightPass.m_blend_src = GL_ONE;
+					lightPass.m_blend_dst = GL_ONE;
+					lightPass.m_depthfunc = GL_LEQUAL;
+					lightPass.m_sort = OpenGLState::eSortTranslucent;
+					m_passes.back()->setDynamicTextureShader( m_shader );
+				}
+
+				m_passes.front()->setDynamicTextureShader( m_shader );
 			}
 		}
 	}
-}
 
 
 #include "modulesystem/singletonmodule.h"

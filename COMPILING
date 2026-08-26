@@ -1,156 +1,108 @@
-
 VibeRadiant Build Instructions
 ====================================
 
-This document covers building VibeRadiant from source using the
-top-level Makefile. The default build outputs are staged under ./install.
+VibeRadiant now uses a native Meson + Ninja build graph.
+No legacy Make wrapper is used by Meson anymore.
 
-Getting the source
+Quick start (Meson/Ninja)
+-------------------------
+
+1) Configure (the all-in-one gamepack is downloaded during the first install):
+   meson setup build --prefix "$(pwd)/install" -Dinstall_data=true -Ddownload_gamepacks=allinone
+
+2) Build:
+   meson compile -C build
+
+3) Stage runtime tree:
+   meson install -C build --no-rebuild --tags runtime
+
+Core Meson options
 ------------------
-git clone https://github.com/themuffinator/VibeRadiant.git
-cd VibeRadiant
 
-Build system overview
----------------------
-- Build entry point: top-level Makefile.
-- Default target: all (dependencies-check, binaries, install-data, install-dll).
-- Output location: INSTALLDIR (default: install).
-- Linux/macOS binaries are named with the arch suffix (radiant.<arch>) and
-  a convenience symlink install/radiant is created.
+- `-Dbuild_profile=release|debug|extradebug|extradebug_quicker|profile|native`
+- `-Dinstall_data=true|false`
+- `-Dinstall_dlls=true|false` (Windows)
+- `-Ddownload_gamepacks=no|yes|all|allinone`
+- `-Dgamepack_source=VibePack`
+- `-Dassimp_internal=true|false`
+- `-Dqt_major=5|6`
+- `-Dradiant_aboutmsg="<text>"`
 
-Configuration file (optional)
------------------------------
-The Makefile includes Makefile.conf by default. You can edit it or keep a
-separate local file and pass MAKEFILE_CONF to make.
-
-Common overrides
+Example profiles
 ----------------
-- BUILD: release (default), debug, extradebug, extradebug_quicker, profile, native
-- INSTALLDIR: output directory (default: install)
-- RADIANT_ABOUTMSG: custom about-box text
-- DEPENDENCIES_CHECK: quiet (default), verbose, off
-- DOWNLOAD_GAMEPACKS: allinone (default), yes, all, no
-- INSTALL_DATA: yes/no (stage docs + gamepacks)
-- INSTALL_DLLS: yes/no (Windows DLL staging)
-- ASSIMP_INTERNAL: yes to build bundled assimp, no to use system assimp
-- PKG_CONFIG_PATH: for nonstandard dependency prefixes
-- QT_MAJOR: set to 6 (default) or 5 to target Qt5 pkg-config modules
 
-Dependencies (common)
----------------------
+Release/dev-fast:
+  meson setup build-release --prefix "$(pwd)/install" -Dbuild_profile=release -Dinstall_data=false -Dinstall_dlls=false -Ddownload_gamepacks=no
+  meson compile -C build-release
+  meson install -C build-release --no-rebuild --tags runtime
+
+Debug:
+  meson setup build-debug --prefix "$(pwd)/install" -Dbuild_profile=debug -Dinstall_data=false -Dinstall_dlls=false -Ddownload_gamepacks=no
+  meson compile -C build-debug
+  meson install -C build-debug --no-rebuild --tags runtime
+
+Full packaging-style install:
+  meson setup build-full --prefix "$(pwd)/install" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=allinone
+  meson compile -C build-full
+  meson install -C build-full --no-rebuild --tags runtime
+
+Common dependencies
+-------------------
+
 Build tools:
-- gcc/g++, GNU make
+- Meson
+- Ninja
+- CMake (for bundled idTech2 ericw-tools build)
+- gcc/g++
 - pkg-config
 - git
-- wget and unzip (for gamepacks)
-- svn (required when DOWNLOAD_GAMEPACKS=yes or all)
-- standard shell tools: sed, find, diff, tar
+- wget + unzip (if downloading gamepacks)
+- svn (if using `download_gamepacks=yes|all`)
 
-Libraries (development headers):
-- Qt6Core, Qt6Gui, Qt6Widgets, Qt6Svg, Qt6Network, Qt6Multimedia
+Libraries:
+- Qt Core/Gui/Widgets/Svg/Network/Multimedia/OpenGL(+OpenGLWidgets)
 - glib-2.0
 - libxml2
 - libpng
 - zlib
 - libjpeg
 - OpenGL
-- assimp (or set ASSIMP_INTERNAL=yes)
-
-The dependency checker uses pkg-config and a small compile/link test.
-Use DEPENDENCIES_CHECK=verbose to see failing commands.
-
-Linux
------
-1) Install build tools and dependencies with your distro's package manager.
-   The checker looks for packages equivalent to:
-     libjpeg, glib-2.0, libxml2, libpng, OpenGL, Qt6 (Core/Gui/Widgets/Svg/Network/Multimedia),
-     zlib, assimp.
-2) Build:
-     make -j$(nproc)
-   Debug build:
-     make BUILD=debug -j$(nproc)
-3) Run:
-     ./install/radiant
+- assimp (or `-Dassimp_internal=true`)
+- oneTBB (for bundled ericw-tools)
+- Embree 4.x (for bundled ericw-tools `light`)
 
 Windows (MSYS2)
 ---------------
-1) Install MSYS2 from https://www.msys2.org/
-2) Open a MINGW32 or MINGW64 shell (not the MSYS shell).
-3) Install dependencies:
-   32-bit:
-     pacman -S --needed base-devel
-     pacman -S --needed mingw-w64-i686-{toolchain,qt6-base,qt6-svg,qt6-multimedia,assimp,libxml2}
-   64-bit:
-     pacman -S --needed base-devel
-     pacman -S --needed mingw-w64-x86_64-{toolchain,qt6-base,qt6-svg,qt6-multimedia,assimp,libxml2}
-   Optional for gamepacks:
-     pacman -S --needed unzip svn git
-4) Build (release):
-     make MAKEFILE_CONF=msys2-Makefile.conf BUILD=release -j$(nproc)
-   Developer-style build example:
-     make MAKEFILE_CONF=msys2-Makefile.conf DEPENDENCIES_CHECK=off \
-         DOWNLOAD_GAMEPACKS=no INSTALL_DLLS=no BUILD=debug \
-         RADIANT_ABOUTMSG="VibeRadiant dev build" -j$(nproc)
-5) Run:
-     .\install\radiant.exe
 
-macOS (X11/XQuartz)
--------------------
-VibeRadiant relies on X11. The setup/apple directory includes
-packaging notes and a Makefile for building a .app bundle.
+Use a MINGW shell (`mingw64` recommended):
 
-1) Install Xcode command line tools.
-2) Install XQuartz.
-3) Install dependencies with your package manager so pkg-config can find:
-   Qt6Core/Gui/Widgets/Svg/Network/Multimedia, glib-2.0, libxml2, libpng, zlib, libjpeg, assimp.
-   Homebrew example:
-     brew install qt@6 pkg-config glib libxml2 libpng jpeg-turbo assimp mesa libx11
-4) Build:
-     make
-5) Run:
-     ./install/radiant
-6) Optional .app bundle:
-     cd setup/apple
-     make
-     make image
+  pacman -S --needed base-devel git svn unzip
+  pacman -S --needed mingw-w64-x86_64-{toolchain,meson,ninja,cmake,pkgconf,qt6-base,qt6-svg,qt6-multimedia,assimp,libxml2,libpng,glib2,libjpeg-turbo,zlib,tbb,embree}
 
-Gamepacks
----------
-The build stages gamepacks into INSTALLDIR/gamepacks when INSTALL_DATA=yes.
-By default, make runs install-gamepacks.sh, which will download packs if
-DOWNLOAD_GAMEPACKS is set:
+Then:
 
-- allinone (default): download the all-in-one pack archive
-- yes: download GPL-only packs
-- all: include proprietary packs
-- no: skip downloads
+  meson setup build-msys2 --prefix "$PWD/install" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=allinone
+  meson compile -C build-msys2
+  meson install -C build-msys2 --no-rebuild --tags runtime
+  ./install/radiant.exe
 
-Install source selection is controlled by GAMEPACK_SOURCE:
-- VibePack (default): canonical VibeRadiant source pack
-- NRCPack: legacy source pack
-- auto: prefer VibePack, then NRCPack
+Legacy Makefile entrypoint (still available)
+--------------------------------------------
 
-The installer now stages from exactly one source and cleans stale gamepack
-entries first, so each game resolves to a single installed pack. During
-install, legacy `.def` entity definitions are converted to `.fgd`,
-`entityclasstype` is rewritten to use `fgd`, and remaining legacy `.def`
-files fail the install. Existing/generated `.fgd` files are also retyped
-with key-metadata heuristics (including safe numeric-option folding into
-`choices` controls) to improve typed editor controls.
+Direct `make` usage remains available for compatibility/manual workflows:
 
-If you skip downloads, you can fetch and install later:
+  make -j$(nproc)
+  make BUILD=debug -j$(nproc)
 
-  ./download-gamepacks.sh
-  GAMEPACK_SOURCE=VibePack ./install-gamepacks.sh ./install/gamepacks
+Meson is the recommended entrypoint for editor integration and daily builds.
 
-Clean/rebuild
--------------
-- make clean
-- rm -rf install
+Bundled idTech2 ericw-tools install path
+----------------------------------------
 
-Troubleshooting
----------------
-- Missing headers/libraries: re-run with DEPENDENCIES_CHECK=verbose.
-- Nonstandard prefixes: set PKG_CONFIG_PATH to your pkg-config directory.
-- Offline builds: set DOWNLOAD_GAMEPACKS=no and INSTALL_DATA=no.
-- No system assimp: set ASSIMP_INTERNAL=yes.
+`meson install --tags runtime` and `make binaries` now stage bundled ericw tools under:
+
+- `install/ericw/qbsp.[ExecutableType]`
+- `install/ericw/light.[ExecutableType]`
+- `install/ericw/vis.[ExecutableType]`
+
+This matches the default build-menu paths used by Quake/Quake2-family gamepacks.

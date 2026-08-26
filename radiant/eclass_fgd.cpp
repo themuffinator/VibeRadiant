@@ -159,6 +159,7 @@ const char* EntityClassFGD_mapAttributeType( const char* type ){
 	}
 	if ( string_equal_nocase( type, "real3" )
 	  || string_equal_nocase( type, "origin" )
+	  || string_equal_nocase( type, "vector3" )
 	  || string_equal_nocase( type, "vector" )
 	  || string_equal_nocase( type, "vecline" )
 	  || string_equal_nocase( type, "axis" ) ) {

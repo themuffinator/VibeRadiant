@@ -165,16 +165,6 @@ QColor readable_selection_text( const QColor& accent ){
 }
 
 bool os_prefers_dark_theme(){
-#if QT_VERSION >= QT_VERSION_CHECK( 6, 5, 0 )
-	const Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
-	if( scheme == Qt::ColorScheme::Dark ){
-		return true;
-	}
-	if( scheme == Qt::ColorScheme::Light ){
-		return false;
-	}
-#endif
-
 #if defined( WIN32 )
 	const QSettings personalize(
 		"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
@@ -186,6 +176,16 @@ bool os_prefers_dark_theme(){
 	const QVariant systemUsesLightTheme = personalize.value( "SystemUsesLightTheme" );
 	if ( systemUsesLightTheme.isValid() ) {
 		return systemUsesLightTheme.toInt() == 0;
+	}
+#endif
+
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 5, 0 )
+	const Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
+	if( scheme == Qt::ColorScheme::Dark ){
+		return true;
+	}
+	if( scheme == Qt::ColorScheme::Light ){
+		return false;
 	}
 #endif
 

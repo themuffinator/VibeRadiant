@@ -62,9 +62,17 @@ public:
 	static bool isOpen();
 	static void showFind();
 	static void showReplace();
+	static void showReplaceTextures();
+	static void showReplaceEntities();
+	static void showReplaceSounds();
+	static void showReplaceObjects();
 	typedef FreeCaller<void(), &FindTextureDialog::showReplace> ShowCaller;
 	typedef FreeCaller<void(), &FindTextureDialog::showFind> ShowFindCaller;
 	typedef FreeCaller<void(), &FindTextureDialog::showReplace> ShowReplaceCaller;
+	typedef FreeCaller<void(), &FindTextureDialog::showReplaceTextures> ShowReplaceTexturesCaller;
+	typedef FreeCaller<void(), &FindTextureDialog::showReplaceEntities> ShowReplaceEntitiesCaller;
+	typedef FreeCaller<void(), &FindTextureDialog::showReplaceSounds> ShowReplaceSoundsCaller;
+	typedef FreeCaller<void(), &FindTextureDialog::showReplaceObjects> ShowReplaceObjectsCaller;
 	static void updateTextures( const char* name );
 
 	FindTextureDialog();
@@ -711,7 +719,51 @@ void FindTextureDialog::showFind(){
 }
 
 void FindTextureDialog::showReplace(){
+	g_FindTextureDialog.exportData();
+	g_FindTextureDialog.m_entityKeyFilter = "";
 	g_FindTextureDialog.ShowDlg();
+	g_FindTextureDialog.importData();
+	g_FindTextureDialog.focusReplace();
+}
+
+void FindTextureDialog::showReplaceTextures(){
+	g_FindTextureDialog.ShowDlg();
+	if ( g_FindTextureDialog.m_tabs != nullptr ) {
+		g_FindTextureDialog.m_tabs->setCurrentIndex( 0 );
+	}
+	g_FindTextureDialog.focusReplace();
+}
+
+void FindTextureDialog::showReplaceEntities(){
+	g_FindTextureDialog.exportData();
+	g_FindTextureDialog.m_entityKeyFilter = "";
+	g_FindTextureDialog.ShowDlg();
+	if ( g_FindTextureDialog.m_tabs != nullptr ) {
+		g_FindTextureDialog.m_tabs->setCurrentIndex( 1 );
+	}
+	g_FindTextureDialog.importData();
+	g_FindTextureDialog.focusReplace();
+}
+
+void FindTextureDialog::showReplaceSounds(){
+	g_FindTextureDialog.exportData();
+	g_FindTextureDialog.m_entityKeyFilter = "noise,sound*,s_*";
+	g_FindTextureDialog.ShowDlg();
+	if ( g_FindTextureDialog.m_tabs != nullptr ) {
+		g_FindTextureDialog.m_tabs->setCurrentIndex( 1 );
+	}
+	g_FindTextureDialog.importData();
+	g_FindTextureDialog.focusReplace();
+}
+
+void FindTextureDialog::showReplaceObjects(){
+	g_FindTextureDialog.exportData();
+	g_FindTextureDialog.m_entityKeyFilter = "model*";
+	g_FindTextureDialog.ShowDlg();
+	if ( g_FindTextureDialog.m_tabs != nullptr ) {
+		g_FindTextureDialog.m_tabs->setCurrentIndex( 1 );
+	}
+	g_FindTextureDialog.importData();
 	g_FindTextureDialog.focusReplace();
 }
 
@@ -737,7 +789,10 @@ void FindTextureDialog_selectTexture( const char* name ){
 void FindTextureDialog_Construct(){
 	GlobalCommands_insert( "Find", FindTextureDialog::ShowFindCaller(), QKeySequence( "Ctrl+F" ) );
 	GlobalCommands_insert( "FindReplace", FindTextureDialog::ShowReplaceCaller(), QKeySequence( "Ctrl+H" ) );
-	GlobalCommands_insert( "FindReplaceTextures", FindTextureDialog::ShowCaller() );
+	GlobalCommands_insert( "FindReplaceTextures", FindTextureDialog::ShowReplaceTexturesCaller() );
+	GlobalCommands_insert( "FindReplaceEntities", FindTextureDialog::ShowReplaceEntitiesCaller() );
+	GlobalCommands_insert( "FindReplaceSounds", FindTextureDialog::ShowReplaceSoundsCaller() );
+	GlobalCommands_insert( "FindReplaceObjects", FindTextureDialog::ShowReplaceObjectsCaller() );
 }
 
 void FindTextureDialog_Destroy(){

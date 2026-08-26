@@ -37,6 +37,7 @@
 #include <QTreeWidget>
 #include <QHeaderView>
 #include <QPlainTextEdit>
+#include <QTabWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -1391,183 +1392,201 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 		splitter->addWidget( text );
 	}
 	{
-		auto *containerWidget = new QWidget; // Adding a QLayout to a QSplitter is not supported, use proxy widget
-		splitter->addWidget( containerWidget );
-		auto *vbox = new QVBoxLayout( containerWidget );
-		vbox->setContentsMargins( 0, 0, 0, 0 );
-		{
-			// Spawnflags (4 colums wide max, or window gets too wide.)
-			auto *grid = g_spawnflagsTable = new QGridLayout;
-			grid->setAlignment( Qt::AlignmentFlag::AlignLeft );
-			vbox->addLayout( grid );
-			for ( int i = 0; i < MAX_FLAGS; ++i )
-			{
-				auto *check = g_entitySpawnflagsCheck[i] = new QCheckBox;
-				grid->addWidget( check, i / 4, i % 4 );
-				check->hide();
-				QObject::connect( check, &QAbstractButton::clicked, EntityInspector_applySpawnflags );
-			}
-		}
-		{
-			// key/value list
-			auto *tree = g_entprops_store = new QTreeWidget;
-			tree->setColumnCount( 2 );
-			tree->setUniformRowHeights( true ); // optimization
-			tree->setHorizontalScrollBarPolicy( Qt::ScrollBarPolicy::ScrollBarAlwaysOff );
-			tree->header()->setSectionResizeMode( 0, QHeaderView::ResizeMode::ResizeToContents ); // no text elision
-			tree->setHeaderHidden( true );
-			tree->setRootIsDecorated( false );
-			tree->setEditTriggers( QAbstractItemView::EditTrigger::NoEditTriggers );
+		auto *tabs = new QTabWidget;
+		splitter->addWidget( tabs );
 
-			QObject::connect( tree, &QTreeWidget::itemPressed, EntityProperties_selection_changed );
-			tree->installEventFilter( &g_EntityProperties_keypress );
+		{
+			auto *prefabTab = new QWidget;
+			auto *prefabLayout = new QVBoxLayout( prefabTab );
+			prefabLayout->setContentsMargins( 0, 0, 0, 0 );
 
-			vbox->addWidget( tree );
+			auto *scroll = new QScrollArea;
+			scroll->setHorizontalScrollBarPolicy( Qt::ScrollBarPolicy::ScrollBarAlwaysOff );
+			scroll->setWidgetResizable( true );
+			prefabLayout->addWidget( scroll );
+
+			auto *containerWidget = new QWidget; // Adding a QLayout to a QScrollArea is not supported, use proxy widget
+			g_attributeBox = new QGridLayout( containerWidget );
+			g_attributeBox->setAlignment( Qt::AlignmentFlag::AlignTop );
+			g_attributeBox->setColumnStretch( 0, 111 );
+			g_attributeBox->setColumnStretch( 1, 333 );
+			scroll->setWidget( containerWidget ); // widget's layout must be set b4 this!
+
+			tabs->addTab( prefabTab, i18n::tr( "Prefab Keys" ) );
 		}
 
 		{
-			// key/value entry
-			auto *grid = new QGridLayout;
-			grid->setContentsMargins( 4, 0, 4, 0 );
-			vbox->addLayout( grid );
+			auto *containerWidget = new QWidget;
+			auto *vbox = new QVBoxLayout( containerWidget );
+			vbox->setContentsMargins( 0, 0, 0, 0 );
 			{
-				grid->addWidget( new QLabel( i18n::tr( "Key" ) ), 0, 0 );
-				grid->addWidget( new QLabel( i18n::tr( "Value" ) ), 1, 0 );
+				// Spawnflags (4 colums wide max, or window gets too wide.)
+				auto *grid = g_spawnflagsTable = new QGridLayout;
+				grid->setAlignment( Qt::AlignmentFlag::AlignLeft );
+				vbox->addLayout( grid );
+				for ( int i = 0; i < MAX_FLAGS; ++i )
+				{
+					auto *check = g_entitySpawnflagsCheck[i] = new QCheckBox;
+					grid->addWidget( check, i / 4, i % 4 );
+					check->hide();
+					QObject::connect( check, &QAbstractButton::clicked, EntityInspector_applySpawnflags );
+				}
 			}
 			{
-				auto *line = g_entityKeyEntry = new LineEdit;
-				grid->addWidget( line, 0, 1 );
-				QObject::connect( line, &QLineEdit::returnPressed, [](){ g_entityValueEntry->setFocus(); g_entityValueEntry->selectAll(); } );
-				QObject::connect( line, &QLineEdit::textChanged, []( const QString& ){ EntityInspector_updateTypedValueControls(); } );
-				line->setValidator( new KeyNameValidator( line ) );
+				// key/value list
+				auto *tree = g_entprops_store = new QTreeWidget;
+				tree->setColumnCount( 2 );
+				tree->setHeaderLabels( { i18n::tr( "Key" ), i18n::tr( "Value" ) } );
+				tree->setUniformRowHeights( true );
+				tree->setAlternatingRowColors( true );
+				tree->setRootIsDecorated( false );
+				tree->setEditTriggers( QAbstractItemView::EditTrigger::NoEditTriggers );
+				tree->header()->setSectionResizeMode( 0, QHeaderView::ResizeMode::ResizeToContents );
+				tree->header()->setSectionResizeMode( 1, QHeaderView::ResizeMode::Stretch );
+
+				QObject::connect( tree, &QTreeWidget::itemPressed, EntityProperties_selection_changed );
+				tree->installEventFilter( &g_EntityProperties_keypress );
+
+				vbox->addWidget( tree );
 			}
 
 			{
-				auto *line = g_entityValueEntry = new LineEdit;
-				grid->addWidget( line, 1, 1 );
-				QObject::connect( line, &QLineEdit::returnPressed, [](){ EntityInspector_applyKeyValue(); } );
-				QObject::connect( line, &QLineEdit::textChanged, []( const QString& ){ EntityInspector_updateTypedValueControls(); } );
-				line->setValidator( new KeyValueValidator( line ) );
+				// key/value entry
+				auto *grid = new QGridLayout;
+				grid->setContentsMargins( 4, 0, 4, 0 );
+				vbox->addLayout( grid );
+				{
+					grid->addWidget( new QLabel( i18n::tr( "Key" ) ), 0, 0 );
+					grid->addWidget( new QLabel( i18n::tr( "Value" ) ), 1, 0 );
+				}
+				{
+					auto *line = g_entityKeyEntry = new LineEdit;
+					line->setPlaceholderText( i18n::tr( "Key name" ) );
+					grid->addWidget( line, 0, 1 );
+					QObject::connect( line, &QLineEdit::returnPressed, [](){ g_entityValueEntry->setFocus(); g_entityValueEntry->selectAll(); } );
+					QObject::connect( line, &QLineEdit::textChanged, []( const QString& ){ EntityInspector_updateTypedValueControls(); } );
+					line->setValidator( new KeyNameValidator( line ) );
+				}
+
+				{
+					auto *line = g_entityValueEntry = new LineEdit;
+					line->setPlaceholderText( i18n::tr( "Value" ) );
+					grid->addWidget( line, 1, 1 );
+					QObject::connect( line, &QLineEdit::returnPressed, [](){ EntityInspector_applyKeyValue(); } );
+					QObject::connect( line, &QLineEdit::textChanged, []( const QString& ){ EntityInspector_updateTypedValueControls(); } );
+					line->setValidator( new KeyValueValidator( line ) );
+				}
+				{
+					grid->addWidget( new QLabel( i18n::tr( "Typed" ) ), 2, 0 );
+
+					auto *typedWidget = g_entityTypedValueWidget = new QWidget;
+					auto *typedLayout = new QHBoxLayout( typedWidget );
+					typedLayout->setContentsMargins( 0, 0, 0, 0 );
+					typedLayout->setSpacing( 4 );
+
+					auto *typeLabel = g_entityTypedValueLabel = new QLabel;
+					typedLayout->addWidget( typeLabel );
+
+					auto *check = g_entityTypedValueBoolean = new QCheckBox( i18n::tr( "Enabled" ) );
+					typedLayout->addWidget( check );
+					QObject::connect( check, &QAbstractButton::clicked, EntityInspector_applyTypedBoolean );
+
+					auto *combo = g_entityTypedValueList = new ComboBox;
+					combo->setSizeAdjustPolicy( QComboBox::SizeAdjustPolicy::AdjustToContents );
+					typedLayout->addWidget( combo );
+					QObject::connect( combo, QOverload<int>::of( &QComboBox::activated ), []( int ){ EntityInspector_applyTypedList(); } );
+
+					auto *browse = g_entityTypedValueBrowse = new QToolButton;
+					browse->setIcon( new_local_icon( "ellipsis.png" ) );
+					typedLayout->addWidget( browse );
+					QObject::connect( browse, &QAbstractButton::clicked, EntityInspector_applyTypedBrowse );
+
+					auto *hint = g_entityTypedValueHint = new QLabel;
+					typedLayout->addWidget( hint );
+
+					typedLayout->addStretch();
+					typedWidget->hide();
+					grid->addWidget( typedWidget, 2, 1, 1, 3 );
+				}
+				/* select by key/value buttons */
+				{
+					auto *b = new QToolButton;
+					b->setIcon( new_local_icon( "select.png" ) );
+					b->setToolTip( i18n::tr( "Select by key" ) );
+					grid->addWidget( b, 0, 2 );
+					QObject::connect( b, &QAbstractButton::clicked, [](){
+						Select_EntitiesByKeyValue( g_entityKeyEntry->text().toLatin1().constData(), nullptr );
+					} );
+				}
+				{
+					auto *b = new QToolButton;
+					b->setIcon( new_local_icon( "select.png" ) );
+					b->setToolTip( i18n::tr( "Select by value" ) );
+					grid->addWidget( b, 1, 2 );
+					QObject::connect( b, &QAbstractButton::clicked, [](){
+						Select_EntitiesByKeyValue( nullptr, g_entityValueEntry->text().toLatin1().constData() );
+					} );
+				}
+				{
+					auto *b = new QToolButton;
+					b->setIcon( new_local_icon( "select.png" ) );
+					b->setToolTip( i18n::tr( "Select by key + value" ) );
+					grid->addWidget( b, 0, 3, 2, 1 );
+					QObject::connect( b, &QAbstractButton::clicked, [](){
+						Select_EntitiesByKeyValue( g_entityKeyEntry->text().toLatin1().constData(), g_entityValueEntry->text().toLatin1().constData() );
+					} );
+				}
 			}
 			{
-				grid->addWidget( new QLabel( i18n::tr( "Typed" ) ), 2, 0 );
-
-				auto *typedWidget = g_entityTypedValueWidget = new QWidget;
-				auto *typedLayout = new QHBoxLayout( typedWidget );
-				typedLayout->setContentsMargins( 0, 0, 0, 0 );
-				typedLayout->setSpacing( 4 );
-
-				auto *typeLabel = g_entityTypedValueLabel = new QLabel;
-				typedLayout->addWidget( typeLabel );
-
-				auto *check = g_entityTypedValueBoolean = new QCheckBox( i18n::tr( "Enabled" ) );
-				typedLayout->addWidget( check );
-				QObject::connect( check, &QAbstractButton::clicked, EntityInspector_applyTypedBoolean );
-
-				auto *combo = g_entityTypedValueList = new ComboBox;
-				combo->setSizeAdjustPolicy( QComboBox::SizeAdjustPolicy::AdjustToContents );
-				typedLayout->addWidget( combo );
-				QObject::connect( combo, QOverload<int>::of( &QComboBox::activated ), []( int ){ EntityInspector_applyTypedList(); } );
-
-				auto *browse = g_entityTypedValueBrowse = new QToolButton;
-				browse->setIcon( new_local_icon( "ellipsis.png" ) );
-				typedLayout->addWidget( browse );
-				QObject::connect( browse, &QAbstractButton::clicked, EntityInspector_applyTypedBrowse );
-
-				auto *hint = g_entityTypedValueHint = new QLabel;
-				typedLayout->addWidget( hint );
-
-				typedLayout->addStretch();
-				typedWidget->hide();
-				grid->addWidget( typedWidget, 2, 1, 1, 3 );
+				auto *hbox = new QHBoxLayout;
+				hbox->setContentsMargins( 4, 0, 4, 0 );
+				vbox->addLayout( hbox );
+				{
+					auto *b = new QPushButton( i18n::tr( "Clear All" ) );
+					hbox->addWidget( b );
+					QObject::connect( b, &QAbstractButton::clicked, EntityInspector_clearAllKeyValues );
+				}
+				{
+					auto *b = new QPushButton( i18n::tr( "Delete Key" ) );
+					hbox->addWidget( b );
+					QObject::connect( b, &QAbstractButton::clicked, EntityInspector_clearKeyValue );
+				}
+				{
+					auto *b = new QToolButton;
+					hbox->addWidget( b );
+					b->setIcon( new_local_icon( "arrow_left.png" ) );
+					b->setToolTip( i18n::tr( "Select targeting entities" ) );
+					QObject::connect( b, &QAbstractButton::clicked, [](){ Select_ConnectedEntities( true, false, g_focusToggleButton->isChecked() ); } );
+				}
+				{
+					auto *b = new QToolButton;
+					hbox->addWidget( b );
+					b->setIconSize( QSize( b->iconSize().width() * 2, b->iconSize().height() ) );
+					b->setIcon( new_local_icon( "arrow_left_right.png" ) );
+					b->setToolTip( i18n::tr( "Select connected entities" ) );
+					QObject::connect( b, &QAbstractButton::clicked, [](){ Select_ConnectedEntities( true, true, g_focusToggleButton->isChecked() ); } );
+				}
+				{
+					auto *b = new QToolButton;
+					hbox->addWidget( b );
+					b->setIcon( new_local_icon( "arrow_right.png" ) );
+					b->setToolTip( i18n::tr( "Select targets" ) );
+					QObject::connect( b, &QAbstractButton::clicked, [](){ Select_ConnectedEntities( false, true, g_focusToggleButton->isChecked() ); } );
+				}
+				{
+					auto *b = g_focusToggleButton = new QToolButton;
+					hbox->addWidget( b );
+					b->setText( "👀" );
+					b->setToolTip( i18n::tr( "AutoFocus on Selection" ) );
+					b->setCheckable( true );
+					QObject::connect( b, &QAbstractButton::clicked, []( bool checked ){ if( checked ) FocusAllViews(); } );
+				}
 			}
-			/* select by key/value buttons */
-			{
-				auto *b = new QToolButton;
-				b->setIcon( new_local_icon( "select.png" ) );
-				b->setToolTip( i18n::tr( "Select by key" ) );
-				grid->addWidget( b, 0, 2 );
-				QObject::connect( b, &QAbstractButton::clicked, [](){
-					Select_EntitiesByKeyValue( g_entityKeyEntry->text().toLatin1().constData(), nullptr );
-				} );
-			}
-			{
-				auto *b = new QToolButton;
-				b->setIcon( new_local_icon( "select.png" ) );
-				b->setToolTip( i18n::tr( "Select by value" ) );
-				grid->addWidget( b, 1, 2 );
-				QObject::connect( b, &QAbstractButton::clicked, [](){
-					Select_EntitiesByKeyValue( nullptr, g_entityValueEntry->text().toLatin1().constData() );
-				} );
-			}
-			{
-				auto *b = new QToolButton;
-				b->setIcon( new_local_icon( "select.png" ) );
-				b->setToolTip( i18n::tr( "Select by key + value" ) );
-				grid->addWidget( b, 0, 3, 2, 1 );
-				QObject::connect( b, &QAbstractButton::clicked, [](){
-					Select_EntitiesByKeyValue( g_entityKeyEntry->text().toLatin1().constData(), g_entityValueEntry->text().toLatin1().constData() );
-				} );
-			}
+
+			tabs->addTab( containerWidget, i18n::tr( "Legacy Keys" ) );
 		}
-		{
-			auto *hbox = new QHBoxLayout;
-			hbox->setContentsMargins( 4, 0, 4, 0 );
-			vbox->addLayout( hbox );
-			{
-				auto *b = new QPushButton( i18n::tr( "Clear All" ) );
-				hbox->addWidget( b );
-				QObject::connect( b, &QAbstractButton::clicked, EntityInspector_clearAllKeyValues );
-			}
-			{
-				auto *b = new QPushButton( i18n::tr( "Delete Key" ) );
-				hbox->addWidget( b );
-				QObject::connect( b, &QAbstractButton::clicked, EntityInspector_clearKeyValue );
-			}
-			{
-				auto *b = new QToolButton;
-				hbox->addWidget( b );
-				b->setIcon( new_local_icon( "arrow_left.png" ) );
-				b->setToolTip( i18n::tr( "Select targeting entities" ) );
-				QObject::connect( b, &QAbstractButton::clicked, [](){ Select_ConnectedEntities( true, false, g_focusToggleButton->isChecked() ); } );
-			}
-			{
-				auto *b = new QToolButton;
-				hbox->addWidget( b );
-				b->setIconSize( QSize( b->iconSize().width() * 2, b->iconSize().height() ) );
-				b->setIcon( new_local_icon( "arrow_left_right.png" ) );
-				b->setToolTip( i18n::tr( "Select connected entities" ) );
-				QObject::connect( b, &QAbstractButton::clicked, [](){ Select_ConnectedEntities( true, true, g_focusToggleButton->isChecked() ); } );
-			}
-			{
-				auto *b = new QToolButton;
-				hbox->addWidget( b );
-				b->setIcon( new_local_icon( "arrow_right.png" ) );
-				b->setToolTip( i18n::tr( "Select targets" ) );
-				QObject::connect( b, &QAbstractButton::clicked, [](){ Select_ConnectedEntities( false, true, g_focusToggleButton->isChecked() ); } );
-			}
-			{
-				auto *b = g_focusToggleButton = new QToolButton;
-				hbox->addWidget( b );
-				b->setText( "👀" );
-				b->setToolTip( i18n::tr( "AutoFocus on Selection" ) );
-				b->setCheckable( true );
-				QObject::connect( b, &QAbstractButton::clicked, []( bool checked ){ if( checked ) FocusAllViews(); } );
-			}
-		}
-	}
-	{
-		auto *scroll = new QScrollArea;
-		scroll->setHorizontalScrollBarPolicy( Qt::ScrollBarPolicy::ScrollBarAlwaysOff );
-		scroll->setWidgetResizable( true );
-		splitter->addWidget( scroll );
 
-		auto *containerWidget = new QWidget; // Adding a QLayout to a QScrollArea is not supported, use proxy widget
-		g_attributeBox = new QGridLayout( containerWidget );
-		g_attributeBox->setAlignment( Qt::AlignmentFlag::AlignTop );
-		g_attributeBox->setColumnStretch( 0, 111 );
-		g_attributeBox->setColumnStretch( 1, 333 );
-		scroll->setWidget( containerWidget ); // widget's layout must be set b4 this!
+		tabs->setCurrentIndex( 0 );
 	}
 
 	g_entityInspector_windowConstructed = true;
@@ -1577,7 +1596,7 @@ QWidget* EntityInspector_constructWindow( QWidget* toplevel ){
 	GlobalSelectionSystem().addSelectionChangeCallback( EntityInspectorSelectionChangedCaller() );
 	GlobalEntityCreator().setKeyValueChangedFunc( EntityInspector_keyValueChanged );
 
-	g_guiSettings.addSplitter( splitter, "EntityInspector/splitter", { 55, 175, 255, 255 } );
+	g_guiSettings.addSplitter( splitter, "EntityInspector/splitter", { 80, 170, 520 } );
 
 	return splitter;
 }

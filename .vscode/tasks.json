@@ -1,0 +1,263 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Setup: MSYS2 deps",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "pacman -S --needed base-devel git svn unzip mingw-w64-x86_64-{toolchain,meson,ninja,cmake,pkgconf,qt6-base,qt6-svg,qt6-multimedia,assimp,libxml2,libpng,glib2,libjpeg-turbo,zlib,tbb,embree}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Bootstrap: gamepacks (one time)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "if [ ! -d games/VibePack/games ]; then LICENSEFILTER=allinone BATCH=1 ./download-gamepacks.sh; else echo 'VibePack is already available; skipping download.'; fi"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Configure: release (runtime)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "if [ -d build-msys2-release ]; then meson setup build-msys2-release --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-release --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Configure: debug (runtime)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "if [ -d build-msys2-debug ]; then meson setup build-msys2-debug --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-debug --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build+Install: release (incremental)",
+      "dependsOn": "Bootstrap: gamepacks (one time)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "if [ -d build-msys2-release ]; then meson setup build-msys2-release --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-release --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-release; else meson compile -C build-msys2-release -j ${config:netradiant.buildJobs}; fi && meson install -C build-msys2-release --no-rebuild --tags runtime"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "Build+Install: debug (incremental)",
+      "dependsOn": "Bootstrap: gamepacks (one time)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "if [ -d build-msys2-debug ]; then meson setup build-msys2-debug --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-debug --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-debug; else meson compile -C build-msys2-debug -j ${config:netradiant.buildJobs}; fi && meson install -C build-msys2-debug --no-rebuild --tags runtime"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "Build: release only (incremental)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "if [ -d build-msys2-release ]; then meson setup build-msys2-release --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-release --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-release; else meson compile -C build-msys2-release -j ${config:netradiant.buildJobs}; fi"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "Build: debug only (incremental)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "if [ -d build-msys2-debug ]; then meson setup build-msys2-debug --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-debug --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-debug; else meson compile -C build-msys2-debug -j ${config:netradiant.buildJobs}; fi"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "Rebuild+Install: release (full clean)",
+      "dependsOn": "Bootstrap: gamepacks (one time)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "rm -rf build-msys2-release && meson setup build-msys2-release --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20 && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-release; else meson compile -C build-msys2-release -j ${config:netradiant.buildJobs}; fi && meson install -C build-msys2-release --no-rebuild --tags runtime"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "Rebuild+Install: debug (full clean)",
+      "dependsOn": "Bootstrap: gamepacks (one time)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "rm -rf build-msys2-debug && meson setup build-msys2-debug --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20 && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-debug; else meson compile -C build-msys2-debug -j ${config:netradiant.buildJobs}; fi && meson install -C build-msys2-debug --no-rebuild --tags runtime"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "Clean: remove Meson build dirs",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "rm -rf build-msys2-release build-msys2-debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: Radiant (installed)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "./install/radiant.exe"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: Q3Map2 (help)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "./install/q3map2.exe -help"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: EricW qbsp (help)",
+      "type": "shell",
+      "command": "${config:netradiant.msys2Root}\\msys2_shell.cmd",
+      "args": [
+        "-defterm",
+        "-no-start",
+        "-here",
+        "-${config:netradiant.msys2Subsystem}",
+        "-c",
+        "./install/ericw/qbsp.exe --help"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

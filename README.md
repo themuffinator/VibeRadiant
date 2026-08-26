@@ -57,5 +57,7 @@ See [COMPILING](COMPILING) for platform-by-platform build instructions. 🔧🧪
 ## Credits & Base Project 🙏🧱
 VibeRadiant builds on [NetRadiant-Custom (NRC)](https://github.com/NetRadiant/NetRadiant-custom). Please check out the upstream project and give it the love it deserves. 💖🏗️
 
+The bundled idTech2 compiler suite is based on [VibeyMapTools](https://github.com/themuffinator/VibeyMapTools), itself derived from Eric Wasylishen's ericw-tools, and is distributed under GPL-3.0. 🛠️📜
+
 ## License 📜⚖️
 See [LICENSE](LICENSE), [GPL](GPL), and [LGPL](LGPL) for licensing details. ⚖️🧾

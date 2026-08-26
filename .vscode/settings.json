@@ -1,0 +1,7 @@
+{
+  "netradiant.msys2Root": "C:\\msys64",
+  "netradiant.msys2Subsystem": "mingw64",
+  "netradiant.buildJobs": 0,
+  "netradiant.qtMajor": "6",
+  "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild"
+}

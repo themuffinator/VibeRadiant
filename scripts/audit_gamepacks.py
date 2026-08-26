@@ -177,8 +177,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--compare-with",
-        default="games/NRCPack",
-        help="Optional secondary pack to compare drift against (default: games/NRCPack)",
+        default="",
+        help="Optional secondary pack to compare drift against (for example: games/NRCPack)",
     )
     parser.add_argument(
         "--no-compare",
@@ -193,7 +193,7 @@ def main() -> int:
     args = parser.parse_args()
 
     source = Path(args.source)
-    compare = Path(args.compare_with)
+    compare = Path(args.compare_with) if args.compare_with else None
 
     errors, warnings = _audit_pack(source, strict_no_legacy_def=args.enforce_no_legacy_def)
 
@@ -212,11 +212,14 @@ def main() -> int:
     else:
         print("Warnings: none")
 
-    if not args.no_compare and compare.exists():
+    if not args.no_compare and compare is not None and compare.exists():
         print("")
         print("Pack drift report:")
         for line in _compare_packs(source, compare):
             print(line)
+    elif not args.no_compare and compare is not None:
+        print("")
+        print(f"Compare pack not found, skipping drift report: {compare}")
 
     return 1 if errors else 0
 

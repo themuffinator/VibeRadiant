@@ -170,6 +170,7 @@ struct camwindow_globals_private_t
 	int m_MSAA = 8;
 	bool m_bShowWorkzone = true;
 	bool m_bShowSize = true;
+	bool m_bShowOrthoLines = false;
 	bool m_bAnimateShaders = true;
 	bool m_bNoStippleInObjectMode = false;
 };
@@ -2078,6 +2079,15 @@ void ShowSize3dToggle(){
 	}
 }
 
+ToggleItem g_show_camera_ortho_lines( BoolExportCaller( g_camwindow_globals_private.m_bShowOrthoLines ) );
+void ShowCameraOrthoLinesToggle(){
+	g_camwindow_globals_private.m_bShowOrthoLines ^= 1;
+	g_show_camera_ortho_lines.update();
+	if ( g_camwnd != 0 ) {
+		CamWnd_Update( *g_camwnd );
+	}
+}
+
 void CamWnd_AnimateShadersImport( bool value ){
 	g_camwindow_globals_private.m_bAnimateShaders = value;
 	ShaderCache_setShaderAnimation( value );
@@ -2092,6 +2102,68 @@ ToggleItem g_animate_shaders( BoolExportCaller( g_camwindow_globals_private.m_bA
 void AnimateShadersToggle(){
 	CamWnd_AnimateShadersImport( !g_camwindow_globals_private.m_bAnimateShaders );
 	g_animate_shaders.update();
+}
+
+static Vector3 CameraAxisColor( std::size_t axis ){
+	switch ( axis )
+	{
+	case 0:
+		return Vector3( g_colour_x.r, g_colour_x.g, g_colour_x.b ) / 255.f;
+	case 1:
+		return Vector3( g_colour_y.r, g_colour_y.g, g_colour_y.b ) / 255.f;
+	default:
+		return Vector3( g_colour_z.r, g_colour_z.g, g_colour_z.b ) / 255.f;
+	}
+}
+
+static void Cam_DrawOriginOverlay( bool drawOrthoLines ){
+	constexpr float markerHalfLength = 16.f;
+	const float worldExtent = std::max( 1024.f, GetMaxGridCoord() );
+
+	gl().glDisable( GL_DEPTH_TEST );
+	gl().glDepthMask( GL_FALSE );
+	gl().glDisable( GL_TEXTURE_2D );
+	gl().glDisable( GL_LIGHTING );
+	gl().glDisable( GL_COLOR_MATERIAL );
+	gl().glEnable( GL_BLEND );
+	gl().glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+	gl().glDisable( GL_LINE_STIPPLE );
+	gl().glLineWidth( drawOrthoLines ? 2.f : 1.5f );
+
+	gl().glBegin( GL_LINES );
+	for ( std::size_t axis = 0; axis < 3; ++axis )
+	{
+		const Vector3 color = CameraAxisColor( axis );
+		if ( drawOrthoLines ) {
+			gl().glColor4f( color.x(), color.y(), color.z(), 0.45f );
+			Vector3 start( 0, 0, 0 );
+			Vector3 end( 0, 0, 0 );
+			start[axis] = -worldExtent;
+			end[axis] = worldExtent;
+			gl().glVertex3f( start[0], start[1], start[2] );
+			gl().glVertex3f( end[0], end[1], end[2] );
+		}
+
+		gl().glColor4f( color.x(), color.y(), color.z(), 1.f );
+		Vector3 markerStart( 0, 0, 0 );
+		Vector3 markerEnd( 0, 0, 0 );
+		markerStart[axis] = -markerHalfLength;
+		markerEnd[axis] = markerHalfLength;
+		gl().glVertex3f( markerStart[0], markerStart[1], markerStart[2] );
+		gl().glVertex3f( markerEnd[0], markerEnd[1], markerEnd[2] );
+	}
+	gl().glEnd();
+
+	gl().glPointSize( 6.f );
+	gl().glBegin( GL_POINTS );
+	gl().glColor4f( 1.f, 1.f, 1.f, 1.f );
+	gl().glVertex3f( 0.f, 0.f, 0.f );
+	gl().glEnd();
+	gl().glPointSize( 1.f );
+
+	gl().glLineWidth( 1.f );
+	gl().glDisable( GL_BLEND );
+	gl().glDepthMask( GL_TRUE );
 }
 
 void CamWnd::Cam_Draw(){
@@ -2223,6 +2295,8 @@ void CamWnd::Cam_Draw(){
 	if ( m_Camera.draw_mode == cd_lighting ) {
 		PreviewLighting_RenderOverlay();
 	}
+
+	Cam_DrawOriginOverlay( g_camwindow_globals_private.m_bShowOrthoLines );
 
 	// prepare for 2d stuff
 	gl().glColor4f( 1, 1, 1, 1 );
@@ -2616,6 +2690,11 @@ void Camera_constructPreferences( PreferencesPage& page ){
 	    BoolImportCaller( g_camwindow_globals_private.m_bNoStippleInObjectMode ),
 	    BoolExportCaller( g_camwindow_globals_private.m_bNoStippleInObjectMode )
 	);
+	page.appendCheckBox(
+	    "", "Show orthographic axis lines",
+	    BoolImportCaller( g_camwindow_globals_private.m_bShowOrthoLines ),
+	    BoolExportCaller( g_camwindow_globals_private.m_bShowOrthoLines )
+	);
 
 	const char* render_modes[]{ "Wireframe", "Flatshade", "Textured", "Textured+Wire", "Lighting" };
 	page.appendCombo(
@@ -2737,11 +2816,13 @@ void CamWnd_Construct(){
 	GlobalToggles_insert( "ShowStats", makeCallbackF( ShowStatsToggle ), ToggleItem::AddCallbackCaller( g_show_stats ) );
 	GlobalToggles_insert( "ShowWorkzone3d", makeCallbackF( ShowWorkzone3dToggle ), ToggleItem::AddCallbackCaller( g_show_workzone3d ) );
 	GlobalToggles_insert( "ShowSize3d", makeCallbackF( ShowSize3dToggle ), ToggleItem::AddCallbackCaller( g_show_size3d ) );
+	GlobalToggles_insert( "ShowCameraOrthoLines", makeCallbackF( ShowCameraOrthoLinesToggle ), ToggleItem::AddCallbackCaller( g_show_camera_ortho_lines ) );
 	GlobalToggles_insert( "AnimateShaders", makeCallbackF( AnimateShadersToggle ), ToggleItem::AddCallbackCaller( g_animate_shaders ) );
 
 	GlobalPreferenceSystem().registerPreference( "ShowStats", BoolImportStringCaller( g_camwindow_globals.m_showStats ), BoolExportStringCaller( g_camwindow_globals.m_showStats ) );
 	GlobalPreferenceSystem().registerPreference( "ShowWorkzone3d", BoolImportStringCaller( g_camwindow_globals_private.m_bShowWorkzone ), BoolExportStringCaller( g_camwindow_globals_private.m_bShowWorkzone ) );
 	GlobalPreferenceSystem().registerPreference( "ShowSize3d", BoolImportStringCaller( g_camwindow_globals_private.m_bShowSize ), BoolExportStringCaller( g_camwindow_globals_private.m_bShowSize ) );
+	GlobalPreferenceSystem().registerPreference( "ShowCameraOrthoLines", BoolImportStringCaller( g_camwindow_globals_private.m_bShowOrthoLines ), BoolExportStringCaller( g_camwindow_globals_private.m_bShowOrthoLines ) );
 	GlobalPreferenceSystem().registerPreference( "CameraAnimateShaders", makeBoolStringImportCallback( CamWndAnimateShadersImportCaller() ), BoolExportStringCaller( g_camwindow_globals_private.m_bAnimateShaders ) );
 	GlobalPreferenceSystem().registerPreference( "CamMoveSpeed", IntImportStringCaller( g_camwindow_globals_private.m_nMoveSpeed ), IntExportStringCaller( g_camwindow_globals_private.m_nMoveSpeed ) );
 	GlobalPreferenceSystem().registerPreference( "CamMoveTimeToMaxSpeed", IntImportStringCaller( g_camwindow_globals_private.m_time_toMaxSpeed ), IntExportStringCaller( g_camwindow_globals_private.m_time_toMaxSpeed ) );

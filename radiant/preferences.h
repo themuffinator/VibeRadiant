@@ -315,6 +315,8 @@ extern CGameDialog g_GamesDialog;
 const char* StartupGameInstallationPath_get();
 const char* StartupGameInstallationEngineExecutable_get();
 const char* StartupGameInstallationId_get();
+const char* StartupGameInstallationGameName_get();
+void StartupGameInstallationSelectedGameName_set( const char* gamename );
 bool StartupGameInstallationConfigured();
 
 

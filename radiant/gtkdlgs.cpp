@@ -385,6 +385,7 @@ void GameImport( int value ){
 			EnginePath_Unrealise();
 
 			gamename_set( new_gamename );
+			StartupGameInstallationSelectedGameName_set( new_gamename );
 
 			EnginePath_Realise();
 		}

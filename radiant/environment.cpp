@@ -396,8 +396,14 @@ void gamedetect_applyLegacyHints( GameDetectRule& rule ){
 		addAlias( "Quake" );
 	}
 	else if ( gameFileLower == "q3.game" ) {
+		addRequired( "pak0.pk3" );
 		addAlias( "Quake 3" );
 		addAlias( "Quake III Arena" );
+	}
+	else if ( gameFileLower == "quakelive.game" ) {
+		addRequired( "pak00.pk3" );
+		addAlias( "Quake Live" );
+		addAlias( "QuakeLive" );
 	}
 	else if ( gameFileLower == "heretic2.game" ) {
 		addAlias( "Heretic 2" );

@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <deque>
 #include <map>
 #include <list>
 
@@ -79,6 +80,7 @@ bool g_enableQ3ShaderStages = false;
 bool g_useShaderList = true;
 _QERPlugImageTable* g_bitmapModule = 0;
 const char* g_texturePrefix = "textures/";
+bool g_passiveAssetCachingEnabled = true;
 
 void ActiveShaders_IteratorBegin();
 bool ActiveShaders_IteratorAtEnd();
@@ -88,6 +90,14 @@ Callback<void()> g_ActiveShadersChangedNotify;
 
 void FreeShaders();
 void LoadShaderFile( const char *filename );
+
+class CShader;
+std::deque<CShader*> g_passiveShaderRealiseQueue;
+qtexture_t* g_passivePlaceholderTexture = nullptr;
+
+qtexture_t* PassiveAssetCaching_getPlaceholderTexture();
+void PassiveAssetCaching_clearQueue();
+void PassiveAssetCaching_pumpQueue( std::size_t maxShaders );
 
 /*!
    NOTE TTimo: there is an important distinction between SHADER_NOT_FOUND and SHADER_NOTEX:
@@ -102,6 +112,14 @@ Image* loadBitmap( void* environment, const char* name ){
 		return g_bitmapModule->loadImage( file );
 	}
 	return 0;
+}
+
+qtexture_t* PassiveAssetCaching_getPlaceholderTexture(){
+	if ( g_passivePlaceholderTexture == nullptr ) {
+		const auto name = StringStream( GlobalRadiant().getAppPath(), "bitmaps/notex.png" );
+		g_passivePlaceholderTexture = GlobalTexturesCache().capture( LoadImageCallback( 0, loadBitmap ), name );
+	}
+	return g_passivePlaceholderTexture;
 }
 
 inline byte* getPixel( byte* pixels, int width, int height, int x, int y ){
@@ -1205,47 +1223,70 @@ class CShader final : public IShader
 	bool m_bInUse;
 	std::vector<Q3Stage> m_q3Stages;
 	bool m_q3Animated;
+	bool m_resourcesRealised;
+	bool m_pendingTextureRealise;
 
 
 public:
 	static bool m_lightingEnabled;
-
-	CShader( const ShaderDefinition& definition ) :
-		m_refcount( 0 ),
-		m_template( definition.shaderTemplate ),
-		m_args( definition.args ),
-		m_filename( definition.filename ),
-		m_blendFunc( BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA ),
-		m_bInUse( false ),
-		m_q3Animated( false ){
-		m_pTexture = 0;
-		m_pSkyBox = 0;
-		m_pDiffuse = 0;
-		m_pBump = 0;
-		m_pSpecular = 0;
-
-		m_notfound = 0;
-
-		realise();
+	bool canDeferTextureRealise() const {
+		return m_template->m_q3Stages.empty()
+		       && m_template->m_skyBox.empty()
+		       && m_template->m_layers.empty()
+		       && m_template->m_bump.empty()
+		       && m_template->m_specular.empty()
+		       && m_template->m_lightFalloffImage.empty()
+		       && string_empty( m_template->m_heightmapScale.c_str() );
 	}
-	CShader( const ShaderTemplatePointer& shaderTemplate, const ShaderArguments& args, const char* filename ) :
-		m_refcount( 0 ),
-		m_template( shaderTemplate ),
-		m_args( args ),
-		m_filename( filename ),
-		m_blendFunc( BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA ),
-		m_bInUse( false ),
-		m_q3Animated( false ){
-		m_pTexture = 0;
-		m_pSkyBox = 0;
-		m_pDiffuse = 0;
-		m_pBump = 0;
-		m_pSpecular = 0;
 
-		m_notfound = 0;
+		CShader( const ShaderDefinition& definition ) :
+			m_refcount( 0 ),
+			m_template( definition.shaderTemplate ),
+			m_args( definition.args ),
+			m_filename( definition.filename ),
+			m_blendFunc( BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA ),
+			m_bInUse( false ),
+			m_q3Animated( false ),
+			m_resourcesRealised( false ),
+			m_pendingTextureRealise( false ){
+			m_pTexture = 0;
+			m_pSkyBox = 0;
+			m_pDiffuse = 0;
+			m_pBump = 0;
+			m_pSpecular = 0;
+			m_pLightFalloffImage = 0;
+			m_heightmapScale = 0;
 
-		realise();
-	}
+			m_notfound = 0;
+
+			if ( !g_passiveAssetCachingEnabled || !canDeferTextureRealise() ) {
+				realise();
+			}
+		}
+		CShader( const ShaderTemplatePointer& shaderTemplate, const ShaderArguments& args, const char* filename ) :
+			m_refcount( 0 ),
+			m_template( shaderTemplate ),
+			m_args( args ),
+			m_filename( filename ),
+			m_blendFunc( BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA ),
+			m_bInUse( false ),
+			m_q3Animated( false ),
+			m_resourcesRealised( false ),
+			m_pendingTextureRealise( false ){
+			m_pTexture = 0;
+			m_pSkyBox = 0;
+			m_pDiffuse = 0;
+			m_pBump = 0;
+			m_pSpecular = 0;
+			m_pLightFalloffImage = 0;
+			m_heightmapScale = 0;
+
+			m_notfound = 0;
+
+			if ( !g_passiveAssetCachingEnabled || !canDeferTextureRealise() ) {
+				realise();
+			}
+		}
 	~CShader(){
 		unrealise();
 
@@ -1267,26 +1308,77 @@ public:
 		return m_refcount;
 	}
 
-// get/set the qtexture_t* Radiant uses to represent this shader object
-	qtexture_t* getTexture() const override {
-		return m_pTexture;
-	}
-	qtexture_t* getSkyBox() override {
-		/* load skybox if only used */
-		if( m_pSkyBox == nullptr && !m_template->m_skyBox.empty() )
-			m_pSkyBox = GlobalTexturesCache().capture( LoadImageCallback( 0, GlobalTexturesCache().defaultLoader().m_func, true ), m_template->m_skyBox.c_str() );
+	// Get the fully realised texture for metadata and editor calculations.
+		qtexture_t* getTexture() const override {
+			if ( !m_resourcesRealised ) {
+				const_cast<CShader*>( this )->realise();
+			}
+			return m_pTexture;
+		}
+		qtexture_t* getTextureForRendering() const override {
+			if ( m_resourcesRealised && m_pTexture != 0 ) {
+				return m_pTexture;
+			}
 
-		return m_pSkyBox;
-	}
-	qtexture_t* getDiffuse() const override {
-		return m_pDiffuse;
-	}
-	qtexture_t* getBump() const override {
-		return m_pBump;
-	}
-	qtexture_t* getSpecular() const override {
-		return m_pSpecular;
-	}
+			if ( !g_passiveAssetCachingEnabled ) {
+				return getTexture();
+			}
+
+			if ( qtexture_t* placeholder = PassiveAssetCaching_getPlaceholderTexture() ) {
+				return placeholder;
+			}
+
+			return getTexture();
+		}
+		qtexture_t* getSkyBox() override {
+			if ( !m_resourcesRealised ) {
+				if ( g_passiveAssetCachingEnabled ) {
+					return nullptr;
+				}
+				realise();
+			}
+			/* load skybox if only used */
+			if( m_pSkyBox == nullptr && !m_template->m_skyBox.empty() )
+				m_pSkyBox = GlobalTexturesCache().capture( LoadImageCallback( 0, GlobalTexturesCache().defaultLoader().m_func, true ), m_template->m_skyBox.c_str() );
+
+			return m_pSkyBox;
+		}
+		qtexture_t* getDiffuse() const override {
+			if ( !m_resourcesRealised && !g_passiveAssetCachingEnabled ) {
+				const_cast<CShader*>( this )->realise();
+			}
+			return m_pDiffuse;
+		}
+		qtexture_t* getBump() const override {
+			if ( !m_resourcesRealised && !g_passiveAssetCachingEnabled ) {
+				const_cast<CShader*>( this )->realise();
+			}
+			return m_pBump;
+		}
+		qtexture_t* getSpecular() const override {
+			if ( !m_resourcesRealised && !g_passiveAssetCachingEnabled ) {
+				const_cast<CShader*>( this )->realise();
+			}
+			return m_pSpecular;
+		}
+		bool isTextureRealised() const override {
+			return m_resourcesRealised;
+		}
+		void requestTextureRealise() override {
+			if ( m_resourcesRealised ) {
+				return;
+			}
+			if ( !g_passiveAssetCachingEnabled ) {
+				realise();
+				return;
+			}
+			if ( m_pendingTextureRealise ) {
+				return;
+			}
+			m_pendingTextureRealise = true;
+			IncRef();
+			g_passiveShaderRealiseQueue.push_back( this );
+		}
 // get shader name
 	const char* getName() const override {
 		return m_Name.c_str();
@@ -1294,10 +1386,13 @@ public:
 	bool IsInUse() const override {
 		return m_bInUse;
 	}
-	void SetInUse( bool bInUse ) override {
-		m_bInUse = bInUse;
-		g_ActiveShadersChangedNotify();
-	}
+		void SetInUse( bool bInUse ) override {
+			m_bInUse = bInUse;
+			if ( bInUse ) {
+				requestTextureRealise();
+			}
+			g_ActiveShadersChangedNotify();
+		}
 // get the shader flags
 	int getFlags() const override {
 		return m_template->m_nFlags;
@@ -1322,17 +1417,23 @@ public:
 	ECull getCull() override {
 		return m_template->m_Cull;
 	};
-// get shader file name (ie the file where this one is defined)
-	const char* getShaderFileName() const override {
-		return m_filename.c_str();
-	}
-// -----------------------------------------
+	// get shader file name (ie the file where this one is defined)
+		const char* getShaderFileName() const override {
+			return m_filename.c_str();
+		}
+		void clearPendingTextureRealise(){
+			m_pendingTextureRealise = false;
+		}
+	// -----------------------------------------
 
-	void realise(){
-		m_pTexture = evaluateTexture( m_template->m_textureName, m_template->m_params, m_args );
+		void realise(){
+			if ( m_resourcesRealised ) {
+				return;
+			}
+			m_pTexture = evaluateTexture( m_template->m_textureName, m_template->m_params, m_args );
 
-		if ( m_pTexture->texture_number == 0 ) {
-			m_notfound = m_pTexture;
+			if ( m_pTexture->texture_number == 0 ) {
+				m_notfound = m_pTexture;
 
 			const auto name = StringStream( GlobalRadiant().getAppPath(), "bitmaps/",
 				( string_equal( m_template->getName(), "nomodel" )? "nomodel.png"
@@ -1341,24 +1442,38 @@ public:
 			m_pTexture = GlobalTexturesCache().capture( LoadImageCallback( 0, loadBitmap ), name );
 		}
 
-		realiseStages();
-		realiseLighting();
-	}
-
-	void unrealise(){
-		GlobalTexturesCache().release( m_pTexture );
-
-		if ( m_notfound != 0 ) {
-			GlobalTexturesCache().release( m_notfound );
+			realiseStages();
+			realiseLighting();
+			m_resourcesRealised = true;
 		}
+
+		void unrealise(){
+			if ( !m_resourcesRealised ) {
+				return;
+			}
+
+			GlobalTexturesCache().release( m_pTexture );
+
+			if ( m_notfound != 0 ) {
+				GlobalTexturesCache().release( m_notfound );
+			}
 
 		if ( m_pSkyBox != 0 ) {
 			GlobalTexturesCache().release( m_pSkyBox );
 		}
 
-		unrealiseStages();
-		unrealiseLighting();
-	}
+			unrealiseStages();
+			unrealiseLighting();
+
+			m_pTexture = 0;
+			m_notfound = 0;
+			m_pSkyBox = 0;
+			m_pDiffuse = 0;
+			m_pBump = 0;
+			m_pSpecular = 0;
+			m_pLightFalloffImage = 0;
+			m_resourcesRealised = false;
+		}
 
 	void realiseStages(){
 		m_q3Stages.clear();
@@ -1661,34 +1776,37 @@ public:
 		}
 	}
 
-	bool hasStages() const override {
-		return g_shaderLanguage == SHADERLANGUAGE_QUAKE3 && g_enableQ3ShaderStages && !m_q3Stages.empty();
-	}
+		bool hasStages() const override {
+			return m_resourcesRealised
+			       && g_shaderLanguage == SHADERLANGUAGE_QUAKE3
+			       && g_enableQ3ShaderStages
+			       && !m_q3Stages.empty();
+		}
 
-	bool isAnimated() const override {
-		return g_enableQ3ShaderStages && m_q3Animated;
-	}
+		bool isAnimated() const override {
+			return m_resourcesRealised && g_enableQ3ShaderStages && m_q3Animated;
+		}
 
 	void forEachStage( float time, const ShaderStageCallback& callback ) const override {
 		if ( g_shaderLanguage != SHADERLANGUAGE_QUAKE3 ) {
 			return;
 		}
 
-		if ( !g_enableQ3ShaderStages ) {
-			ShaderStage stage;
-			stage.texture = m_pTexture;
-			stage.depthWrite = true;
-			callback( stage );
-			return;
-		}
+			if ( !g_enableQ3ShaderStages ) {
+				ShaderStage stage;
+				stage.texture = getTextureForRendering();
+				stage.depthWrite = true;
+				callback( stage );
+				return;
+			}
 
-		if ( m_q3Stages.empty() ) {
-			ShaderStage stage;
-			stage.texture = m_pTexture;
-			stage.depthWrite = true;
-			callback( stage );
-			return;
-		}
+			if ( m_q3Stages.empty() ) {
+				ShaderStage stage;
+				stage.texture = getTextureForRendering();
+				stage.depthWrite = true;
+				callback( stage );
+				return;
+			}
 
 		for ( const auto& stage : m_q3Stages )
 		{
@@ -1707,6 +1825,37 @@ public:
 };
 
 bool CShader::m_lightingEnabled = false;
+
+void PassiveAssetCaching_clearQueue(){
+	while ( !g_passiveShaderRealiseQueue.empty() )
+	{
+		CShader* shader = g_passiveShaderRealiseQueue.front();
+		g_passiveShaderRealiseQueue.pop_front();
+		shader->clearPendingTextureRealise();
+		shader->DecRef();
+	}
+}
+
+void PassiveAssetCaching_pumpQueue( std::size_t maxShaders ){
+	if ( maxShaders == 0 ) {
+		return;
+	}
+
+	std::size_t realisedCount = 0;
+	while ( realisedCount < maxShaders && !g_passiveShaderRealiseQueue.empty() )
+	{
+		CShader* shader = g_passiveShaderRealiseQueue.front();
+		g_passiveShaderRealiseQueue.pop_front();
+		shader->clearPendingTextureRealise();
+		shader->realise();
+		shader->DecRef();
+		++realisedCount;
+	}
+
+	if ( realisedCount != 0 ) {
+		g_ActiveShadersChangedNotify();
+	}
+}
 
 typedef SmartPointer<CShader> ShaderPointer;
 typedef std::map<CopiedString, ShaderPointer, shader_less_t> shaders_t;
@@ -1743,6 +1892,11 @@ void debug_check_shaders( shaders_t& shaders ){
 void FreeShaders(){
 	// reload shaders
 	// empty the actives shaders list
+	PassiveAssetCaching_clearQueue();
+	if ( g_passivePlaceholderTexture != nullptr ) {
+		GlobalTexturesCache().release( g_passivePlaceholderTexture );
+		g_passivePlaceholderTexture = nullptr;
+	}
 	debug_check_shaders( g_ActiveShaders );
 	g_ActiveShaders.clear();
 	g_shaders.clear();
@@ -2843,15 +2997,16 @@ public:
 			return 0;
 		}
 
-		ShaderTemplatePointer shaderTemplatePtr( shaderTemplate );
-		ShaderArguments args;
-		const bool hasName = shaderName != 0 && !string_empty( shaderName );
-		const char* previewFilename = hasName ? shaderName : "preview";
-		auto *shader = new CShader( shaderTemplatePtr, args, previewFilename );
-		shader->setName( hasName ? shaderName : shaderTemplatePtr->getName() );
-		shader->IncRef();
-		return shader;
-	}
+			ShaderTemplatePointer shaderTemplatePtr( shaderTemplate );
+			ShaderArguments args;
+			const bool hasName = shaderName != 0 && !string_empty( shaderName );
+			const char* previewFilename = hasName ? shaderName : "preview";
+			auto *shader = new CShader( shaderTemplatePtr, args, previewFilename );
+			shader->realise();
+			shader->setName( hasName ? shaderName : shaderTemplatePtr->getName() );
+			shader->IncRef();
+			return shader;
+		}
 
 	void foreachShaderName( const ShaderNameCallback& callback ) override {
 		for ( const auto& [ name, shader ] : g_shaderDefinitions )
@@ -2887,14 +3042,27 @@ public:
 		if ( CShader::m_lightingEnabled != enabled ) {
 			for ( const auto& [ name, shader ] : g_ActiveShaders )
 			{
-				shader->unrealiseLighting();
+				if ( shader->isTextureRealised() ) {
+					shader->unrealiseLighting();
+				}
 			}
 			CShader::m_lightingEnabled = enabled;
 			for ( const auto& [ name, shader ] : g_ActiveShaders )
 			{
-				shader->realiseLighting();
+				if ( shader->isTextureRealised() ) {
+					shader->realiseLighting();
+				}
 			}
 		}
+	}
+	void setPassiveAssetCachingEnabled( bool enabled ) override {
+		g_passiveAssetCachingEnabled = enabled;
+	}
+	bool passiveAssetCachingEnabled() const override {
+		return g_passiveAssetCachingEnabled;
+	}
+	void pumpPassiveAssetCaching( std::size_t maxShaders ) override {
+		PassiveAssetCaching_pumpQueue( maxShaders );
 	}
 
 	const char* getTexturePrefix() const override {

@@ -28,6 +28,7 @@ void ModelBrowser_Destroy();
 
 class QWidget* ModelBrowser_constructWindow( QWidget* toplevel );
 void ModelBrowser_destroyWindow();
+void ModelBrowser_EnsureTree();
 
 void ModelBrowser_flushReferences();
 

@@ -265,6 +265,7 @@ public:
 		TextureBrowser_Construct();
 		ModelBrowser_Construct();
 		if ( AssetBrowser_isEnabled() ) {
+			AssetBrowser_Construct();
 			EntityBrowser_Construct();
 			SoundBrowser_Construct();
 		}
@@ -291,6 +292,7 @@ public:
 		if ( AssetBrowser_isEnabled() ) {
 			SoundBrowser_Destroy();
 			EntityBrowser_Destroy();
+			AssetBrowser_Destroy();
 		}
 		ModelBrowser_Destroy();
 		TextureBrowser_Destroy();

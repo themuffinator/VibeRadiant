@@ -1,18 +1,19 @@
 # Gamepacks Architecture
 
-This document explains why the repository has `NRCPack`, `VibePack`, and `install/gamepacks`, and how they are now unified.
+This document explains the downloaded `games/VibePack` source tree, the staged `install/gamepacks` runtime tree, and how legacy `NRCPack` data fits in.
 
 ## Directory roles
 
 - `games/VibePack/`
-  - Canonical editable source pack for VibeRadiant.
+  - Canonical staging source for VibeRadiant, downloaded and maintained separately from this repository.
+  - Run `download-gamepacks.sh` before a no-download install, or configure Meson with `-Ddownload_gamepacks=allinone` for a fresh checkout.
   - Contains:
     - `games/*.game` descriptors.
     - Per-game payload folders (`*.game/`).
 
 - `games/NRCPack/`
-  - Legacy compatibility source pack inherited from NetRadiant-Custom workflows.
-  - Kept for migration/reference, not the primary install source.
+  - Legacy compatibility data inherited from NetRadiant-Custom workflows.
+  - Archived/reference-only and no longer used by install tooling.
 
 - `install/gamepacks/`
   - Staged runtime output layout consumed by the editor (`gamepacks/games/*.game` + payload folders).
@@ -27,14 +28,11 @@ That created non-deterministic behavior and made it unclear which descriptor ver
 
 ## Unification policy
 
-`install-gamepacks.sh` now selects exactly one source by default:
+`install-gamepacks.sh` now installs from exactly one canonical source:
 
-- `GAMEPACK_SOURCE=VibePack` (default, canonical)
-- `GAMEPACK_SOURCE=NRCPack` (legacy fallback)
-- `GAMEPACK_SOURCE=auto` (prefer VibePack, then NRCPack)
+- `GAMEPACK_SOURCE=VibePack` (required)
 
-The legacy merge-everything mode (`GAMEPACK_SOURCE=all`) is intentionally
-blocked to prevent silent per-game overrides.
+Legacy multi-source modes are intentionally blocked to prevent silent per-game overrides and source ambiguity.
 
 `Makefile` now forwards `GAMEPACK_SOURCE` during `install-data`.
 
@@ -62,6 +60,7 @@ Recommended descriptor keys for install/game detection quality:
 - Archive/content: `archiveTypes`, `mapTypes`, `shaders`, `entityClass`, `entities`
 - UX/detection: `baseGameName`, `unknownGameName`, `installAliases`
 - Mods: `knownMods`, `knownModNames`
+- Optional mod defaulting: `defaultGameName`
 - Optional install hints: `detectFile1`, `detectFile2`, `detectFiles`
 - VFS hygiene: `forbiddenPaths`
 
@@ -82,7 +81,7 @@ Descriptor key style:
   - required attributes exist.
   - descriptor names are unique and consistently cased.
 - Normalize descriptor key ordering for easier diff/review.
-- Gradually retire `NRCPack` once all required data is verified in `VibePack`.
+- Keep `NRCPack` read-only as historical reference only.
 
 ## Audit command
 
@@ -92,7 +91,12 @@ Use the built-in audit helper:
 python scripts/audit_gamepacks.py
 ```
 
-This audits `games/VibePack` and reports drift against `games/NRCPack` by default.
+This audits `games/VibePack`.
+If you still have a local `games/NRCPack` tree, you can compare explicitly with:
+
+```bash
+python scripts/audit_gamepacks.py --compare-with games/NRCPack
+```
 
 To enforce FGD-only runtime data:
 

@@ -125,10 +125,21 @@ LIBS_JPEG          ?= -ljpeg
 DEPEND_ON_MAKEFILE ?= yes
 # yes = download; all = even download undistributable gamepacks; no = disable; allinone = dl all-in-one compact fixed archive
 DOWNLOAD_GAMEPACKS ?= allinone
-# Gamepack source used by install-gamepacks.sh: VibePack (default), NRCPack, or auto.
+# Gamepack source used by install-gamepacks.sh (canonical source only).
 GAMEPACK_SOURCE   ?= VibePack
 INSTALL_DLLS       ?= yes
 INSTALL_DATA       ?= yes
+
+# Build settings for bundled ericw-tools (VibeyMapTools) integration.
+ERICW_TOOLS_SOURCE_DIR ?= tools/quake2/ericw-tools
+ERICW_TOOLS_BUILD_DIR  ?= build-ericw-tools-$(BUILD)
+ERICW_TOOLS_BUILD_TYPE ?= Release
+ifeq ($(BUILD),debug)
+ERICW_TOOLS_BUILD_TYPE := Debug
+endif
+ifneq ($(filter extradebug extradebug_quicker profile,$(BUILD)),)
+ERICW_TOOLS_BUILD_TYPE := RelWithDebInfo
+endif
 
 # Support DEPENDENCIES_CHECK with DOWNLOAD_GAMEPACKS semantics
 ifneq ($(DEPENDENCIES_CHECK),)
@@ -509,9 +520,20 @@ binaries-tools: \
 
 .PHONY: binaries-tools-quake2
 binaries-tools-quake2: \
+	binaries-ericw \
 	binaries-q2map \
 	binaries-qdata3 \
 	binaries-h2data \
+
+.PHONY: binaries-ericw
+binaries-ericw:
+	$(SH) scripts/build-ericw-tools.sh \
+		--mode install \
+		--source "$(CURDIR)/$(ERICW_TOOLS_SOURCE_DIR)" \
+		--build-dir "$(CURDIR)/$(ERICW_TOOLS_BUILD_DIR)" \
+		--dest "$(CURDIR)/$(INSTALLDIR)/ericw" \
+		--build-type "$(ERICW_TOOLS_BUILD_TYPE)" \
+		--executable-suffix "$(EXE)"
 
 .PHONY: binaries-q2map
 binaries-q2map: \
@@ -547,6 +569,7 @@ binaries-mbspc: \
 clean:
 	$(FIND) . \( -name \*.o -o -name \*.d -o -name \*.$(DLL) -o -name \*.$(A) -o -name \*.$(EXE) \) -exec $(RM) {} \;
 	$(RM_R) $(INSTALLDIR_BASE)/
+	$(RM_R) $(ERICW_TOOLS_BUILD_DIR)
 	$(RM) icons/*.rc
 
 %.$(EXE):

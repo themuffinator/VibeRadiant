@@ -362,12 +362,14 @@ public:
 };
 
 ConsolePane* g_consolePane = nullptr;
+bool g_consoleCollapsed = false;
 }
 
 QWidget* Console_constructWindow(){
 	auto *pane = new ConsolePane;
 	g_consolePane = pane;
 	g_console = pane->textEdit();
+	pane->setCollapsed( g_consoleCollapsed );
 
 	// globalExtendedASCIICharacterSet().print();
 
@@ -481,10 +483,14 @@ std::size_t Sys_Print(int level, const char *buf, std::size_t length) {
 }
 
 bool Console_isCollapsed(){
-	return g_consolePane != nullptr && g_consolePane->isCollapsed();
+	if( g_consolePane != nullptr ){
+		g_consoleCollapsed = g_consolePane->isCollapsed();
+	}
+	return g_consoleCollapsed;
 }
 
 void Console_setCollapsed( bool collapsed ){
+	g_consoleCollapsed = collapsed;
 	if( g_consolePane != nullptr ){
 		g_consolePane->setCollapsed( collapsed );
 	}

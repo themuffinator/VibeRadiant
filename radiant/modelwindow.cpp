@@ -29,6 +29,7 @@
 #include "ifilesystem.h"
 #include "iarchive.h"
 #include "imodel.h"
+#include "ientity.h"
 #include "igl.h"
 #include "irender.h"
 #include "renderable.h"
@@ -49,11 +50,16 @@
 #include "gtkutil/fbo.h"
 #include "gtkutil/mousepresses.h"
 #include "gtkutil/guisettings.h"
+#include "gtkutil/image.h"
 #include "gtkutil/widget.h"
 
 #include <QWidget>
 #include <QApplication>
+#include <QCursor>
 #include <QToolBar>
+#include <QLineEdit>
+#include <QMenu>
+#include <QToolButton>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QSplitter>
@@ -72,6 +78,7 @@
 #include "camwindow.h"
 #include "grid.h"
 #include "instancelib.h"
+#include "referencecache.h"
 #include "traverselib.h"
 #include "selectionlib.h"
 #include "gtkmisc.h"
@@ -112,9 +119,51 @@ QImage applyOpacity( QImage image, float opacity ){
 	return image;
 }
 
+bool string_contains_nocase( const char* haystack, const char* needle ){
+	if ( string_empty( needle ) ) {
+		return true;
+	}
+
+	const std::size_t needle_len = string_length( needle );
+	for ( const char* cursor = haystack; *cursor != '\0'; ++cursor ) {
+		if ( string_equal_nocase_n( cursor, needle, needle_len ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 Vector3 rotatedExtentsForAabb( const AABB& aabb, const Matrix4& rotation ){
 	const AABB rotated = aabb_for_oriented_aabb( aabb, rotation );
 	return rotated.extents;
+}
+
+void AssetBrowser_drawTileLabelBackground( const Vector3& pos, float width, int fontHeight, int fontDescent ){
+	const float left = pos.x() - 2.0f;
+	const float right = pos.x() + width + 2.0f;
+	const float top = pos.z() + 2.0f - fontDescent;
+	const float bottom = top - fontHeight - 4.0f;
+	gl().glColor4f( 0.0f, 0.0f, 0.0f, 0.85f );
+	gl().glBegin( GL_QUADS );
+	gl().glVertex3f( left, 0, top );
+	gl().glVertex3f( left, 0, bottom );
+	gl().glVertex3f( right, 0, bottom );
+	gl().glVertex3f( right, 0, top );
+	gl().glEnd();
+}
+
+void AssetBrowser_drawTileLabelText( const char* text, const Vector3& pos ){
+	gl().glColor4f( 0, 0, 0, 1 );
+	gl().glRasterPos3f( pos.x() - 1, pos.y(), pos.z() - 1 );
+	OpenGLFont_drawStringSafe( text );
+	gl().glRasterPos3f( pos.x() + 1, pos.y(), pos.z() + 1 );
+	OpenGLFont_drawStringSafe( text );
+
+	gl().glColor4f( 1, 1, 1, 1 );
+	gl().glRasterPos3f( pos.x(), pos.y(), pos.z() );
+	OpenGLFont_drawStringSafe( text );
+	gl().glRasterPos3f( pos.x() + 1, pos.y(), pos.z() );
+	OpenGLFont_drawStringSafe( text );
 }
 } // namespace
 
@@ -602,6 +651,10 @@ public:
 	QOpenGLWidget* m_gl_widget = nullptr;
 	QScrollBar* m_gl_scroll = nullptr;
 	QTreeView* m_treeView = nullptr;
+	QLineEdit* m_filterEntry = nullptr;
+	QToolButton* m_globalFilterButton = nullptr;
+	QToolButton* m_usedFilterButton = nullptr;
+	QToolButton* m_clearFiltersButton = nullptr;
 
 	int m_width;
 	int m_height;
@@ -613,7 +666,11 @@ public:
 
 	CopiedString m_currentFolderPath;
 	const ModelFS* m_currentFolder = nullptr;
-	int m_currentModelId = -1; // selected model index in m_modelInstances, m_currentFolder->m_files; these must be in sync!
+	std::vector<CopiedString> m_visibleModelPaths;
+	CopiedString m_filter;
+	bool m_filterGlobal = false;
+	bool m_filterUsed = false;
+	int m_currentModelId = -1; // selected model index in currently visible model list
 	int m_hoverModelId = -1;
 	float m_hoverScale = 1.0f;
 	float m_hoverScaleTarget = 1.0f;
@@ -635,6 +692,19 @@ public:
 	}
 	void clearHover(){
 		setHoverId( -1 );
+	}
+	CopiedString modelPathForIndex( int index ) const {
+		if ( index < 0 || index >= static_cast<int>( m_visibleModelPaths.size() ) ) {
+			return CopiedString( "" );
+		}
+		return m_visibleModelPaths[index];
+	}
+	const char* modelLabelForIndex( int index ) const {
+		if ( index < 0 || index >= static_cast<int>( m_visibleModelPaths.size() ) ) {
+			return "";
+		}
+		const char* path = m_visibleModelPaths[index].c_str();
+		return m_filterGlobal ? path : path_get_filename_start( path );
 	}
 	int hoverModelId() const {
 		return m_hoverModelId;
@@ -833,7 +903,7 @@ public:
 	}
 	void erase( scene::Instance* instance ) override { // just invalidate everything (also happens on resource flush and refresh) //FIXME: redraw on resource refresh
 		m_modelInstances.clear();
-		m_currentFolder = nullptr;
+		m_visibleModelPaths.clear();
 		m_originZ = 0;
 		m_originInvalid = true;
 	}
@@ -842,9 +912,114 @@ public:
 		for( scene::Instance* instance : m_modelInstances )
 			functor( instance );
 	}
+	void setFilter( const char* filter ){
+		m_filter = filter;
+	}
+	const char* filter() const {
+		return m_filter.c_str();
+	}
 };
 
 ModelBrowser g_ModelBrowser;
+static bool g_modelBrowserTreeConstructed = false;
+
+using ModelPathSet = std::set<CopiedString, StringLessNoCase>;
+
+class ModelBrowserFileTypeCollector : public IFileTypeList
+{
+public:
+	ModelPathSet m_extensions;
+	void addType( const char* moduleName, filetype_t type ) override {
+		m_extensions.emplace( moduleName );
+	}
+};
+
+bool ModelBrowser_normalizeModelPath( const char* value, const ModelPathSet& modelExtensions, CopiedString& outPath ){
+	if ( string_empty( value ) ) {
+		return false;
+	}
+	const auto cleaned = StringStream<256>( PathCleaned( value ) );
+	if ( !string_equal_prefix_nocase( cleaned.c_str(), "models/" ) ) {
+		return false;
+	}
+	if ( !modelExtensions.contains( path_get_extension( cleaned.c_str() ) ) ) {
+		return false;
+	}
+	outPath = cleaned.c_str();
+	return true;
+}
+
+class ModelBrowserEntityModelCollector : public Entity::Visitor
+{
+	const ModelPathSet& m_modelExtensions;
+	ModelPathSet& m_usedModels;
+public:
+	ModelBrowserEntityModelCollector( const ModelPathSet& modelExtensions, ModelPathSet& usedModels )
+		: m_modelExtensions( modelExtensions ), m_usedModels( usedModels ){
+	}
+	void visit( const char* key, const char* value ) override {
+		(void)key;
+		CopiedString modelPath;
+		if ( ModelBrowser_normalizeModelPath( value, m_modelExtensions, modelPath ) ) {
+			m_usedModels.emplace( modelPath );
+		}
+	}
+};
+
+class ModelBrowserUsedModelWalker : public scene::Graph::Walker
+{
+	const ModelPathSet& m_modelExtensions;
+	ModelPathSet& m_usedModels;
+public:
+	ModelBrowserUsedModelWalker( const ModelPathSet& modelExtensions, ModelPathSet& usedModels )
+		: m_modelExtensions( modelExtensions ), m_usedModels( usedModels ){
+	}
+	bool pre( const scene::Path& path, scene::Instance& instance ) const override {
+		(void)instance;
+		if ( Entity* entity = Node_getEntity( path.top() ) ) {
+			ModelBrowserEntityModelCollector collector( m_modelExtensions, m_usedModels );
+			entity->forEachKeyValue( collector );
+		}
+		return true;
+	}
+};
+
+ModelPathSet ModelBrowser_collectUsedModels(){
+	ModelBrowserFileTypeCollector typelist;
+	GlobalFiletypes().getTypeList( ModelLoader::Name, &typelist, true, false, false );
+
+	ModelPathSet usedModels;
+	GlobalSceneGraph().traverse( ModelBrowserUsedModelWalker( typelist.m_extensions, usedModels ) );
+	return usedModels;
+}
+
+void ModelBrowser_collectAllFolderFiles( const ModelFS& folder, const char* prefix, std::vector<CopiedString>& files ){
+	for ( const CopiedString& file : folder.m_files ) {
+		files.emplace_back( StringStream<256>( prefix, file.c_str() ) );
+	}
+	for ( const ModelFS& subfolder : folder.m_folders ) {
+		const auto nextPrefix = StringStream<256>( prefix, subfolder.m_folderName.c_str(), '/' );
+		ModelBrowser_collectAllFolderFiles( subfolder, nextPrefix.c_str(), files );
+	}
+}
+
+void ModelBrowser_updateClearFiltersButton(){
+	if ( g_ModelBrowser.m_clearFiltersButton == nullptr ) {
+		return;
+	}
+	const bool active = !string_empty( g_ModelBrowser.filter() )
+	                 || g_ModelBrowser.m_filterGlobal
+	                 || g_ModelBrowser.m_filterUsed;
+	g_ModelBrowser.m_clearFiltersButton->setEnabled( active );
+}
+
+void ModelBrowser_updateUsedFilterButtonLabel( std::size_t usedCount ){
+	if ( g_ModelBrowser.m_usedFilterButton != nullptr ) {
+		g_ModelBrowser.m_usedFilterButton->setText( StringStream<64>( "Used (", usedCount, ')' ).c_str() );
+	}
+}
+
+void ModelBrowser_rebuildVisibleModels();
 
 static QRect ModelBrowser_cellRectPixels( const ModelBrowser& browser, int index ){
 	const CellPos cellPos = browser.constructCellPos();
@@ -946,6 +1121,59 @@ public:
 		}
 	}
 };
+
+void ModelBrowser_rebuildVisibleModels(){
+	ModelGraph_clear();
+	g_ModelBrowser.m_visibleModelPaths.clear();
+	g_ModelBrowser.m_currentModelId = -1;
+	g_ModelBrowser.clearHover();
+
+	std::vector<CopiedString> candidates;
+	if ( g_ModelBrowser.m_filterGlobal ) {
+		ModelBrowser_collectAllFolderFiles( g_ModelBrowser.m_modelFS, "", candidates );
+	}
+	else if ( g_ModelBrowser.m_currentFolder != nullptr ) {
+		for ( const CopiedString& file : g_ModelBrowser.m_currentFolder->m_files ) {
+			candidates.emplace_back( StringStream<256>( g_ModelBrowser.m_currentFolderPath.c_str(), file.c_str() ) );
+		}
+	}
+
+	ModelPathSet usedModels;
+	if ( g_ModelBrowser.m_filterUsed ) {
+		usedModels = ModelBrowser_collectUsedModels();
+		ModelBrowser_updateUsedFilterButtonLabel( usedModels.size() );
+	}
+	const char* filter = g_ModelBrowser.filter();
+
+	for ( const CopiedString& path : candidates ) {
+		const char* pathText = path.c_str();
+		const char* leaf = path_get_filename_start( pathText );
+		if ( !string_contains_nocase( pathText, filter ) && !string_contains_nocase( leaf, filter ) ) {
+			continue;
+		}
+		if ( g_ModelBrowser.m_filterUsed && !usedModels.contains( pathText ) ) {
+			continue;
+		}
+		g_ModelBrowser.m_visibleModelPaths.push_back( path );
+	}
+
+	if ( scene::Traversable* traversable = Node_getTraversable( g_modelGraph->root() ) ) {
+		const char* status = g_ModelBrowser.m_filterGlobal ? "All Objects" : g_ModelBrowser.m_currentFolderPath.c_str();
+		ScopeDisableScreenUpdates disableScreenUpdates( status, "Loading Objects" );
+		for ( const CopiedString& path : g_ModelBrowser.m_visibleModelPaths ) {
+			auto *modelNode = new ModelNode;
+			modelNode->setModel( path.c_str() );
+			NodeSmartReference node( modelNode->node() );
+			traversable->insert( node );
+		}
+		g_ModelBrowser.forEachModelInstance( models_set_transforms( ModelBrowser_baseScale() ) );
+	}
+
+	g_ModelBrowser.m_originZ = 0;
+	g_ModelBrowser.m_originInvalid = true;
+	ModelBrowser_updateClearFiltersButton();
+	g_ModelBrowser.queueDraw();
+}
 
 
 class ModelRenderer : public Renderer
@@ -1091,7 +1319,7 @@ void ModelBrowser_render(){
 	gl().glLoadMatrixf( reinterpret_cast<const float*>( &m_modelview ) );
 
 
-	if( g_ModelBrowser.m_currentFolder != nullptr ){
+	if( !g_ModelBrowser.m_visibleModelPaths.empty() ){
 		{	// prepare for 2d stuff
 			gl().glDisable( GL_BLEND );
 
@@ -1118,7 +1346,7 @@ void ModelBrowser_render(){
 
 			CellPos cellPos = g_ModelBrowser.constructCellPos();
 			gl().glBegin( GL_QUADS );
-			for( std::size_t i = g_ModelBrowser.m_currentFolder->m_files.size(); i != 0; --i ){
+			for( std::size_t i = g_ModelBrowser.m_visibleModelPaths.size(); i != 0; --i ){
 				const Vector3 origin = cellPos.getOrigin();
 				const float minx = origin.x() - cellPos.getCellSize();
 				const float maxx = origin.x() + cellPos.getCellSize();
@@ -1206,15 +1434,23 @@ void ModelBrowser_render(){
 		}
 		{	// render model file names
 			if ( OpenGLFont_canDrawSafe() ) {
+				const int fontHeight = AssetBrowser_fontPixelHeight();
+				const int fontDescent = AssetBrowser_fontPixelDescent();
 				CellPos cellPos = g_ModelBrowser.constructCellPos();
-				for( const CopiedString& string : g_ModelBrowser.m_currentFolder->m_files ){
+				int index = 0;
+				gl().glEnable( GL_BLEND );
+				gl().glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+				for( const CopiedString& path : g_ModelBrowser.m_visibleModelPaths ){
+					(void)path;
 					const Vector3 pos = cellPos.getTextPos();
 					if( m_view.TestPoint( pos ) ){
-						gl().glRasterPos3f( pos.x(), pos.y(), pos.z() );
-						OpenGLFont_drawStringSafe( string.c_str() );
+						AssetBrowser_drawTileLabelBackground( pos, static_cast<float>( cellPos.getCellSize() * 2 ), fontHeight, fontDescent );
+						AssetBrowser_drawTileLabelText( g_ModelBrowser.modelLabelForIndex( index ), pos );
 					}
 					++cellPos;
+					++index;
 				}
+				gl().glDisable( GL_BLEND );
 			}
 		}
 	}
@@ -1312,14 +1548,17 @@ protected:
 		if ( ( localPos - m_dragStart ).manhattanLength() < QApplication::startDragDistance() ) {
 			return;
 		}
-		if ( m_modBro.m_currentFolder == nullptr || m_modBro.m_currentModelId < 0 ) {
+		if ( m_modBro.m_currentModelId < 0 ) {
 			return;
 		}
 
-		const auto sstream = StringStream<128>( m_modBro.m_currentFolderPath, std::next( m_modBro.m_currentFolder->m_files.begin(), m_modBro.m_currentModelId )->c_str() );
+		const CopiedString modelPath = m_modBro.modelPathForIndex( m_modBro.m_currentModelId );
+		if ( modelPath.empty() ) {
+			return;
+		}
 		auto* mimeData = new QMimeData;
-		mimeData->setData( kModelBrowserMimeType, QByteArray( sstream.c_str() ) );
-		mimeData->setText( sstream.c_str() );
+		mimeData->setData( kModelBrowserMimeType, QByteArray( modelPath.c_str() ) );
+		mimeData->setText( modelPath.c_str() );
 
 		m_modBro.tracking_MouseUp();
 		auto* drag = new QDrag( this );
@@ -1338,7 +1577,7 @@ protected:
 	}
 	void mouseDoubleClick(){
 		/* create misc_model */
-		if ( m_modBro.m_currentFolder != nullptr && m_modBro.m_currentModelId >= 0 ) {
+		if ( m_modBro.m_currentModelId >= 0 ) {
 			UndoableCommand undo( "insertModel" );
 			// todo
 			// GlobalEntityClassManager() search for "misc_model"
@@ -1362,8 +1601,10 @@ protected:
 			GlobalSelectionSystem().setSelectedAll( false );
 			Instance_setSelected( instance, true );
 
-			const auto sstream = StringStream<128>( m_modBro.m_currentFolderPath, std::next( m_modBro.m_currentFolder->m_files.begin(), m_modBro.m_currentModelId )->c_str() );
-			Node_getEntity( node )->setKeyValue( entityClass->miscmodel_key(), sstream );
+			const CopiedString modelPath = m_modBro.modelPathForIndex( m_modBro.m_currentModelId );
+			if ( !modelPath.empty() ) {
+				Node_getEntity( node )->setKeyValue( entityClass->miscmodel_key(), modelPath.c_str() );
+			}
 		}
 	}
 	void mouseReleaseEvent( QMouseEvent *event ) override {
@@ -1375,8 +1616,11 @@ protected:
 		if ( release == MousePresses::Left || release == MousePresses::Right ) {
 			m_modBro.tracking_MouseUp();
 		}
-		if ( release == MousePresses::Left && m_modBro.m_move_amount < 16 && m_modBro.m_currentFolder != nullptr && m_modBro.m_currentModelId >= 0 ) { // assign model to selected entity nodes
-			const auto sstream = StringStream<128>( m_modBro.m_currentFolderPath, std::next( m_modBro.m_currentFolder->m_files.begin(), m_modBro.m_currentModelId )->c_str() );
+		if ( release == MousePresses::Left && m_modBro.m_move_amount < 16 && m_modBro.m_currentModelId >= 0 ) { // assign model to selected entity nodes
+			const CopiedString modelPath = m_modBro.modelPathForIndex( m_modBro.m_currentModelId );
+			if ( modelPath.empty() ) {
+				return;
+			}
 			class EntityVisitor : public SelectionSystem::Visitor
 			{
 				const char* m_filePath;
@@ -1388,11 +1632,11 @@ protected:
 						entity->setKeyValue( entity->getEntityClass().miscmodel_key(), m_filePath );
 					}
 				}
-			} visitor( sstream );
+			} visitor( modelPath.c_str() );
 			UndoableCommand undo( "entityAssignModel" );
 			GlobalSelectionSystem().foreachSelected( visitor );
 		}
-		else if( release == MousePresses::Right && m_modBro.m_move_amount < 16 && m_modBro.m_currentFolder != nullptr ){
+		else if( release == MousePresses::Right && m_modBro.m_move_amount < 16 ){
 			m_modBro.forEachModelInstance( models_set_transforms( ModelBrowser_baseScale() ) );
 			m_modBro.queueDraw();
 		}
@@ -1429,26 +1673,9 @@ static void TreeView_onRowActivated( const QModelIndex& index ){
 	}
 
 //%						globalOutputStream() << sstream << " sstream\n";
-
-	ModelGraph_clear(); // this goes 1st: resets m_currentFolder
-
 	g_ModelBrowser.m_currentFolder = modelFS;
 	g_ModelBrowser.m_currentFolderPath = sstream;
-
-	{
-		ScopeDisableScreenUpdates disableScreenUpdates( g_ModelBrowser.m_currentFolderPath.c_str(), "Loading Models" );
-
-		for( const CopiedString& filename : g_ModelBrowser.m_currentFolder->m_files ){
-			sstream( g_ModelBrowser.m_currentFolderPath, filename );
-			auto *modelNode = new ModelNode;
-			modelNode->setModel( sstream );
-			NodeSmartReference node( modelNode->node() );
-			Node_getTraversable( g_modelGraph->root() )->insert( node );
-		}
-		g_ModelBrowser.forEachModelInstance( models_set_transforms( ModelBrowser_baseScale() ) );
-	}
-
-	g_ModelBrowser.queueDraw();
+	ModelBrowser_rebuildVisibleModels();
 
 	//deactivate, so SPACE and RETURN wont be broken for 2d
 	g_ModelBrowser.m_treeView->clearFocus();
@@ -1510,6 +1737,14 @@ public:
 			start = end;
 		}
 
+		ModelFoldersMap mapObjectsOnly;
+		for ( const auto& [folder, depth] : m_modelFoldersMap ) {
+			if ( string_equal_prefix_nocase( folder.c_str(), "models/mapobjects/" ) ) {
+				mapObjectsOnly.emplace( folder, depth );
+			}
+		}
+		m_modelFoldersMap = std::move( mapObjectsOnly );
+
 		if( m_modelFoldersMap.empty() )
 			m_modelFoldersMap.emplace( "models/mapobjects/", 99 );
 	}
@@ -1547,6 +1782,12 @@ void ModelPaths_addFromArchive( ModelPaths_ArchiveVisitor& visitor, const char *
 typedef ReferenceCaller<ModelPaths_ArchiveVisitor, void(const char*), ModelPaths_addFromArchive> ModelPaths_addFromArchiveCaller;
 
 void ModelBrowser_constructTree(){
+	if ( g_ModelBrowser.m_treeView == nullptr ) {
+		return;
+	}
+
+	g_ModelBrowser.m_currentFolder = nullptr;
+	g_ModelBrowser.m_currentFolderPath = "";
 	g_ModelBrowser.m_modelFS.m_folders.clear();
 	g_ModelBrowser.m_modelFS.m_files.clear();
 	ModelGraph_clear();
@@ -1582,6 +1823,14 @@ void ModelBrowser_constructTree(){
 	}
 
 	g_ModelBrowser.m_treeView->setModel( model );
+
+	if ( model->rowCount() > 0 ) {
+		const QModelIndex first = model->index( 0, 0 );
+		g_ModelBrowser.m_treeView->setCurrentIndex( first );
+		TreeView_onRowActivated( first );
+	}
+
+	g_modelBrowserTreeConstructed = true;
 }
 
 class TexBro_QTreeView : public QTreeView
@@ -1596,8 +1845,15 @@ protected:
 	}
 };
 
+void ModelBrowser_EnsureTree(){
+	if ( !g_modelBrowserTreeConstructed ) {
+		ModelBrowser_constructTree();
+	}
+}
+
 QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 	g_ModelBrowser.m_parent = toplevel;
+	g_modelBrowserTreeConstructed = false;
 
 	const bool disableOpenGL = OpenGLWidgetsDisabled();
 
@@ -1620,8 +1876,104 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		const int iconSize = toolbar->style()->pixelMetric( QStyle::PixelMetric::PM_SmallIconSize );
 		toolbar->setIconSize( QSize( iconSize, iconSize ) );
 
-		toolbar_append_button( toolbar, "Reload Model Folders Tree View", "refresh_modelstree.png", FreeCaller<void(), ModelBrowser_constructTree>() );
-		toolbar_append_button( toolbar, "Refresh Models", "refresh_models.png", "RefreshReferences" );
+		auto* menu_view = new QMenu( toolbar );
+		menu_view->addAction( "Reset Preview Scroll", [](){
+			g_ModelBrowser.setOriginZ( 0 );
+			g_ModelBrowser.queueDraw();
+		} );
+		menu_view->addAction( "Expand Folders", [](){
+			if ( g_ModelBrowser.m_treeView != nullptr ) {
+				g_ModelBrowser.m_treeView->expandAll();
+			}
+		} );
+		menu_view->addAction( "Collapse Folders", [](){
+			if ( g_ModelBrowser.m_treeView != nullptr ) {
+				g_ModelBrowser.m_treeView->collapseAll();
+			}
+		} );
+		menu_view->setParent( toolbar, menu_view->windowFlags() );
+
+		toolbar_append_button( toolbar, "View", "texbro_view.png", PointerCaller<QMenu, void(), +[]( QMenu* menu ){
+			menu->popup( QCursor::pos() );
+		}>( menu_view ) );
+		toolbar_append_button( toolbar, "Find / Replace...", "texbro_find-replace.png", "FindReplaceObjects" );
+		toolbar_append_button( toolbar, "Flush / Reload Objects", "refresh_models.png", makeCallbackF( +[](){
+			RefreshReferences();
+			ModelBrowser_constructTree();
+		} ) );
+	}
+	{	// filter bar
+		auto *filterBar = new QWidget;
+		auto *filterLayout = new QHBoxLayout( filterBar );
+		filterLayout->setContentsMargins( 4, 4, 4, 4 );
+		filterLayout->setSpacing( 6 );
+
+		QLineEdit *entry = g_ModelBrowser.m_filterEntry = new QLineEdit;
+		filterLayout->addWidget( entry, 1 );
+		entry->setClearButtonEnabled( true );
+		entry->setFocusPolicy( Qt::FocusPolicy::ClickFocus );
+		entry->setPlaceholderText( "Filter by name" );
+
+		auto* globalButton = g_ModelBrowser.m_globalFilterButton = new QToolButton;
+		globalButton->setAutoRaise( true );
+		globalButton->setFocusPolicy( Qt::NoFocus );
+		globalButton->setCheckable( true );
+		globalButton->setIcon( new_local_icon( "f-world.png" ) );
+		globalButton->setToolTip( "Global switch: filter across all folders" );
+		filterLayout->addWidget( globalButton );
+
+		auto* usedButton = g_ModelBrowser.m_usedFilterButton = new QToolButton;
+		usedButton->setAutoRaise( true );
+		usedButton->setFocusPolicy( Qt::NoFocus );
+		usedButton->setCheckable( true );
+		usedButton->setToolButtonStyle( Qt::ToolButtonStyle::ToolButtonTextOnly );
+		usedButton->setText( "Used (0)" );
+		usedButton->setToolTip( "Show only objects used in the current level" );
+		filterLayout->addWidget( usedButton );
+
+		auto *clearButton = g_ModelBrowser.m_clearFiltersButton = new QToolButton;
+		clearButton->setAutoRaise( true );
+		clearButton->setFocusPolicy( Qt::NoFocus );
+		clearButton->setIcon( new_local_icon( "f-reset.png" ) );
+		clearButton->setToolTip( "Clear filters" );
+		filterLayout->addWidget( clearButton );
+
+		entry->setText( g_ModelBrowser.filter() );
+		globalButton->setChecked( g_ModelBrowser.m_filterGlobal );
+		usedButton->setChecked( g_ModelBrowser.m_filterUsed );
+
+		QObject::connect( clearButton, &QToolButton::clicked, [](){
+			if ( g_ModelBrowser.m_filterEntry != nullptr ) {
+				g_ModelBrowser.m_filterEntry->clear();
+			}
+			g_ModelBrowser.m_filterGlobal = false;
+			g_ModelBrowser.m_filterUsed = false;
+			if ( g_ModelBrowser.m_globalFilterButton != nullptr ) {
+				g_ModelBrowser.m_globalFilterButton->setChecked( false );
+			}
+			if ( g_ModelBrowser.m_usedFilterButton != nullptr ) {
+				g_ModelBrowser.m_usedFilterButton->setChecked( false );
+			}
+			ModelBrowser_rebuildVisibleModels();
+		} );
+		QObject::connect( entry, &QLineEdit::textChanged, []( const QString& text ){
+			g_ModelBrowser.setFilter( text.toLatin1().constData() );
+			ModelBrowser_rebuildVisibleModels();
+		} );
+		QObject::connect( globalButton, &QToolButton::toggled, []( bool checked ){
+			g_ModelBrowser.m_filterGlobal = checked;
+			ModelBrowser_rebuildVisibleModels();
+		} );
+		QObject::connect( usedButton, &QToolButton::toggled, []( bool checked ){
+			g_ModelBrowser.m_filterUsed = checked;
+			ModelBrowser_rebuildVisibleModels();
+		} );
+
+		ModelBrowser_updateClearFiltersButton();
+		if ( g_ModelBrowser.m_filterUsed ) {
+			ModelBrowser_updateUsedFilterButtonLabel( ModelBrowser_collectUsedModels().size() );
+		}
+		vbox->addWidget( filterBar );
 	}
 	{	// TreeView
 		g_ModelBrowser.m_treeView = new TexBro_QTreeView;
@@ -1636,14 +1988,12 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 
 		QObject::connect( g_ModelBrowser.m_treeView, &QAbstractItemView::activated, TreeView_onRowActivated );
 
-		ModelBrowser_constructTree();
-
 		vbox->addWidget( g_ModelBrowser.m_treeView );
 	}
 	{	// gl_widget
 		if ( disableOpenGL ) {
 			g_ModelBrowser.m_gl_widget = nullptr;
-			hbox->addWidget( glwidget_createDisabledPlaceholder( "OpenGL disabled (Models)", nullptr ) );
+			hbox->addWidget( glwidget_createDisabledPlaceholder( "OpenGL disabled (Objects)", nullptr ) );
 		}
 		else {
 			g_ModelBrowser.m_gl_widget = new ModelBrowserGLWidget( g_ModelBrowser );
@@ -1672,6 +2022,7 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 
 void ModelBrowser_destroyWindow(){
 	g_ModelBrowser.m_gl_widget = nullptr;
+	g_modelBrowserTreeConstructed = false;
 }
 
 
@@ -1729,6 +2080,15 @@ void ModelBrowser_Construct(){
 	GlobalPreferenceSystem().registerPreference( "ModelBrowserCellSize", IntImportStringCaller( g_ModelBrowser.m_cellSize ), IntExportStringCaller( g_ModelBrowser.m_cellSize ) );
 	GlobalPreferenceSystem().registerPreference( "ColorModBroBackground", Vector3ImportStringCaller( g_ModelBrowser.m_background_color ), Vector3ExportStringCaller( g_ModelBrowser.m_background_color ) );
 	GlobalPreferenceSystem().registerPreference( "AssetBrowserDefaultAngles", Vector3ImportStringCaller( AssetBrowser_defaultAngles() ), Vector3ExportStringCaller( AssetBrowser_defaultAngles() ) );
+	GlobalPreferenceSystem().registerPreference( "ModelBrowserFilter",
+	                                             CopiedStringImportStringCaller( g_ModelBrowser.m_filter ),
+	                                             CopiedStringExportStringCaller( g_ModelBrowser.m_filter ) );
+	GlobalPreferenceSystem().registerPreference( "ModelBrowserFilterGlobal",
+	                                             BoolImportStringCaller( g_ModelBrowser.m_filterGlobal ),
+	                                             BoolExportStringCaller( g_ModelBrowser.m_filterGlobal ) );
+	GlobalPreferenceSystem().registerPreference( "ModelBrowserFilterUsed",
+	                                             BoolImportStringCaller( g_ModelBrowser.m_filterUsed ),
+	                                             BoolExportStringCaller( g_ModelBrowser.m_filterUsed ) );
 
 	ModelBrowser_registerPreferencesPage();
 

@@ -1,0 +1,80 @@
+option(
+  'build_profile',
+  type: 'combo',
+  choices: ['release', 'debug', 'extradebug', 'extradebug_quicker', 'profile', 'native'],
+  value: 'release',
+  description: 'Compiler/linker profile used by native Meson targets.',
+)
+
+option(
+  'install_data',
+  type: 'boolean',
+  value: false,
+  description: 'Install runtime docs/tools and run gamepack installation script during `meson install`.',
+)
+
+option(
+  'install_dlls',
+  type: 'boolean',
+  value: false,
+  description: 'On Windows, copy transitive MSYS2 runtime DLLs into install prefix during `meson install`.',
+)
+
+option(
+  'download_gamepacks',
+  type: 'combo',
+  choices: ['no', 'yes', 'all', 'allinone'],
+  value: 'no',
+  description: 'Controls install-gamepacks download mode when install_data=true.',
+)
+
+option(
+  'gamepack_source',
+  type: 'combo',
+  choices: ['VibePack'],
+  value: 'VibePack',
+  description: 'Canonical gamepack source passed to install-gamepacks.sh when install_data=true.',
+)
+
+option(
+  'assimp_internal',
+  type: 'boolean',
+  value: false,
+  description: 'Build bundled Assimp (libs/assimp) instead of linking system assimp.',
+)
+
+option(
+  'radiant_aboutmsg',
+  type: 'string',
+  value: 'Custom build',
+  description: 'Build/about message baked into RADIANT_ABOUTMSG macro.',
+)
+
+option(
+  'qt_major',
+  type: 'combo',
+  choices: ['5', '6'],
+  value: '6',
+  description: 'Qt major dependency family (qt5 or qt6).',
+)
+
+option(
+  'radiant_update_url',
+  type: 'string',
+  value: 'https://github.com/themuffinator/VibeRadiant/releases/latest/download/update.json',
+  description: 'RADIANT_UPDATE_URL compile-time constant.',
+)
+
+option(
+  'radiant_releases_url',
+  type: 'string',
+  value: 'https://github.com/themuffinator/VibeRadiant/releases/latest',
+  description: 'RADIANT_RELEASES_URL compile-time constant.',
+)
+
+option(
+  'radiant_github_repo',
+  type: 'string',
+  value: 'themuffinator/VibeRadiant',
+  description: 'RADIANT_GITHUB_REPO compile-time constant.',
+)

@@ -6,14 +6,23 @@
 : ${CP_R:=cp -r}
 : ${RM:=rm}
 : ${RM_R:=rm -r}
+: ${MV:=mv}
 : ${GAMEPACK_SOURCE:=VibePack}
 : ${PYTHON:=python3}
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 
+set -e
+
 dest=$1
 if [ -z "$dest" ]; then
 	$ECHO "Usage: $0 <destination-gamepacks-dir>"
+	exit 1
+fi
+
+if [ "$GAMEPACK_SOURCE" != "VibePack" ]; then
+	$ECHO "GAMEPACK_SOURCE='$GAMEPACK_SOURCE' is no longer supported."
+	$ECHO "Use the canonical source only: GAMEPACK_SOURCE=VibePack."
 	exit 1
 fi
 
@@ -30,31 +39,6 @@ case "$DOWNLOAD_GAMEPACKS" in
 	*)
 		;;
 esac
-
-set -e
-
-install_one_pack() {
-	packdir=$1
-	if [ ! -d "$packdir" ]; then
-		return 1
-	fi
-	$SH "$SCRIPT_DIR/install-gamepack.sh" "$packdir" "$dest"
-	return 0
-}
-
-prepare_destination() {
-	mkdir -p "$dest" "$dest/games"
-	for GAMEFILE in "$dest"/games/*.game; do
-		if [ -f "$GAMEFILE" ]; then
-			$RM -f "$GAMEFILE"
-		fi
-	done
-	for GAMEDIR in "$dest"/*.game; do
-		if [ -d "$GAMEDIR" ]; then
-			$RM_R "$GAMEDIR"
-		fi
-	done
-}
 
 resolve_python() {
 	if command -v "$PYTHON" >/dev/null 2>&1; then
@@ -73,13 +57,14 @@ resolve_python() {
 }
 
 normalize_entity_definitions() {
+	normalize_root=$1
 	python_cmd=$(resolve_python) || {
 		$ECHO "Python interpreter not found; cannot normalize legacy .def entity definitions."
 		return 1
 	}
 
 	"$python_cmd" "$SCRIPT_DIR/tools/convert_entities_def_to_fgd.py" \
-		--root "$dest" \
+		--root "$normalize_root" \
 		--remove-legacy-def-files \
 		--refine-existing-fgd \
 		--fail-on-legacy-def
@@ -91,33 +76,49 @@ print_missing_packs_error() {
 	$ECHO "and then try again!"
 }
 
-prepare_destination
+source_pack="$SCRIPT_DIR/games/VibePack"
+if [ ! -d "$source_pack/games" ]; then
+	print_missing_packs_error
+	exit 1
+fi
 
-case "$GAMEPACK_SOURCE" in
-	auto)
-		if install_one_pack "games/VibePack"; then
-			$ECHO "Using gamepack source: games/VibePack"
-		elif install_one_pack "games/NRCPack"; then
-			$ECHO "Using gamepack source: games/NRCPack"
-		else
-			print_missing_packs_error
-			exit 1
-		fi
-		;;
-	all)
-		$ECHO "GAMEPACK_SOURCE=all is no longer supported."
-		$ECHO "Install from a single canonical source (VibePack or auto fallback)."
+dest_parent=$(dirname "$dest")
+mkdir -p "$dest_parent"
+stage_dir=$(mktemp -d "$dest_parent/.gamepacks-stage.XXXXXX")
+backup_dir=
+
+cleanup_staging() {
+	if [ -n "$stage_dir" ] && [ -d "$stage_dir" ]; then
+		$RM_R "$stage_dir"
+	fi
+	if [ -n "$backup_dir" ] && [ -d "$backup_dir" ] && [ ! -e "$dest" ]; then
+		$MV "$backup_dir" "$dest"
+	fi
+}
+trap cleanup_staging EXIT
+trap 'exit 1' HUP INT TERM
+
+mkdir -p "$stage_dir/games"
+$SH "$SCRIPT_DIR/install-gamepack.sh" "$source_pack" "$stage_dir"
+$ECHO "Using gamepack source: games/VibePack"
+normalize_entity_definitions "$stage_dir"
+
+if [ -e "$dest" ]; then
+	backup_dir="$dest.backup.$$"
+	if [ -e "$backup_dir" ]; then
+		$ECHO "Refusing to overwrite stale gamepack backup: $backup_dir"
 		exit 1
-		;;
-	*)
-		if install_one_pack "games/$GAMEPACK_SOURCE"; then
-			$ECHO "Using gamepack source: games/$GAMEPACK_SOURCE"
-		else
-			$ECHO "Configured GAMEPACK_SOURCE '$GAMEPACK_SOURCE' was not found."
-			print_missing_packs_error
-			exit 1
-		fi
-		;;
-esac
+	fi
+	$MV "$dest" "$backup_dir"
+fi
 
-normalize_entity_definitions
+if ! $MV "$stage_dir" "$dest"; then
+	$ECHO "Unable to activate staged gamepacks; restoring previous installation."
+	exit 1
+fi
+stage_dir=
+
+if [ -n "$backup_dir" ]; then
+	$RM_R "$backup_dir"
+	backup_dir=
+fi

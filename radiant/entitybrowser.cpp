@@ -7,20 +7,24 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCursor>
 #include <QDrag>
 #include <QEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMimeData>
 #include <QOpenGLWidget>
 #include <QPixmap>
 #include <QScrollBar>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QToolBar>
 #include <QToolButton>
+#include <QTreeWidget>
 #include <QTreeView>
 #include <QVBoxLayout>
 
@@ -34,6 +38,7 @@
 #include "iscenegraph.h"
 #include "instancelib.h"
 #include "mainframe.h"
+#include "commands.h"
 #include "renderable.h"
 #include "renderer.h"
 #include "scenelib.h"
@@ -46,6 +51,7 @@
 #include "math/aabb.h"
 #include "timer.h"
 #include "assetbrowserprefs.h"
+#include "gtkmisc.h"
 
 #include "generic/callback.h"
 
@@ -111,6 +117,34 @@ QImage applyOpacity( QImage image, float opacity ){
 Vector3 rotatedExtentsForAabb( const AABB& aabb, const Matrix4& rotation ){
 	const AABB rotated = aabb_for_oriented_aabb( aabb, rotation );
 	return rotated.extents;
+}
+
+void AssetBrowser_drawTileLabelBackground( const Vector3& pos, float width, int fontHeight, int fontDescent ){
+	const float left = pos.x() - 2.0f;
+	const float right = pos.x() + width + 2.0f;
+	const float top = pos.z() + 2.0f - fontDescent;
+	const float bottom = top - fontHeight - 4.0f;
+	gl().glColor4f( 0.0f, 0.0f, 0.0f, 0.85f );
+	gl().glBegin( GL_QUADS );
+	gl().glVertex3f( left, 0, top );
+	gl().glVertex3f( left, 0, bottom );
+	gl().glVertex3f( right, 0, bottom );
+	gl().glVertex3f( right, 0, top );
+	gl().glEnd();
+}
+
+void AssetBrowser_drawTileLabelText( const char* text, const Vector3& pos ){
+	gl().glColor4f( 0, 0, 0, 1 );
+	gl().glRasterPos3f( pos.x() - 1, pos.y(), pos.z() - 1 );
+	OpenGLFont_drawStringSafe( text );
+	gl().glRasterPos3f( pos.x() + 1, pos.y(), pos.z() + 1 );
+	OpenGLFont_drawStringSafe( text );
+
+	gl().glColor4f( 1, 1, 1, 1 );
+	gl().glRasterPos3f( pos.x(), pos.y(), pos.z() );
+	OpenGLFont_drawStringSafe( text );
+	gl().glRasterPos3f( pos.x() + 1, pos.y(), pos.z() );
+	OpenGLFont_drawStringSafe( text );
 }
 
 } // namespace
@@ -672,6 +706,12 @@ public:
 	int getCellSize() const {
 		return m_cellSize;
 	}
+	int cellsInRow() const {
+		return m_cellsInRow;
+	}
+	int rowHeight() const {
+		return m_cellSize * 2 + m_fontHeight + m_plusHeight;
+	}
 	int totalHeight( int height, int cellCount ) const {
 		return std::max( height, ( ( cellCount - 1 ) / m_cellsInRow + 1 ) * ( m_cellSize * 2 + m_fontHeight + m_plusHeight ) + m_fontHeight );
 	}
@@ -704,10 +744,20 @@ public:
 	Vector3 m_background_color = Vector3( .25f );
 
 	QWidget* m_parent = nullptr;
+	QStackedWidget* m_viewStack = nullptr;
 	QOpenGLWidget* m_gl_widget = nullptr;
 	QScrollBar* m_gl_scroll = nullptr;
+	QTreeWidget* m_listWidget = nullptr;
 	QTreeView* m_treeView = nullptr;
 	QLineEdit* m_filterEntry = nullptr;
+	QToolButton* m_globalFilterButton = nullptr;
+	QToolButton* m_usedFilterButton = nullptr;
+	QToolButton* m_clearFiltersButton = nullptr;
+	QToolButton* m_listModeButton = nullptr;
+	bool m_filterGlobal = false;
+	bool m_filterUsed = false;
+	bool m_listMode = false;
+	int m_loadedPreviewCount = 0;
 
 	int m_width = 0;
 	int m_height = 0;
@@ -960,6 +1010,12 @@ public:
 	const char* filter() const {
 		return m_filter.c_str();
 	}
+	CopiedString& filterStorage(){
+		return m_filter;
+	}
+	const CopiedString& filterStorage() const {
+		return m_filter;
+	}
 	void setCurrentCategory( const EntityCategory* category ){
 		m_currentCategory = category;
 	}
@@ -972,6 +1028,43 @@ public:
 };
 
 EntityBrowser g_EntityBrowser;
+
+using EntityClassnameSet = std::set<CopiedString, StringLessNoCase>;
+
+class EntityBrowserUsedClassCollector : public scene::Graph::Walker
+{
+	EntityClassnameSet& m_used;
+public:
+	explicit EntityBrowserUsedClassCollector( EntityClassnameSet& used ) : m_used( used ){
+	}
+	bool pre( const scene::Path& path, scene::Instance& instance ) const override {
+		if ( Entity* entity = Node_getEntity( path.top() ) ) {
+			m_used.emplace( entity->getClassName() );
+		}
+		return true;
+	}
+};
+
+EntityClassnameSet EntityBrowser_collectUsedClasses(){
+	EntityClassnameSet used;
+	GlobalSceneGraph().traverse( EntityBrowserUsedClassCollector( used ) );
+	return used;
+}
+
+void EntityBrowser_updateClearFiltersButton(){
+	if ( g_EntityBrowser.m_clearFiltersButton != nullptr ) {
+		const bool active = !string_empty( g_EntityBrowser.filter() )
+		                 || g_EntityBrowser.m_filterGlobal
+		                 || g_EntityBrowser.m_filterUsed;
+		g_EntityBrowser.m_clearFiltersButton->setEnabled( active );
+	}
+}
+
+void EntityBrowser_updateUsedFilterButtonLabel( std::size_t usedCount ){
+	if ( g_EntityBrowser.m_usedFilterButton != nullptr ) {
+		g_EntityBrowser.m_usedFilterButton->setText( StringStream<64>( "Used (", usedCount, ')' ).c_str() );
+	}
+}
 
 static bool EntityBrowser_isTriggerClass( const EntityClass* eclass ){
 	return eclass != nullptr
@@ -991,6 +1084,17 @@ static bool EntityBrowser_needsBrushPreview( const EntityClass* eclass ){
 	    && !eclass->fixedsize
 	    && !eclass->miscmodel_is
 	    && string_empty( eclass->modelpath() );
+}
+
+static bool EntityBrowser_needsMiscModelFallbackPreview( const EntityClass* eclass ){
+	if ( eclass == nullptr || !eclass->miscmodel_is ) {
+		return false;
+	}
+	if ( !string_empty( eclass->modelpath() ) ) {
+		return false;
+	}
+	const char* modelKey = eclass->miscmodel_key();
+	return string_empty( modelKey ) || string_empty( EntityClass_valueForKey( *eclass, modelKey ) );
 }
 
 static void EntityBrowser_addTriggerPreview( scene::Node& node ){
@@ -1023,6 +1127,9 @@ static NodeSmartReference EntityBrowser_createBrushPreviewNode(){
 static NodeSmartReference EntityBrowser_createPreviewNode( EntityClass* eclass ){
 	if ( EntityBrowser_needsFixedSizePreview( eclass ) ) {
 		return EntityBrowser_createFixedSizePreviewNode( eclass );
+	}
+	if ( EntityBrowser_needsMiscModelFallbackPreview( eclass ) ) {
+		return EntityBrowser_createBrushPreviewNode();
 	}
 	if ( EntityBrowser_isTriggerClass( eclass ) ) {
 		NodeSmartReference node( GlobalEntityCreator().createEntity( eclass ) );
@@ -1184,8 +1291,11 @@ private:
 	RenderStateFlags m_globalstate;
 };
 
+static void EntityBrowser_ensureVisiblePreviews();
+
 void EntityBrowser_render(){
 	g_EntityBrowser.validate();
+	EntityBrowser_ensureVisiblePreviews();
 	const bool hoverChanged = g_EntityBrowser.updateHoverAnimation();
 	if ( hoverChanged ) {
 		g_EntityBrowser.forEachEntityInstance( entities_set_transforms( EntityBrowser_baseScale() ) );
@@ -1388,15 +1498,20 @@ void EntityBrowser_render(){
 		}
 		{	// render entity class names
 			if ( OpenGLFont_canDrawSafe() ) {
+				const int fontHeight = AssetBrowser_fontPixelHeight();
+				const int fontDescent = AssetBrowser_fontPixelDescent();
 				CellPos cellPos = g_EntityBrowser.constructCellPos();
+				gl().glEnable( GL_BLEND );
+				gl().glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
 				for( const EntityClass* eclass : g_EntityBrowser.visibleClasses() ){
 					const Vector3 pos = cellPos.getTextPos();
 					if( m_view.TestPoint( pos ) ){
-						gl().glRasterPos3f( pos.x(), pos.y(), pos.z() );
-						OpenGLFont_drawStringSafe( eclass->name() );
+						AssetBrowser_drawTileLabelBackground( pos, static_cast<float>( cellPos.getCellSize() * 2 ), fontHeight, fontDescent );
+						AssetBrowser_drawTileLabelText( eclass->name(), pos );
 					}
 					++cellPos;
 				}
+				gl().glDisable( GL_BLEND );
 			}
 		}
 	}
@@ -1519,28 +1634,115 @@ protected:
 	}
 };
 
+static int EntityBrowser_visiblePreviewTargetCount(){
+	if ( g_EntityBrowser.m_listMode ) {
+		return 0;
+	}
+	const CellPos cellPos = g_EntityBrowser.constructCellPos();
+	const int cellsInRow = cellPos.cellsInRow();
+	const int rowHeight = cellPos.rowHeight();
+	if ( cellsInRow <= 0 || rowHeight <= 0 ) {
+		return 0;
+	}
+	const int topRow = std::max( 0, -g_EntityBrowser.m_originZ / rowHeight );
+	const int bottomRow = std::max( topRow, ( g_EntityBrowser.m_height - g_EntityBrowser.m_originZ ) / rowHeight );
+	const int bufferedBottom = bottomRow + 2;
+	return std::min( static_cast<int>( g_EntityBrowser.visibleClasses().size() ),
+	                 ( bufferedBottom + 1 ) * cellsInRow );
+}
+
+static void EntityBrowser_insertPreviewNodesUpTo( int targetCount ){
+	if ( g_entityGraph == nullptr || g_EntityBrowser.m_listMode ) {
+		return;
+	}
+	targetCount = std::max( 0, std::min( targetCount, static_cast<int>( g_EntityBrowser.visibleClasses().size() ) ) );
+	if ( targetCount <= g_EntityBrowser.m_loadedPreviewCount ) {
+		return;
+	}
+
+	if ( scene::Traversable* traversable = Node_getTraversable( g_entityGraph->root() ) ) {
+		const char* status = g_EntityBrowser.currentCategory() != nullptr ? g_EntityBrowser.currentCategory()->name.c_str() : "Entities";
+		ScopeDisableScreenUpdates disableScreenUpdates( status, "Loading Entity Previews" );
+		for ( int i = g_EntityBrowser.m_loadedPreviewCount; i < targetCount; ++i ) {
+			NodeSmartReference node( EntityBrowser_createPreviewNode( g_EntityBrowser.visibleClasses()[i] ) );
+			traversable->insert( node );
+		}
+		g_EntityBrowser.m_loadedPreviewCount = targetCount;
+		g_EntityBrowser.forEachEntityInstance( entities_set_transforms( EntityBrowser_baseScale() ) );
+	}
+}
+
+static void EntityBrowser_ensureVisiblePreviews(){
+	EntityBrowser_insertPreviewNodesUpTo( EntityBrowser_visiblePreviewTargetCount() );
+}
+
+static void EntityBrowser_rebuildListWidget(){
+	if ( g_EntityBrowser.m_listWidget == nullptr ) {
+		return;
+	}
+	g_EntityBrowser.m_listWidget->clear();
+	int index = 0;
+	for ( EntityClass* eclass : g_EntityBrowser.visibleClasses() ) {
+		auto* item = new QTreeWidgetItem( g_EntityBrowser.m_listWidget );
+		item->setText( 0, eclass->name() );
+		item->setData( 0, Qt::ItemDataRole::UserRole, index++ );
+	}
+}
+
 static void EntityBrowser_selectCategory( const QString& name ){
 	const EntityCategory* category = g_EntityBrowser.findCategory( name.toLatin1().constData() );
 	g_EntityBrowser.setCurrentCategory( category );
+	EntityBrowser_updateClearFiltersButton();
+
+	const EntityCategory* visibleCategory = category;
+	if ( g_EntityBrowser.m_filterGlobal ) {
+		if ( const EntityCategory* all = g_EntityBrowser.findCategory( "All" ); all != nullptr ) {
+			visibleCategory = all;
+		}
+	}
+
+	EntityClassnameSet usedClasses;
+	if ( g_EntityBrowser.m_filterUsed ) {
+		usedClasses = EntityBrowser_collectUsedClasses();
+		EntityBrowser_updateUsedFilterButtonLabel( usedClasses.size() );
+	}
 
 	EntityGraph_clear();
+	g_EntityBrowser.m_loadedPreviewCount = 0;
 	g_EntityBrowser.visibleClasses().clear();
-	if ( category != nullptr ) {
-		for ( EntityClass* eclass : category->classes ) {
-			if ( string_contains_nocase( eclass->name(), g_EntityBrowser.filter() ) ) {
-				g_EntityBrowser.visibleClasses().push_back( eclass );
+	g_EntityBrowser.m_currentEntityId = -1;
+	g_EntityBrowser.clearHover();
+	if ( visibleCategory != nullptr ) {
+		for ( EntityClass* eclass : visibleCategory->classes ) {
+			if ( !string_contains_nocase( eclass->name(), g_EntityBrowser.filter() ) ) {
+				continue;
 			}
-		}
-
-		if ( scene::Traversable* traversable = Node_getTraversable( g_entityGraph->root() ) ) {
-			for ( EntityClass* eclass : g_EntityBrowser.visibleClasses() ) {
-				NodeSmartReference node( EntityBrowser_createPreviewNode( eclass ) );
-				traversable->insert( node );
+			if ( g_EntityBrowser.m_filterUsed && !usedClasses.contains( eclass->name() ) ) {
+				continue;
 			}
+			g_EntityBrowser.visibleClasses().push_back( eclass );
 		}
-		g_EntityBrowser.forEachEntityInstance( entities_set_transforms( EntityBrowser_baseScale() ) );
 	}
+	EntityBrowser_rebuildListWidget();
+	EntityBrowser_ensureVisiblePreviews();
 	g_EntityBrowser.queueDraw();
+}
+
+static void EntityBrowser_setListMode( bool listMode ){
+	if ( g_EntityBrowser.m_listMode == listMode ) {
+		return;
+	}
+	g_EntityBrowser.m_listMode = listMode;
+	if ( g_EntityBrowser.m_viewStack != nullptr ) {
+		g_EntityBrowser.m_viewStack->setCurrentIndex( listMode ? 1 : 0 );
+	}
+	if ( g_EntityBrowser.m_listModeButton != nullptr
+	  && g_EntityBrowser.m_listModeButton->isChecked() != listMode ) {
+		g_EntityBrowser.m_listModeButton->setChecked( listMode );
+	}
+	if ( const EntityCategory* category = g_EntityBrowser.currentCategory() ) {
+		EntityBrowser_selectCategory( category->name.c_str() );
+	}
 }
 
 static void EntityBrowser_constructCategories(){
@@ -1612,12 +1814,12 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 	splitter->addWidget( containerWidgetLeft );
 	splitter->addWidget( containerWidgetRight );
 	auto *vbox = new QVBoxLayout( containerWidgetLeft );
-	auto *hbox = new QHBoxLayout( containerWidgetRight );
+	auto *vboxRight = new QVBoxLayout( containerWidgetRight );
 
-	hbox->setContentsMargins( 0, 0, 0, 0 );
 	vbox->setContentsMargins( 0, 0, 0, 0 );
-	hbox->setSpacing( 0 );
+	vboxRight->setContentsMargins( 0, 0, 0, 0 );
 	vbox->setSpacing( 0 );
+	vboxRight->setSpacing( 0 );
 
 	{	// menu bar
 		auto *toolbar = new QToolBar;
@@ -1625,7 +1827,51 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 		const int iconSize = toolbar->style()->pixelMetric( QStyle::PixelMetric::PM_SmallIconSize );
 		toolbar->setIconSize( QSize( iconSize, iconSize ) );
 
-		toolbar_append_button( toolbar, "Reload Entity Classes", "refresh_modelstree.png", FreeCaller<void(), EntityBrowser_constructTree>() );
+		auto* menu_view = new QMenu( toolbar );
+		menu_view->addAction( "Reset Preview Scroll", [](){
+			g_EntityBrowser.setOriginZ( 0 );
+			g_EntityBrowser.queueDraw();
+		} );
+		menu_view->addAction( "Expand Categories", [](){
+			if ( g_EntityBrowser.m_treeView != nullptr ) {
+				g_EntityBrowser.m_treeView->expandAll();
+			}
+		} );
+		menu_view->addAction( "Collapse Categories", [](){
+			if ( g_EntityBrowser.m_treeView != nullptr ) {
+				g_EntityBrowser.m_treeView->collapseAll();
+			}
+		} );
+		auto* listModeAction = menu_view->addAction( "List View" );
+		listModeAction->setCheckable( true );
+		listModeAction->setChecked( g_EntityBrowser.m_listMode );
+		QObject::connect( listModeAction, &QAction::toggled, []( bool checked ){
+			EntityBrowser_setListMode( checked );
+		} );
+		menu_view->setParent( toolbar, menu_view->windowFlags() );
+
+		toolbar_append_button( toolbar, "View", "texbro_view.png", PointerCaller<QMenu, void(), +[]( QMenu* menu ){
+			menu->popup( QCursor::pos() );
+		}>( menu_view ) );
+		auto* listModeButton = g_EntityBrowser.m_listModeButton = new QToolButton;
+		listModeButton->setAutoRaise( true );
+		listModeButton->setCheckable( true );
+		listModeButton->setToolButtonStyle( Qt::ToolButtonStyle::ToolButtonTextOnly );
+		listModeButton->setText( "List" );
+		listModeButton->setToolTip( "Toggle list/icon view" );
+		listModeButton->setChecked( g_EntityBrowser.m_listMode );
+		QObject::connect( listModeButton, &QToolButton::toggled, [listModeAction]( bool checked ){
+			if ( listModeAction->isChecked() != checked ) {
+				listModeAction->setChecked( checked );
+			}
+			EntityBrowser_setListMode( checked );
+		} );
+		toolbar->addWidget( listModeButton );
+		toolbar_append_button( toolbar, "Find / Replace...", "texbro_find-replace.png", "FindReplaceEntities" );
+		toolbar_append_button( toolbar, "Flush / Reload Entity List", "refresh_models.png", makeCallbackF( +[](){
+			EntityBrowser_flushReferences();
+			EntityBrowser_constructTree();
+		} ) );
 	}
 	{	// filter bar
 		auto *filterBar = new QWidget;
@@ -1637,18 +1883,50 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 		filterLayout->addWidget( entry, 1 );
 		entry->setClearButtonEnabled( true );
 		entry->setFocusPolicy( Qt::FocusPolicy::ClickFocus );
-		entry->setPlaceholderText( "Filter entities" );
+		entry->setPlaceholderText( "Filter by name" );
 
-		auto *clearButton = new QToolButton;
+		auto* globalButton = g_EntityBrowser.m_globalFilterButton = new QToolButton;
+		globalButton->setAutoRaise( true );
+		globalButton->setFocusPolicy( Qt::NoFocus );
+		globalButton->setCheckable( true );
+		globalButton->setIcon( new_local_icon( "f-world.png" ) );
+		globalButton->setToolTip( "Global switch: filter across all categories" );
+		filterLayout->addWidget( globalButton );
+
+		auto* usedButton = g_EntityBrowser.m_usedFilterButton = new QToolButton;
+		usedButton->setAutoRaise( true );
+		usedButton->setFocusPolicy( Qt::NoFocus );
+		usedButton->setCheckable( true );
+		usedButton->setToolButtonStyle( Qt::ToolButtonStyle::ToolButtonTextOnly );
+		usedButton->setText( "Used (0)" );
+		usedButton->setToolTip( "Show only entity classes used in the current level" );
+		filterLayout->addWidget( usedButton );
+
+		auto *clearButton = g_EntityBrowser.m_clearFiltersButton = new QToolButton;
 		clearButton->setAutoRaise( true );
 		clearButton->setFocusPolicy( Qt::NoFocus );
 		clearButton->setIcon( new_local_icon( "f-reset.png" ) );
-		clearButton->setToolTip( "Clear filter" );
+		clearButton->setToolTip( "Clear filters" );
 		filterLayout->addWidget( clearButton );
+
+		entry->setText( g_EntityBrowser.filter() );
+		globalButton->setChecked( g_EntityBrowser.m_filterGlobal );
+		usedButton->setChecked( g_EntityBrowser.m_filterUsed );
 
 		QObject::connect( clearButton, &QToolButton::clicked, [](){
 			if ( g_EntityBrowser.m_filterEntry != nullptr ) {
 				g_EntityBrowser.m_filterEntry->clear();
+			}
+			g_EntityBrowser.m_filterGlobal = false;
+			g_EntityBrowser.m_filterUsed = false;
+			if ( g_EntityBrowser.m_globalFilterButton != nullptr ) {
+				g_EntityBrowser.m_globalFilterButton->setChecked( false );
+			}
+			if ( g_EntityBrowser.m_usedFilterButton != nullptr ) {
+				g_EntityBrowser.m_usedFilterButton->setChecked( false );
+			}
+			if ( const EntityCategory* category = g_EntityBrowser.currentCategory() ) {
+				EntityBrowser_selectCategory( category->name.c_str() );
 			}
 		} );
 		QObject::connect( entry, &QLineEdit::textChanged, []( const QString& text ){
@@ -1657,6 +1935,23 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 				EntityBrowser_selectCategory( category->name.c_str() );
 			}
 		} );
+		QObject::connect( globalButton, &QToolButton::toggled, []( bool checked ){
+			g_EntityBrowser.m_filterGlobal = checked;
+			if ( const EntityCategory* category = g_EntityBrowser.currentCategory() ) {
+				EntityBrowser_selectCategory( category->name.c_str() );
+			}
+		} );
+		QObject::connect( usedButton, &QToolButton::toggled, []( bool checked ){
+			g_EntityBrowser.m_filterUsed = checked;
+			if ( const EntityCategory* category = g_EntityBrowser.currentCategory() ) {
+				EntityBrowser_selectCategory( category->name.c_str() );
+			}
+		} );
+
+		EntityBrowser_updateClearFiltersButton();
+		if ( g_EntityBrowser.m_filterUsed ) {
+			EntityBrowser_updateUsedFilterButtonLabel( EntityBrowser_collectUsedClasses().size() );
+		}
 
 		vbox->addWidget( filterBar );
 	}
@@ -1678,28 +1973,54 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 
 		vbox->addWidget( g_EntityBrowser.m_treeView );
 	}
-	{	// gl_widget
+	{
+		auto* viewStack = g_EntityBrowser.m_viewStack = new QStackedWidget;
+		vboxRight->addWidget( viewStack, 1 );
+
+		auto* previewPage = new QWidget;
+		auto* previewLayout = new QHBoxLayout( previewPage );
+		previewLayout->setContentsMargins( 0, 0, 0, 0 );
+		previewLayout->setSpacing( 0 );
+
 		if ( disableOpenGL ) {
 			g_EntityBrowser.m_gl_widget = nullptr;
-			hbox->addWidget( glwidget_createDisabledPlaceholder( "OpenGL disabled (Entities)", nullptr ) );
+			previewLayout->addWidget( glwidget_createDisabledPlaceholder( "OpenGL disabled (Entities)", nullptr ) );
+			g_EntityBrowser.m_gl_scroll = nullptr;
 		}
 		else {
 			g_EntityBrowser.m_gl_widget = new EntityBrowserGLWidget( g_EntityBrowser );
-			hbox->addWidget( g_EntityBrowser.m_gl_widget );
-		}
-	}
-	{	// gl_widget scrollbar
-		if ( !disableOpenGL ) {
-			auto *scroll = g_EntityBrowser.m_gl_scroll = new QScrollBar;
-			hbox->addWidget( scroll );
+			previewLayout->addWidget( g_EntityBrowser.m_gl_widget );
 
+			auto *scroll = g_EntityBrowser.m_gl_scroll = new QScrollBar;
+			previewLayout->addWidget( scroll );
 			QObject::connect( scroll, &QAbstractSlider::valueChanged, []( int value ){
 				g_EntityBrowser.m_scrollAdjustment.value_changed( value );
 			} );
 		}
-		else {
-			g_EntityBrowser.m_gl_scroll = nullptr;
-		}
+		viewStack->addWidget( previewPage );
+
+		auto* listPage = new QWidget;
+		auto* listLayout = new QVBoxLayout( listPage );
+		listLayout->setContentsMargins( 0, 0, 0, 0 );
+		listLayout->setSpacing( 0 );
+		auto* listWidget = g_EntityBrowser.m_listWidget = new QTreeWidget;
+		listWidget->setColumnCount( 1 );
+		listWidget->setHeaderHidden( true );
+		listWidget->setRootIsDecorated( false );
+		listWidget->setUniformRowHeights( true );
+		listWidget->setEditTriggers( QAbstractItemView::EditTrigger::NoEditTriggers );
+		listWidget->setSelectionMode( QAbstractItemView::SelectionMode::SingleSelection );
+		listWidget->setFocusPolicy( Qt::FocusPolicy::ClickFocus );
+		QObject::connect( listWidget, &QTreeWidget::itemPressed, []( QTreeWidgetItem* item, int column ){
+			(void)column;
+			if ( item != nullptr ) {
+				g_EntityBrowser.m_currentEntityId = item->data( 0, Qt::ItemDataRole::UserRole ).toInt();
+			}
+		} );
+		listLayout->addWidget( listWidget, 1 );
+		viewStack->addWidget( listPage );
+		EntityBrowser_rebuildListWidget();
+		viewStack->setCurrentIndex( g_EntityBrowser.m_listMode ? 1 : 0 );
 	}
 
 	g_guiSettings.addSplitter( splitter, "EntityBrowser/splitter", { 100, 500 } );
@@ -1708,7 +2029,11 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 }
 
 void EntityBrowser_destroyWindow(){
+	g_EntityBrowser.m_viewStack = nullptr;
 	g_EntityBrowser.m_gl_widget = nullptr;
+	g_EntityBrowser.m_gl_scroll = nullptr;
+	g_EntityBrowser.m_listWidget = nullptr;
+	g_EntityBrowser.m_listModeButton = nullptr;
 }
 
 void EntityBrowser_flushReferences(){
@@ -1717,10 +2042,26 @@ void EntityBrowser_flushReferences(){
 	}
 
 	EntityGraph_clear();
+	g_EntityBrowser.m_loadedPreviewCount = 0;
 	g_EntityBrowser.queueDraw();
 }
 
+#include "preferencesystem.h"
+#include "stringio.h"
+
 void EntityBrowser_Construct(){
+	GlobalPreferenceSystem().registerPreference( "EntityBrowserFilter",
+	                                             CopiedStringImportStringCaller( g_EntityBrowser.filterStorage() ),
+	                                             CopiedStringExportStringCaller( g_EntityBrowser.filterStorage() ) );
+	GlobalPreferenceSystem().registerPreference( "EntityBrowserFilterGlobal",
+	                                             BoolImportStringCaller( g_EntityBrowser.m_filterGlobal ),
+	                                             BoolExportStringCaller( g_EntityBrowser.m_filterGlobal ) );
+	GlobalPreferenceSystem().registerPreference( "EntityBrowserFilterUsed",
+	                                             BoolImportStringCaller( g_EntityBrowser.m_filterUsed ),
+	                                             BoolExportStringCaller( g_EntityBrowser.m_filterUsed ) );
+	GlobalPreferenceSystem().registerPreference( "EntityBrowserListMode",
+	                                             BoolImportStringCaller( g_EntityBrowser.m_listMode ),
+	                                             BoolExportStringCaller( g_EntityBrowser.m_listMode ) );
 	g_entityGraph = new EntityGraph( g_EntityBrowser );
 	g_entityGraph->insert_root( ( new EntityGraphRoot )->node() );
 }

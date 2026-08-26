@@ -10,12 +10,14 @@
 #include <QAction>
 #include <QApplication>
 #include <QBuffer>
+#include <QCursor>
 #include <QDrag>
 #include <QEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMediaPlayer>
 #include <QMimeData>
 #include <QOpenGLWidget>
@@ -32,16 +34,20 @@
 #include "assetdrop.h"
 #include "iarchive.h"
 #include "idatastream.h"
+#include "ientity.h"
 #include "ifiletypes.h"
 #include "ifilesystem.h"
 #include "igl.h"
+#include "iscenegraph.h"
 #include "mainframe.h"
 #include "math/vector.h"
 #include "os/file.h"
+#include "os/path.h"
 #include "string/string.h"
 #include "stream/stringstream.h"
 #include "view.h"
 #include "generic/callback.h"
+#include "gtkmisc.h"
 
 #include "gtkutil/cursor.h"
 #include "gtkutil/fbo.h"
@@ -103,6 +109,34 @@ QImage applyOpacity( QImage image, float opacity ){
 		}
 	}
 	return image;
+}
+
+void AssetBrowser_drawTileLabelBackground( const Vector3& pos, float width, int fontHeight, int fontDescent ){
+	const float left = pos.x() - 2.0f;
+	const float right = pos.x() + width + 2.0f;
+	const float top = pos.z() + 2.0f - fontDescent;
+	const float bottom = top - fontHeight - 4.0f;
+	gl().glColor4f( 0.0f, 0.0f, 0.0f, 0.85f );
+	gl().glBegin( GL_QUADS );
+	gl().glVertex3f( left, 0, top );
+	gl().glVertex3f( left, 0, bottom );
+	gl().glVertex3f( right, 0, bottom );
+	gl().glVertex3f( right, 0, top );
+	gl().glEnd();
+}
+
+void AssetBrowser_drawTileLabelText( const char* text, const Vector3& pos ){
+	gl().glColor4f( 0, 0, 0, 1 );
+	gl().glRasterPos3f( pos.x() - 1, pos.y(), pos.z() - 1 );
+	OpenGLFont_drawStringSafe( text );
+	gl().glRasterPos3f( pos.x() + 1, pos.y(), pos.z() + 1 );
+	OpenGLFont_drawStringSafe( text );
+
+	gl().glColor4f( 1, 1, 1, 1 );
+	gl().glRasterPos3f( pos.x(), pos.y(), pos.z() );
+	OpenGLFont_drawStringSafe( text );
+	gl().glRasterPos3f( pos.x() + 1, pos.y(), pos.z() );
+	OpenGLFont_drawStringSafe( text );
 }
 
 bool SoundBrowser_readSoundData( const char* soundPath, QByteArray& data ){
@@ -225,12 +259,17 @@ public:
 	QScrollBar* m_gl_scroll = nullptr;
 	QTreeView* m_treeView = nullptr;
 	QLineEdit* m_filterEntry = nullptr;
+	QToolButton* m_globalFilterButton = nullptr;
+	QToolButton* m_usedFilterButton = nullptr;
+	QToolButton* m_clearFiltersButton = nullptr;
 
 	SoundFS m_soundFS;
 	CopiedString m_currentFolderPath;
 	const SoundFS* m_currentFolder = nullptr;
 	std::vector<CopiedString> m_visibleFiles;
 	CopiedString m_filter;
+	bool m_filterGlobal = false;
+	bool m_filterUsed = false;
 	std::map<CopiedString, QByteArray, StringLessNoCase> m_soundCache;
 
 	int m_width = 0;
@@ -314,7 +353,7 @@ public:
 		if ( index < 0 || index >= static_cast<int>( m_visibleFiles.size() ) ) {
 			return CopiedString( "" );
 		}
-		return CopiedString( StringStream<256>( kSoundBrowserRoot, m_currentFolderPath, m_visibleFiles[index].c_str() ) );
+		return CopiedString( StringStream<256>( kSoundBrowserRoot, m_visibleFiles[index].c_str() ) );
 	}
 	bool cacheSound( const char* soundPath ){
 		if ( string_empty( soundPath ) ) {
@@ -517,23 +556,153 @@ public:
 
 SoundBrowser g_SoundBrowser;
 
+using SoundPathSet = std::set<CopiedString, StringLessNoCase>;
+
+class SoundBrowserFileTypeCollector : public IFileTypeList
+{
+public:
+	SoundPathSet m_extensions;
+	void addType( const char* moduleName, filetype_t type ) override {
+		m_extensions.emplace( moduleName );
+	}
+};
+
+bool SoundBrowser_normalizeUsedSoundPath( const char* value, const SoundPathSet& soundExtensions, CopiedString& outRelativePath ){
+	if ( string_empty( value ) ) {
+		return false;
+	}
+	const auto cleaned = StringStream<256>( PathCleaned( value ) );
+	const char* relative = nullptr;
+	if ( string_equal_prefix_nocase( cleaned.c_str(), "sound/world/" ) ) {
+		relative = cleaned.c_str() + string_length( "sound/world/" );
+	}
+	else if ( string_equal_prefix_nocase( cleaned.c_str(), "world/" ) ) {
+		relative = cleaned.c_str() + string_length( "world/" );
+	}
+	if ( relative == nullptr || string_empty( relative ) ) {
+		return false;
+	}
+	if ( !soundExtensions.contains( path_get_extension( relative ) ) ) {
+		return false;
+	}
+	outRelativePath = relative;
+	return true;
+}
+
+class SoundBrowserEntitySoundCollector : public Entity::Visitor
+{
+	const SoundPathSet& m_soundExtensions;
+	SoundPathSet& m_usedSounds;
+public:
+	SoundBrowserEntitySoundCollector( const SoundPathSet& soundExtensions, SoundPathSet& usedSounds )
+		: m_soundExtensions( soundExtensions ), m_usedSounds( usedSounds ){
+	}
+	void visit( const char* key, const char* value ) override {
+		(void)key;
+		CopiedString relativePath;
+		if ( SoundBrowser_normalizeUsedSoundPath( value, m_soundExtensions, relativePath ) ) {
+			m_usedSounds.emplace( relativePath );
+		}
+	}
+};
+
+class SoundBrowserUsedSoundWalker : public scene::Graph::Walker
+{
+	const SoundPathSet& m_soundExtensions;
+	SoundPathSet& m_usedSounds;
+public:
+	SoundBrowserUsedSoundWalker( const SoundPathSet& soundExtensions, SoundPathSet& usedSounds )
+		: m_soundExtensions( soundExtensions ), m_usedSounds( usedSounds ){
+	}
+	bool pre( const scene::Path& path, scene::Instance& instance ) const override {
+		(void)instance;
+		if ( Entity* entity = Node_getEntity( path.top() ) ) {
+			SoundBrowserEntitySoundCollector collector( m_soundExtensions, m_usedSounds );
+			entity->forEachKeyValue( collector );
+		}
+		return true;
+	}
+};
+
+SoundPathSet SoundBrowser_collectUsedSounds(){
+	SoundBrowserFileTypeCollector typelist;
+	GlobalFiletypes().getTypeList( "sound", &typelist, true, false, false );
+
+	SoundPathSet usedSounds;
+	GlobalSceneGraph().traverse( SoundBrowserUsedSoundWalker( typelist.m_extensions, usedSounds ) );
+	return usedSounds;
+}
+
+void SoundBrowser_collectAllFolderFiles( const SoundFS& folder, const char* prefix, std::vector<CopiedString>& files ){
+	for ( const CopiedString& file : folder.m_files ) {
+		files.emplace_back( StringStream<256>( prefix, file.c_str() ) );
+	}
+	for ( const SoundFS& subfolder : folder.m_folders ) {
+		const auto nextPrefix = StringStream<256>( prefix, subfolder.m_folderName.c_str(), '/' );
+		SoundBrowser_collectAllFolderFiles( subfolder, nextPrefix.c_str(), files );
+	}
+}
+
+void SoundBrowser_updateClearFiltersButton(){
+	if ( g_SoundBrowser.m_clearFiltersButton == nullptr ) {
+		return;
+	}
+	const bool active = !string_empty( g_SoundBrowser.filter() )
+	                 || g_SoundBrowser.m_filterGlobal
+	                 || g_SoundBrowser.m_filterUsed;
+	g_SoundBrowser.m_clearFiltersButton->setEnabled( active );
+}
+
+void SoundBrowser_updateUsedFilterButtonLabel( std::size_t usedCount ){
+	if ( g_SoundBrowser.m_usedFilterButton != nullptr ) {
+		g_SoundBrowser.m_usedFilterButton->setText( StringStream<64>( "Used (", usedCount, ')' ).c_str() );
+	}
+}
+
 static void SoundBrowser_updateVisibleFiles(){
 	g_SoundBrowser.m_visibleFiles.clear();
 	g_SoundBrowser.m_currentSoundId = -1;
 	g_SoundBrowser.stopPlayback();
 	g_SoundBrowser.clearHover();
-	if ( g_SoundBrowser.m_currentFolder == nullptr ) {
+
+	std::vector<CopiedString> candidates;
+	if ( g_SoundBrowser.m_filterGlobal ) {
+		SoundBrowser_collectAllFolderFiles( g_SoundBrowser.m_soundFS, "", candidates );
+	}
+	else if ( g_SoundBrowser.m_currentFolder != nullptr ) {
+		for ( const CopiedString& file : g_SoundBrowser.m_currentFolder->m_files ) {
+			candidates.emplace_back( StringStream<256>( g_SoundBrowser.m_currentFolderPath.c_str(), file.c_str() ) );
+		}
+	}
+
+	SoundPathSet usedSounds;
+	if ( g_SoundBrowser.m_filterUsed ) {
+		usedSounds = SoundBrowser_collectUsedSounds();
+		SoundBrowser_updateUsedFilterButtonLabel( usedSounds.size() );
+	}
+	const char* filter = g_SoundBrowser.filter();
+
+	for ( const CopiedString& path : candidates ) {
+		const char* pathText = path.c_str();
+		const char* leaf = path_get_filename_start( pathText );
+		if ( !string_contains_nocase( pathText, filter ) && !string_contains_nocase( leaf, filter ) ) {
+			continue;
+		}
+		if ( g_SoundBrowser.m_filterUsed && !usedSounds.contains( pathText ) ) {
+			continue;
+		}
+		g_SoundBrowser.m_visibleFiles.push_back( path );
+	}
+
+	if ( g_SoundBrowser.m_currentFolder == nullptr && !g_SoundBrowser.m_filterGlobal ) {
+		SoundBrowser_updateClearFiltersButton();
 		g_SoundBrowser.queueDraw();
 		return;
 	}
 
-	for ( const CopiedString& file : g_SoundBrowser.m_currentFolder->m_files ) {
-		if ( string_contains_nocase( file.c_str(), g_SoundBrowser.filter() ) ) {
-			g_SoundBrowser.m_visibleFiles.push_back( file );
-		}
-	}
 	g_SoundBrowser.m_originZ = 0;
 	g_SoundBrowser.m_originInvalid = true;
+	SoundBrowser_updateClearFiltersButton();
 	g_SoundBrowser.queueDraw();
 }
 
@@ -679,7 +848,7 @@ void SoundBrowser_render(){
 	gl().glMatrixMode( GL_MODELVIEW );
 	gl().glLoadMatrixf( reinterpret_cast<const float*>( &m_modelview ) );
 
-	if( g_SoundBrowser.m_currentFolder != nullptr ){
+	if( g_SoundBrowser.m_currentFolder != nullptr || g_SoundBrowser.m_filterGlobal ){
 		gl().glDisable( GL_BLEND );
 		gl().glClientActiveTexture( GL_TEXTURE0 );
 		gl().glActiveTexture( GL_TEXTURE0 );
@@ -754,16 +923,22 @@ void SoundBrowser_render(){
 
 		{	// render sound file names
 			if ( OpenGLFont_canDrawSafe() ) {
-				gl().glColor4f( 1, 1, 1, 1 );
+				const int fontHeight = AssetBrowser_fontPixelHeight();
+				const int fontDescent = AssetBrowser_fontPixelDescent();
 				CellPos cellPos = g_SoundBrowser.constructCellPos();
+				gl().glEnable( GL_BLEND );
+				gl().glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
 				for( const CopiedString& file : g_SoundBrowser.m_visibleFiles ){
 					const Vector3 pos = cellPos.getTextPos();
 					if( m_view.TestPoint( pos ) ){
-						gl().glRasterPos3f( pos.x(), pos.y(), pos.z() );
-						OpenGLFont_drawStringSafe( file.c_str() );
+						AssetBrowser_drawTileLabelBackground( pos, static_cast<float>( cellPos.getCellSize() * 2 ), fontHeight, fontDescent );
+						AssetBrowser_drawTileLabelText( g_SoundBrowser.m_filterGlobal
+							? file.c_str()
+							: path_get_filename_start( file.c_str() ), pos );
 					}
 					++cellPos;
 				}
+				gl().glDisable( GL_BLEND );
 			}
 		}
 	}
@@ -942,7 +1117,13 @@ static void SoundBrowser_cacheSoundFile( const char* name ){
 	g_SoundBrowser.cacheSound( name );
 }
 
+static bool g_soundBrowserTreeConstructed = false;
+
 static void SoundBrowser_constructTree(){
+	if ( g_SoundBrowser.m_treeView == nullptr ) {
+		return;
+	}
+
 	g_SoundBrowser.m_soundFS.m_folders.clear();
 	g_SoundBrowser.m_soundFS.m_files.clear();
 
@@ -986,6 +1167,8 @@ static void SoundBrowser_constructTree(){
 		g_SoundBrowser.m_treeView->setCurrentIndex( first );
 		SoundBrowser_selectFolder( first );
 	}
+
+	g_soundBrowserTreeConstructed = true;
 }
 
 void SoundBrowser_PrecacheWorldSounds(){
@@ -1013,6 +1196,12 @@ void SoundBrowser_ReloadSounds(){
 	SoundBrowser_PrecacheWorldSounds();
 }
 
+void SoundBrowser_EnsureTree(){
+	if ( !g_soundBrowserTreeConstructed ) {
+		SoundBrowser_constructTree();
+	}
+}
+
 class TexBro_QTreeView : public QTreeView
 {
 protected:
@@ -1027,6 +1216,7 @@ protected:
 
 QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 	g_SoundBrowser.m_parent = toplevel;
+	g_soundBrowserTreeConstructed = false;
 
 	const bool disableOpenGL = OpenGLWidgetsDisabled();
 
@@ -1049,8 +1239,28 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 		const int iconSize = toolbar->style()->pixelMetric( QStyle::PixelMetric::PM_SmallIconSize );
 		toolbar->setIconSize( QSize( iconSize, iconSize ) );
 
-		toolbar_append_button( toolbar, "Reload Sound Tree", "refresh_modelstree.png", FreeCaller<void(), SoundBrowser_constructTree>() );
-		toolbar_append_button( toolbar, "Reload Sounds", "refresh_models.png", FreeCaller<void(), SoundBrowser_ReloadSounds>() );
+		auto* menu_view = new QMenu( toolbar );
+		menu_view->addAction( "Reset Preview Scroll", [](){
+			g_SoundBrowser.setOriginZ( 0 );
+			g_SoundBrowser.queueDraw();
+		} );
+		menu_view->addAction( "Expand Folders", [](){
+			if ( g_SoundBrowser.m_treeView != nullptr ) {
+				g_SoundBrowser.m_treeView->expandAll();
+			}
+		} );
+		menu_view->addAction( "Collapse Folders", [](){
+			if ( g_SoundBrowser.m_treeView != nullptr ) {
+				g_SoundBrowser.m_treeView->collapseAll();
+			}
+		} );
+		menu_view->setParent( toolbar, menu_view->windowFlags() );
+
+		toolbar_append_button( toolbar, "View", "texbro_view.png", PointerCaller<QMenu, void(), +[]( QMenu* menu ){
+			menu->popup( QCursor::pos() );
+		}>( menu_view ) );
+		toolbar_append_button( toolbar, "Find / Replace...", "texbro_find-replace.png", "FindReplaceSounds" );
+		toolbar_append_button( toolbar, "Flush / Reload Sounds", "refresh_models.png", FreeCaller<void(), SoundBrowser_ReloadSounds>() );
 	}
 	{	// filter bar
 		auto *filterBar = new QWidget;
@@ -1062,24 +1272,67 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 		filterLayout->addWidget( entry, 1 );
 		entry->setClearButtonEnabled( true );
 		entry->setFocusPolicy( Qt::FocusPolicy::ClickFocus );
-		entry->setPlaceholderText( "Filter sounds" );
+		entry->setPlaceholderText( "Filter by name" );
 
-		auto *clearButton = new QToolButton;
+		auto* globalButton = g_SoundBrowser.m_globalFilterButton = new QToolButton;
+		globalButton->setAutoRaise( true );
+		globalButton->setFocusPolicy( Qt::NoFocus );
+		globalButton->setCheckable( true );
+		globalButton->setIcon( new_local_icon( "f-world.png" ) );
+		globalButton->setToolTip( "Global switch: filter across all folders" );
+		filterLayout->addWidget( globalButton );
+
+		auto* usedButton = g_SoundBrowser.m_usedFilterButton = new QToolButton;
+		usedButton->setAutoRaise( true );
+		usedButton->setFocusPolicy( Qt::NoFocus );
+		usedButton->setCheckable( true );
+		usedButton->setToolButtonStyle( Qt::ToolButtonStyle::ToolButtonTextOnly );
+		usedButton->setText( "Used (0)" );
+		usedButton->setToolTip( "Show only sounds used in the current level" );
+		filterLayout->addWidget( usedButton );
+
+		auto *clearButton = g_SoundBrowser.m_clearFiltersButton = new QToolButton;
 		clearButton->setAutoRaise( true );
 		clearButton->setFocusPolicy( Qt::NoFocus );
 		clearButton->setIcon( new_local_icon( "f-reset.png" ) );
-		clearButton->setToolTip( "Clear filter" );
+		clearButton->setToolTip( "Clear filters" );
 		filterLayout->addWidget( clearButton );
+
+		entry->setText( g_SoundBrowser.filter() );
+		globalButton->setChecked( g_SoundBrowser.m_filterGlobal );
+		usedButton->setChecked( g_SoundBrowser.m_filterUsed );
 
 		QObject::connect( clearButton, &QToolButton::clicked, [](){
 			if ( g_SoundBrowser.m_filterEntry != nullptr ) {
 				g_SoundBrowser.m_filterEntry->clear();
 			}
+			g_SoundBrowser.m_filterGlobal = false;
+			g_SoundBrowser.m_filterUsed = false;
+			if ( g_SoundBrowser.m_globalFilterButton != nullptr ) {
+				g_SoundBrowser.m_globalFilterButton->setChecked( false );
+			}
+			if ( g_SoundBrowser.m_usedFilterButton != nullptr ) {
+				g_SoundBrowser.m_usedFilterButton->setChecked( false );
+			}
+			SoundBrowser_updateVisibleFiles();
 		} );
 		QObject::connect( entry, &QLineEdit::textChanged, []( const QString& text ){
 			g_SoundBrowser.setFilter( text.toLatin1().constData() );
 			SoundBrowser_updateVisibleFiles();
 		} );
+		QObject::connect( globalButton, &QToolButton::toggled, []( bool checked ){
+			g_SoundBrowser.m_filterGlobal = checked;
+			SoundBrowser_updateVisibleFiles();
+		} );
+		QObject::connect( usedButton, &QToolButton::toggled, []( bool checked ){
+			g_SoundBrowser.m_filterUsed = checked;
+			SoundBrowser_updateVisibleFiles();
+		} );
+
+		SoundBrowser_updateClearFiltersButton();
+		if ( g_SoundBrowser.m_filterUsed ) {
+			SoundBrowser_updateUsedFilterButtonLabel( SoundBrowser_collectUsedSounds().size() );
+		}
 
 		vbox->addWidget( filterBar );
 	}
@@ -1096,8 +1349,6 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 		QObject::connect( g_SoundBrowser.m_treeView, &QAbstractItemView::clicked, []( const QModelIndex& index ){
 			SoundBrowser_selectFolder( index );
 		} );
-
-		SoundBrowser_constructTree();
 
 		vbox->addWidget( g_SoundBrowser.m_treeView );
 	}
@@ -1133,9 +1384,22 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 void SoundBrowser_destroyWindow(){
 	g_SoundBrowser.stopPlayback();
 	g_SoundBrowser.m_gl_widget = nullptr;
+	g_soundBrowserTreeConstructed = false;
 }
 
+#include "preferencesystem.h"
+#include "stringio.h"
+
 void SoundBrowser_Construct(){
+	GlobalPreferenceSystem().registerPreference( "SoundBrowserFilter",
+	                                             CopiedStringImportStringCaller( g_SoundBrowser.m_filter ),
+	                                             CopiedStringExportStringCaller( g_SoundBrowser.m_filter ) );
+	GlobalPreferenceSystem().registerPreference( "SoundBrowserFilterGlobal",
+	                                             BoolImportStringCaller( g_SoundBrowser.m_filterGlobal ),
+	                                             BoolExportStringCaller( g_SoundBrowser.m_filterGlobal ) );
+	GlobalPreferenceSystem().registerPreference( "SoundBrowserFilterUsed",
+	                                             BoolImportStringCaller( g_SoundBrowser.m_filterUsed ),
+	                                             BoolExportStringCaller( g_SoundBrowser.m_filterUsed ) );
 }
 
 void SoundBrowser_Destroy(){

@@ -1352,7 +1352,9 @@ int main( int argc, char* argv[] ){
 		&& !cliOptions.noWelcome
 		&& StartupWelcome_ShowOnStartup();
 
-	startupGuard.hideSplash();
+	if ( !cliOptions.debugFastForward() ) {
+		set_splash_status( "Preparing main window..." );
+	}
 	startup_log_phase( "construct main frame begin" );
 	g_pParentWnd = new MainFrame();
 	startup_log_phase( "construct main frame end" );
@@ -1374,6 +1376,9 @@ int main( int argc, char* argv[] ){
 		if ( startupGuard.loadingDialog() != nullptr ) {
 			startupGuard.loadingDialog()->setProgress( 35, "Preparing main window..." );
 		}
+		if ( !cliOptions.debugFastForward() ) {
+			startupGuard.hideSplash();
+		}
 	}
 
 	if ( useLoadingScreen ) {
@@ -1381,6 +1386,9 @@ int main( int argc, char* argv[] ){
 		if ( startupGuard.loadingDialog() != nullptr ) {
 			startupGuard.loadingDialog()->setProgress( 55, "Loading map..." );
 		}
+	}
+	else if ( !cliOptions.debugFastForward() ) {
+		set_splash_status( "Loading map..." );
 	}
 	if ( !cliOptions.debugMainWindowOnly ) {
 		startup_log_phase( "initial map load begin" );
@@ -1398,6 +1406,9 @@ int main( int argc, char* argv[] ){
 		if ( startupGuard.loadingDialog() != nullptr ) {
 			startupGuard.loadingDialog()->setProgress( 85, "Applying startup theme..." );
 		}
+	}
+	else if ( !cliOptions.debugFastForward() ) {
+		set_splash_status( "Applying startup theme..." );
 	}
 	if ( !cliOptions.debugMainWindowOnly ) {
 		startup_log_phase( "theme apply begin" );
@@ -1417,6 +1428,11 @@ int main( int argc, char* argv[] ){
 		}
 		startup_log_phase( "hide loading dialog" );
 		startupGuard.hideLoading();
+	}
+
+	if ( !useLoadingScreen && !cliOptions.debugFastForward() ) {
+		set_splash_status( "Opening editor..." );
+		startupGuard.hideSplash();
 	}
 
 	startupGuard.removeLocalPid();

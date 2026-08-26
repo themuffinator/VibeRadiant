@@ -124,13 +124,13 @@ void file_dialog_save_recent_folders( const QStringList& folders ){
 
 QStringList file_dialog_sanitize_recent_folders( const QStringList& folders ){
 	QStringList cleaned;
-	cleaned.reserve( folders.size() );
+	cleaned.reserve( std::min<qsizetype>( folders.size(), kRecentFolderLimit ) );
 	for ( const QString& folder : folders ) {
 		const QString trimmed = QDir::cleanPath( folder );
 		if ( trimmed.isEmpty() ) {
 			continue;
 		}
-		if ( !QDir( trimmed ).exists() ) {
+		if ( !QDir::isAbsolutePath( trimmed ) ) {
 			continue;
 		}
 		const auto match = [&trimmed]( const QString& other ){
@@ -138,6 +138,9 @@ QStringList file_dialog_sanitize_recent_folders( const QStringList& folders ){
 		};
 		if ( std::none_of( cleaned.cbegin(), cleaned.cend(), match ) ) {
 			cleaned.push_back( trimmed );
+			if ( cleaned.size() == kRecentFolderLimit ) {
+				break;
+			}
 		}
 	}
 	return cleaned;
@@ -165,8 +168,7 @@ void file_dialog_add_recent_folder( const QString& folder ){
 	file_dialog_save_recent_folders( folders );
 }
 
-void file_dialog_apply_recent_folders( QFileDialog& dialog ){
-	const QStringList folders = file_dialog_sanitize_recent_folders( file_dialog_recent_folders() );
+void file_dialog_apply_recent_folders( QFileDialog& dialog, const QStringList& folders ){
 	if ( folders.isEmpty() ) {
 		return;
 	}
@@ -228,6 +230,7 @@ const char* file_dialog( QWidget* parent, bool open, const char* title, const ch
 	dialog.setAcceptMode( open ? QFileDialog::AcceptOpen : QFileDialog::AcceptSave );
 	dialog.setFileMode( open ? QFileDialog::ExistingFile : QFileDialog::AnyFile );
 	dialog.setOption( QFileDialog::DontConfirmOverwrite, false );
+	dialog.setOption( QFileDialog::DontUseCustomDirectoryIcons, true );
 	if ( !filter.isEmpty() ) {
 		dialog.setNameFilter( filter );
 	}
@@ -244,11 +247,11 @@ const char* file_dialog( QWidget* parent, bool open, const char* title, const ch
 		}
 	}
 
-	const QStringList recentFolders = file_dialog_recent_folders();
-	if ( !recentFolders.isEmpty() ) {
-		dialog.setOption( QFileDialog::DontUseNativeDialog, true );
-	}
-	file_dialog_apply_recent_folders( dialog );
+	// Keep the native dialog fast path. Forcing the Qt fallback here makes large
+	// directory trees noticeably slower on Windows, and stale removable/network
+	// paths can block if we synchronously probe them up front.
+	const QStringList recentFolders = file_dialog_sanitize_recent_folders( file_dialog_recent_folders() );
+	file_dialog_apply_recent_folders( dialog, recentFolders );
 
 	if ( dialog.exec() != QDialog::Accepted ) {
 		g_file_dialog_file.clear();
