@@ -9,6 +9,8 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel );
 void EntityBrowser_destroyWindow();
 void EntityBrowser_EnsureTree();
 void EntityBrowser_flushReferences();
+void EntityBrowser_mapFree();
+void EntityBrowser_mapReady();
 void EntityBrowser_beginReferenceRefresh();
 void EntityBrowser_endReferenceRefresh();
 bool EntityBrowser_canRefreshReferences();

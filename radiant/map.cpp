@@ -391,6 +391,8 @@ void Map_SetWorldspawn( Map& map, scene::Node* node ){
  */
 #include "modelwindow.h"
 void Map_Free(){
+	EntityBrowser_mapFree();
+
 	Map_RegionOff();
 	Select_ShowAllHidden();
 
@@ -403,7 +405,6 @@ void Map_Free(){
 	}
 
 	ModelBrowser_flushReferences();
-	EntityBrowser_flushReferences();
 
 	FlushReferences();
 
@@ -1036,6 +1037,7 @@ void Map_LoadFile( const char *filename ){
 	g_currentMap = &g_map;
 
 	GridStatus_changed();
+	EntityBrowser_mapReady();
 	ModelBrowser_mapReady();
 }
 
@@ -1292,6 +1294,7 @@ void Map_New(){
 	g_currentMap = &g_map;
 
 	GridStatus_changed();
+	EntityBrowser_mapReady();
 	ModelBrowser_mapReady();
 }
 

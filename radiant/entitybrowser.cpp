@@ -12,6 +12,7 @@
 #include <QDrag>
 #include <QEvent>
 #include <QHeaderView>
+#include <QHideEvent>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLineEdit>
@@ -21,6 +22,7 @@
 #include <QPixmap>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStandardItemModel>
@@ -764,6 +766,8 @@ public:
 	bool m_filterGlobal = false;
 	bool m_filterUsed = false;
 	bool m_listMode = false;
+	bool m_mapReady = true;
+	bool m_usedFilterDirty = false;
 	bool m_referenceRefreshInProgress = false;
 	bool m_referencesDirty = false;
 	bool m_previewLoadInProgress = false;
@@ -987,8 +991,6 @@ public:
 	void insert( scene::Instance* instance ) override {
 		if( instance->path().size() == 3 ){
 			m_entityInstances.push_back( instance );
-			m_originZ = 0;
-			m_originInvalid = true;
 		}
 	}
 	void erase( scene::Instance* instance ) override {
@@ -997,7 +999,6 @@ public:
 		}
 		m_entityInstances.clear();
 		m_currentEntityId = -1;
-		m_originZ = 0;
 		m_originInvalid = true;
 	}
 	template<typename Functor>
@@ -1046,6 +1047,17 @@ public:
 EntityBrowser g_EntityBrowser;
 static bool g_entityBrowserTreeConstructed = false;
 
+static void EntityBrowser_clearPreviewGraph(){
+	++g_EntityBrowser.m_previewGraphRevision;
+	if ( g_entityGraph != nullptr ) {
+		EntityGraph_clear();
+	}
+	g_EntityBrowser.m_loadedPreviewCount = 0;
+	g_EntityBrowser.m_currentEntityId = -1;
+	g_EntityBrowser.clearHover();
+	g_EntityBrowser.m_originInvalid = true;
+}
+
 using EntityClassnameSet = std::set<CopiedString, StringLessNoCase>;
 
 class EntityBrowserUsedClassCollector : public scene::Graph::Walker
@@ -1093,8 +1105,11 @@ void EntityBrowser_cancelPendingFilterApply(){
 void EntityBrowser_scheduleFilterApply(){
 	g_EntityBrowser.m_filterApplyPending = true;
 	if ( g_EntityBrowser.m_filterApplyTimer != nullptr
+	  && g_EntityBrowser.m_mapReady
 	  && !g_EntityBrowser.m_referenceRefreshInProgress
-	  && !g_EntityBrowser.m_previewLoadInProgress ) {
+	  && !g_EntityBrowser.m_previewLoadInProgress
+	  && g_EntityBrowser.m_treeView != nullptr
+	  && g_EntityBrowser.m_treeView->isVisible() ) {
 		g_EntityBrowser.m_filterApplyTimer->start( kEntityFilterApplyDelayMilliseconds );
 	}
 }
@@ -1670,7 +1685,10 @@ protected:
 	}
 	void wheelEvent( QWheelEvent *event ) override {
 		setFocus();
-		m_entBro.setOriginZ( m_entBro.m_originZ + std::copysign( 64, event->angleDelta().y() ) );
+		const int delta = event->angleDelta().y();
+		if ( delta != 0 ) {
+			m_entBro.setOriginZ( m_entBro.m_originZ + std::copysign( 64, delta ) );
+		}
 	}
 };
 
@@ -1743,7 +1761,8 @@ static void EntityBrowser_insertPreviewNodesUpTo( int targetCount ){
 }
 
 static void EntityBrowser_ensureVisiblePreviews(){
-	if ( g_EntityBrowser.m_referenceRefreshInProgress
+	if ( !g_EntityBrowser.m_mapReady
+	  || g_EntityBrowser.m_referenceRefreshInProgress
 	  || g_EntityBrowser.m_gl_widget == nullptr
 	  || !g_EntityBrowser.m_gl_widget->isVisible() ) {
 		return;
@@ -1765,7 +1784,9 @@ static void EntityBrowser_rebuildListWidget(){
 }
 
 static void EntityBrowser_selectCategory( const QString& name ){
-	if ( g_EntityBrowser.m_referenceRefreshInProgress || g_EntityBrowser.m_previewLoadInProgress ) {
+	if ( !g_EntityBrowser.m_mapReady
+	  || g_EntityBrowser.m_referenceRefreshInProgress
+	  || g_EntityBrowser.m_previewLoadInProgress ) {
 		g_EntityBrowser.m_filterApplyPending = true;
 		return;
 	}
@@ -1787,12 +1808,10 @@ static void EntityBrowser_selectCategory( const QString& name ){
 		EntityBrowser_updateUsedFilterButtonLabel( usedClasses.size() );
 	}
 
-	++g_EntityBrowser.m_previewGraphRevision;
-	EntityGraph_clear();
-	g_EntityBrowser.m_loadedPreviewCount = 0;
+	EntityBrowser_clearPreviewGraph();
 	g_EntityBrowser.visibleClasses().clear();
-	g_EntityBrowser.m_currentEntityId = -1;
-	g_EntityBrowser.clearHover();
+	g_EntityBrowser.m_originZ = 0;
+	g_EntityBrowser.m_originInvalid = true;
 	if ( visibleCategory != nullptr ) {
 		for ( EntityClass* eclass : visibleCategory->classes ) {
 			if ( !string_contains_nocase( eclass->name(), g_EntityBrowser.filter() ) ) {
@@ -1804,12 +1823,22 @@ static void EntityBrowser_selectCategory( const QString& name ){
 			g_EntityBrowser.visibleClasses().push_back( eclass );
 		}
 	}
+	g_EntityBrowser.m_usedFilterDirty = false;
 	EntityBrowser_rebuildListWidget();
 	EntityBrowser_ensureVisiblePreviews();
 	g_EntityBrowser.queueDraw();
 }
 
 static void EntityBrowser_applyCurrentFilterNow(){
+	if ( !g_EntityBrowser.m_mapReady
+	  || g_EntityBrowser.m_referenceRefreshInProgress
+	  || g_EntityBrowser.m_previewLoadInProgress
+	  || g_EntityBrowser.m_treeView == nullptr
+	  || !g_EntityBrowser.m_treeView->isVisible() ) {
+		EntityBrowser_pausePendingFilterApply();
+		g_EntityBrowser.m_filterApplyPending = true;
+		return;
+	}
 	EntityBrowser_cancelPendingFilterApply();
 	if ( g_EntityBrowser.m_treeView != nullptr && g_EntityBrowser.m_treeView->currentIndex().isValid() ) {
 		EntityBrowser_selectCategory( g_EntityBrowser.m_treeView->currentIndex().data( Qt::ItemDataRole::DisplayRole ).toString() );
@@ -1900,7 +1929,9 @@ static void EntityBrowser_constructTree(){
 }
 
 static void EntityBrowser_reloadTree(){
-	if ( g_EntityBrowser.m_referenceRefreshInProgress || g_EntityBrowser.m_previewLoadInProgress ) {
+	if ( !g_EntityBrowser.m_mapReady
+	  || g_EntityBrowser.m_referenceRefreshInProgress
+	  || g_EntityBrowser.m_previewLoadInProgress ) {
 		g_EntityBrowser.m_treeReloadPending = true;
 		return;
 	}
@@ -1937,13 +1968,30 @@ protected:
 	}
 };
 
+class EntityBrowserSplitter : public QSplitter
+{
+protected:
+	void showEvent( QShowEvent* event ) override {
+		QSplitter::showEvent( event );
+		QTimer::singleShot( 0, this, [this](){
+			if ( isVisible() ) {
+				EntityBrowser_EnsureTree();
+			}
+		} );
+	}
+	void hideEvent( QHideEvent* event ) override {
+		EntityBrowser_pausePendingFilterApply();
+		QSplitter::hideEvent( event );
+	}
+};
+
 QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 	g_EntityBrowser.m_parent = toplevel;
 	g_entityBrowserTreeConstructed = false;
 
 	const bool disableOpenGL = OpenGLWidgetsDisabled();
 
-	auto *splitter = new QSplitter;
+	auto *splitter = new EntityBrowserSplitter;
 	auto *containerWidgetLeft = new QWidget;
 	auto *containerWidgetRight = new QWidget;
 	splitter->addWidget( containerWidgetLeft );
@@ -2155,11 +2203,38 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 }
 
 void EntityBrowser_EnsureTree(){
-	if ( g_EntityBrowser.m_referenceRefreshInProgress ) {
+	if ( !g_EntityBrowser.m_mapReady
+	  || g_EntityBrowser.m_referenceRefreshInProgress
+	  || g_EntityBrowser.m_previewLoadInProgress ) {
+		return;
+	}
+	if ( g_EntityBrowser.m_treeReloadPending ) {
+		EntityBrowser_queuePendingTreeReload();
 		return;
 	}
 	if ( !g_entityBrowserTreeConstructed ) {
 		EntityBrowser_constructTree();
+	}
+	else if ( g_EntityBrowser.m_filterApplyPending || g_EntityBrowser.m_usedFilterDirty ) {
+		EntityBrowser_applyCurrentFilterNow();
+	}
+}
+
+static void EntityBrowser_scheduleEnsureTreeIfVisible(){
+	if ( !g_EntityBrowser.m_mapReady
+	  || g_EntityBrowser.m_referenceRefreshInProgress
+	  || g_EntityBrowser.m_previewLoadInProgress ) {
+		return;
+	}
+	if ( QTreeView* treeView = g_EntityBrowser.m_treeView; treeView != nullptr && treeView->isVisible() ) {
+		QTimer::singleShot( 0, treeView, [treeView](){
+			if ( treeView->isVisible()
+			  && g_EntityBrowser.m_mapReady
+			  && !g_EntityBrowser.m_referenceRefreshInProgress
+			  && !g_EntityBrowser.m_previewLoadInProgress ) {
+				EntityBrowser_EnsureTree();
+			}
+		} );
 	}
 }
 
@@ -2179,6 +2254,8 @@ void EntityBrowser_destroyWindow(){
 	g_EntityBrowser.m_listModeButton = nullptr;
 	g_EntityBrowser.m_filterApplyTimer = nullptr;
 	g_EntityBrowser.m_filterApplyPending = false;
+	g_EntityBrowser.m_mapReady = true;
+	g_EntityBrowser.m_usedFilterDirty = false;
 	g_EntityBrowser.m_referenceRefreshInProgress = false;
 	g_EntityBrowser.m_referencesDirty = false;
 	g_EntityBrowser.m_previewLoadInProgress = false;
@@ -2188,14 +2265,34 @@ void EntityBrowser_destroyWindow(){
 
 void EntityBrowser_flushReferences(){
 	EntityBrowser_cancelPendingFilterApply();
-	if ( g_entityGraph == nullptr ) {
-		return;
-	}
-
-	++g_EntityBrowser.m_previewGraphRevision;
-	EntityGraph_clear();
-	g_EntityBrowser.m_loadedPreviewCount = 0;
+	EntityBrowser_clearPreviewGraph();
 	g_EntityBrowser.queueDraw();
+}
+
+void EntityBrowser_mapFree(){
+	EntityBrowser_pausePendingFilterApply();
+	g_EntityBrowser.m_mapReady = false;
+	if ( g_EntityBrowser.m_filterUsed ) {
+		g_EntityBrowser.m_usedFilterDirty = true;
+		g_EntityBrowser.m_filterApplyPending = true;
+	}
+	EntityBrowser_clearPreviewGraph();
+	g_EntityBrowser.queueDraw();
+}
+
+void EntityBrowser_mapReady(){
+	g_EntityBrowser.m_mapReady = true;
+	if ( g_EntityBrowser.m_treeReloadPending ) {
+		EntityBrowser_queuePendingTreeReload();
+	}
+	else if ( !g_entityBrowserTreeConstructed
+	       || g_EntityBrowser.m_filterApplyPending
+	       || g_EntityBrowser.m_usedFilterDirty ) {
+		EntityBrowser_scheduleEnsureTreeIfVisible();
+	}
+	else {
+		g_EntityBrowser.queueDraw();
+	}
 }
 
 void EntityBrowser_beginReferenceRefresh(){
@@ -2210,13 +2307,7 @@ bool EntityBrowser_canRefreshReferences(){
 void EntityBrowser_endReferenceRefresh(){
 	g_EntityBrowser.m_referenceRefreshInProgress = false;
 	if ( std::exchange( g_EntityBrowser.m_referencesDirty, false ) ) {
-		if ( g_entityGraph != nullptr ) {
-			++g_EntityBrowser.m_previewGraphRevision;
-			EntityGraph_clear();
-		}
-		g_EntityBrowser.m_loadedPreviewCount = 0;
-		g_EntityBrowser.m_currentEntityId = -1;
-		g_EntityBrowser.clearHover();
+		EntityBrowser_clearPreviewGraph();
 		if ( !g_EntityBrowser.m_filterApplyPending ) {
 			g_EntityBrowser.queueDraw();
 		}
@@ -2228,13 +2319,7 @@ void EntityBrowser_endReferenceRefresh(){
 		EntityBrowser_scheduleFilterApply();
 	}
 	if ( !g_entityBrowserTreeConstructed ) {
-		if ( QTreeView* treeView = g_EntityBrowser.m_treeView; treeView != nullptr && treeView->isVisible() ) {
-			QTimer::singleShot( 0, treeView, [treeView](){
-				if ( treeView->isVisible() && !g_EntityBrowser.m_referenceRefreshInProgress ) {
-					EntityBrowser_EnsureTree();
-				}
-			} );
-		}
+		EntityBrowser_scheduleEnsureTreeIfVisible();
 	}
 }
 
