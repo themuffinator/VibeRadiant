@@ -1467,6 +1467,8 @@ ifeq ($(INSTALL_DATA),yes)
 	$(ECHO) $(RADIANT_MINOR_VERSION) > $(INSTALLDIR)/RADIANT_MINOR
 	$(ECHO) $(RADIANT_MAJOR_VERSION) > $(INSTALLDIR)/RADIANT_MAJOR
 	$(CP_R) setup/data/tools/* $(INSTALLDIR)/
+	$(SED) 's/@QT_MAJOR@/$(QT_MAJOR)/g' setup/data/tools/qt.conf.in > $(INSTALLDIR)/qt.conf
+	$(RM) -f $(INSTALLDIR)/qt.conf.in
 	$(MKDIR) $(INSTALLDIR)/docs
 	$(CP_R) docs/* $(INSTALLDIR)/docs/
 	$(FIND) $(INSTALLDIR_BASE)/ -name .svn -exec $(RM_R) {} \; -prune
@@ -1476,7 +1478,7 @@ endif
 ifeq ($(OS),Win32)
 install-dll: binaries
 ifeq ($(INSTALL_DLLS),yes)
-	MKDIR="$(MKDIR)" CP="$(CP)" CAT="$(CAT)" GTKDIR="$(GTKDIR)" WHICHDLL="$(WHICHDLL)" INSTALLDIR="$(INSTALLDIR)" $(SH) $(DLLINSTALL)
+	MKDIR="$(MKDIR)" CP="$(CP)" CAT="$(CAT)" GTKDIR="$(GTKDIR)" WHICHDLL="$(WHICHDLL)" INSTALLDIR="$(INSTALLDIR)" QT_MAJOR="$(QT_MAJOR)" $(SH) $(DLLINSTALL)
 endif
 else
 install-dll: binaries

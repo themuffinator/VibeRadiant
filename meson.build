@@ -254,6 +254,14 @@ if qt_major == '5' and not qt_openglwidgets_dep.found()
   qt_openglwidgets_dep = qt_widgets_dep
 endif
 
+qt_conf_config = configuration_data()
+qt_conf_config.set('QT_MAJOR', qt_major)
+qt_conf = configure_file(
+  input: 'setup/data/tools/qt.conf.in',
+  output: 'qt.conf',
+  configuration: qt_conf_config,
+)
+
 inc_libs = include_directories('libs')
 inc_include = include_directories('include')
 inc_libs_include = include_directories('libs', 'include')
@@ -1705,6 +1713,15 @@ alias_target('binaries', [
   exe_radiant,
 ])
 
+# A completed direct Meson install must not leave the incremental wrapper's
+# build/profile ownership marker claiming that an older install is current.
+meson.add_install_script(
+  sh,
+  '-c',
+  'rm -f -- "$MESON_INSTALL_DESTDIR_PREFIX/.viberadiant-meson-install-context"',
+  install_tag: 'runtime',
+)
+
 meson.add_install_script(
   sh,
   '-c',
@@ -1743,7 +1760,14 @@ meson.add_install_script(sh, '-c', install_ericw_tools_cmd[0], install_tag: 'run
 if get_option('install_data')
   # Runtime expects data roots at <prefix>/gl, <prefix>/bitmaps, etc.
   # Strip the source "tools" directory level so install layout matches legacy.
-  install_subdir('setup/data/tools', install_dir: '.', strip_directory: true, install_tag: 'runtime')
+  install_subdir(
+    'setup/data/tools',
+    install_dir: '.',
+    strip_directory: true,
+    exclude_files: ['qt.conf', 'qt.conf.in'],
+    install_tag: 'runtime',
+  )
+  install_data(qt_conf, install_dir: '.', install_tag: 'runtime')
   install_subdir('docs', install_dir: 'docs', strip_directory: true, install_tag: 'runtime')
 
   install_gamepacks_cmd = [
@@ -1759,7 +1783,7 @@ if windows and get_option('install_dlls')
   meson.add_install_script(
     sh,
     '-c',
-    'cd "' + meson.project_source_root() + '" && INSTALLDIR="$MESON_INSTALL_DESTDIR_PREFIX" sh install-dlls-msys2-mingw.sh',
+    'cd "' + meson.project_source_root() + '" && INSTALLDIR="$MESON_INSTALL_DESTDIR_PREFIX" QT_MAJOR="' + qt_major + '" sh install-dlls-msys2-mingw.sh',
     install_tag: 'runtime',
   )
 endif

@@ -1,0 +1,6 @@
+[Platforms]
+WindowsArguments = darkmode=1,dpiawareness=1
+
+[Paths]
+Prefix = .
+Plugins = share/qt@QT_MAJOR@/plugins

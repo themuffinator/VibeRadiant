@@ -46,6 +46,8 @@ Legacy multi-source modes are intentionally blocked to prevent silent per-game o
 - Folds legacy numeric pseudo-option key runs (`0`, `1`, `2`, ...) into proper `choices` controls where safe.
 - Removes converted `*.def` files and fails if any legacy `def` remains.
 
+Successful staging writes `.viberadiant-gamepacks-state.json` into the runtime tree. Subsequent installs hash the canonical source, normalization scripts, and installed output (excluding the state file) and keep the existing atomic installation when all three still match. Set `GAMEPACK_FORCE_REBUILD=1` for an explicit rebuild; missing, corrupt, stale, or output-drifted state rebuilds through the same temporary-tree/swap path.
+
 ## Game descriptor format guidelines
 
 Descriptor location and payload coupling:

@@ -58,11 +58,6 @@ resolve_python() {
 
 normalize_entity_definitions() {
 	normalize_root=$1
-	python_cmd=$(resolve_python) || {
-		$ECHO "Python interpreter not found; cannot normalize legacy .def entity definitions."
-		return 1
-	}
-
 	"$python_cmd" "$SCRIPT_DIR/tools/convert_entities_def_to_fgd.py" \
 		--root "$normalize_root" \
 		--remove-legacy-def-files \
@@ -81,6 +76,57 @@ if [ ! -d "$source_pack/games" ]; then
 	print_missing_packs_error
 	exit 1
 fi
+
+python_cmd=$(resolve_python) || {
+	$ECHO "Python interpreter not found; cannot install gamepacks."
+	exit 1
+}
+state_tool="$SCRIPT_DIR/tools/gamepack_install_state.py"
+if [ ! -f "$state_tool" ]; then
+	$ECHO "Gamepack install-state helper not found: $state_tool"
+	exit 1
+fi
+install_umask=$(umask)
+
+gamepack_state() {
+	state_mode=$1
+	shift
+	"$python_cmd" "$state_tool" "$state_mode" \
+		--source "$source_pack" \
+		--transform "$SCRIPT_DIR/install-gamepacks.sh" \
+		--transform "$SCRIPT_DIR/install-gamepack.sh" \
+		--transform "$SCRIPT_DIR/tools/convert_entities_def_to_fgd.py" \
+		--transform "$state_tool" \
+		--parameter "SH=$SH" \
+		--parameter "CP=$CP" \
+		--parameter "CP_R=$CP_R" \
+		--parameter "RM=$RM" \
+		--parameter "RM_R=$RM_R" \
+		--parameter "MV=$MV" \
+		--parameter "PYTHON_COMMAND=$python_cmd" \
+		--parameter "GAMEPACK_SOURCE=$GAMEPACK_SOURCE" \
+		--parameter "umask=$install_umask" \
+		"$@"
+}
+
+if [ "${GAMEPACK_FORCE_REBUILD:-0}" != "1" ]; then
+	set +e
+	gamepack_state check --destination "$dest"
+	state_status=$?
+	set -e
+	case $state_status in
+		0)
+			$ECHO "Gamepacks are unchanged; keeping existing installation."
+			exit 0
+			;;
+		1)
+			;;
+		*)
+			exit "$state_status"
+			;;
+	esac
+fi
+expected_input=$(gamepack_state input)
 
 dest_parent=$(dirname "$dest")
 mkdir -p "$dest_parent"
@@ -102,6 +148,7 @@ mkdir -p "$stage_dir/games"
 $SH "$SCRIPT_DIR/install-gamepack.sh" "$source_pack" "$stage_dir"
 $ECHO "Using gamepack source: games/VibePack"
 normalize_entity_definitions "$stage_dir"
+gamepack_state write --destination "$stage_dir" --expected-input "$expected_input"
 
 if [ -e "$dest" ]; then
 	backup_dir="$dest.backup.$$"

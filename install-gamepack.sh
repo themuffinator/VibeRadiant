@@ -4,7 +4,7 @@
 # Usage:
 #   install-gamepack.sh gamepack installdir
 
-set -ex
+set -e
 
 : ${CP:=cp}
 : ${CP_R:=cp -r}

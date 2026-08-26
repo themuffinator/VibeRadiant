@@ -267,13 +267,29 @@ if [ "$MODE" != "stage" ]; then
 	fi
 fi
 
+if ! command -v cmp >/dev/null 2>&1; then
+	echo "Required staging tool is unavailable: cmp"
+	exit 1
+fi
+
 copy_if_exists() {
 	src=$1
 	dst=$2
-	if [ -f "$src" ]; then
-		cp -f "$src" "$dst"
+	[ -f "$src" ] || return 1
+	if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
 		return 0
 	fi
+	tmp=$(mktemp "$dst.tmp.XXXXXX") || return 1
+	trap 'rm -f -- "$tmp"' 0
+	trap 'rm -f -- "$tmp"; exit 1' HUP INT TERM
+	if cp -p -f "$src" "$tmp" && mv -f "$tmp" "$dst"; then
+		tmp=
+		trap - 0 HUP INT TERM
+		return 0
+	fi
+	rm -f -- "$tmp"
+	tmp=
+	trap - 0 HUP INT TERM
 	return 1
 }
 
@@ -306,24 +322,24 @@ fi
 for tool_dir in "$BUILD_DIR/src/qbsp" "$BUILD_DIR/src/light" "$BUILD_DIR/src/vis"; do
 	for f in "$tool_dir"/*.dll "$tool_dir"/*.so "$tool_dir"/*.so.* "$tool_dir"/*.dylib "$tool_dir"/LICENSE*.txt; do
 		if [ -f "$f" ]; then
-			cp -f "$f" "$DEST_DIR/"
+			copy_if_exists "$f" "$DEST_DIR/${f##*/}"
 		fi
 	done
 done
 
-cp -f "$SOURCE_DIR/COPYING" "$DEST_DIR/LICENSE.txt"
-cp -f "$SOURCE_DIR/THIRD_PARTY_NOTICES.md" "$DEST_DIR/THIRD_PARTY_NOTICES.md"
-cp -f "$SOURCE_DIR/VIBERADIANT_VENDOR.md" "$DEST_DIR/VIBERADIANT_VENDOR.md"
-cp -f "$SOURCE_DIR/extern/fmt/LICENSE" "$DEST_DIR/LICENSE-fmt.txt"
-cp -f "$SOURCE_DIR/extern/jsoncpp/LICENSE" "$DEST_DIR/LICENSE-jsoncpp.txt"
-cp -f "$SOURCE_DIR/extern/pareto/LICENSE" "$DEST_DIR/LICENSE-pareto.txt"
+copy_if_exists "$SOURCE_DIR/COPYING" "$DEST_DIR/LICENSE.txt"
+copy_if_exists "$SOURCE_DIR/THIRD_PARTY_NOTICES.md" "$DEST_DIR/THIRD_PARTY_NOTICES.md"
+copy_if_exists "$SOURCE_DIR/VIBERADIANT_VENDOR.md" "$DEST_DIR/VIBERADIANT_VENDOR.md"
+copy_if_exists "$SOURCE_DIR/extern/fmt/LICENSE" "$DEST_DIR/LICENSE-fmt.txt"
+copy_if_exists "$SOURCE_DIR/extern/jsoncpp/LICENSE" "$DEST_DIR/LICENSE-jsoncpp.txt"
+copy_if_exists "$SOURCE_DIR/extern/pareto/LICENSE" "$DEST_DIR/LICENSE-pareto.txt"
 
 if [ -n "$OUTPUT_EXE_SUFFIX" ] && [ -z "$SOURCE_EXE_SUFFIX" ]; then
 	for tool in qbsp light vis; do
 		(
 			cd "$DEST_DIR"
 			ln -snf "$tool$OUTPUT_EXE_SUFFIX" "$tool"
-		) || cp -f "$DEST_DIR/$tool$OUTPUT_EXE_SUFFIX" "$DEST_DIR/$tool"
+		) || copy_if_exists "$DEST_DIR/$tool$OUTPUT_EXE_SUFFIX" "$DEST_DIR/$tool"
 	done
 fi
 

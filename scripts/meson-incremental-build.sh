@@ -174,6 +174,7 @@ setup_options=(
 	"-Dqt_major=$qt_major"
 	-Dcpp_std=c++20
 )
+configured_this_run=false
 
 if [[ -f "$coredata" && ! -f "$context_file" ]] && ! legacy_context_matches; then
 	echo "error: cannot prove that $build_dir uses this source tree and MSYS2 toolchain" >&2
@@ -196,6 +197,7 @@ if ! options_match || ! context_matches; then
 	context_tmp="$context_file.tmp"
 	printf '%s\n' "$expected_context" > "$context_tmp"
 	mv -f -- "$context_tmp" "$context_file"
+	configured_this_run=true
 fi
 
 if [[ ! -f "$build_dir/build.ninja" ]]; then
@@ -210,5 +212,24 @@ else
 fi
 
 if [[ "$install_runtime" == true ]]; then
-	meson install -C "$build_dir" --no-rebuild --tags runtime
+	build_dir_real=$(CDPATH= cd -- "$build_dir" && pwd -P)
+	install_context_file="$install_prefix/.viberadiant-meson-install-context"
+	expected_install_context="source=$source_dir"$'\n'"build_dir=$build_dir_real"$'\n'"profile=$build_profile"$'\n'"qt_major=$qt_major"$'\n'"msys2_root=$msys2_root"$'\n'"subsystem=$subsystem"
+	install_options=(--no-rebuild --tags runtime)
+	if [[ "$configured_this_run" == false
+	   && -f "$install_context_file"
+	   && "$(< "$install_context_file")" == "$expected_install_context" ]]; then
+		install_options+=(--only-changed)
+	fi
+
+	# A failed/interrupted install must force a complete repair on the next run.
+	rm -f -- "$install_context_file"
+	meson install -C "$build_dir" "${install_options[@]}"
+	mkdir -p -- "$install_prefix"
+	install_context_tmp=$(mktemp "$install_context_file.tmp.XXXXXX")
+	trap 'rm -f -- "$install_context_tmp"' EXIT
+	printf '%s\n' "$expected_install_context" > "$install_context_tmp"
+	mv -f -- "$install_context_tmp" "$install_context_file"
+	install_context_tmp=
+	trap - EXIT
 fi

@@ -14,7 +14,7 @@ Quick start (Meson/Ninja)
    meson compile -C build
 
 3) Stage runtime tree:
-   meson install -C build --no-rebuild --tags runtime
+   rm -f -- "$(pwd)/install/.viberadiant-meson-install-context" && meson install -C build --no-rebuild --tags runtime
 
 Core Meson options
 ------------------
@@ -34,17 +34,17 @@ Example profiles
 Release/dev-fast:
   meson setup build-release --prefix "$(pwd)/install" -Dbuild_profile=release -Dinstall_data=false -Dinstall_dlls=false -Ddownload_gamepacks=no
   meson compile -C build-release
-  meson install -C build-release --no-rebuild --tags runtime
+  rm -f -- "$(pwd)/install/.viberadiant-meson-install-context" && meson install -C build-release --no-rebuild --tags runtime
 
 Debug:
   meson setup build-debug --prefix "$(pwd)/install" -Dbuild_profile=debug -Dinstall_data=false -Dinstall_dlls=false -Ddownload_gamepacks=no
   meson compile -C build-debug
-  meson install -C build-debug --no-rebuild --tags runtime
+  rm -f -- "$(pwd)/install/.viberadiant-meson-install-context" && meson install -C build-debug --no-rebuild --tags runtime
 
 Full packaging-style install:
   meson setup build-full --prefix "$(pwd)/install" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=allinone
   meson compile -C build-full
-  meson install -C build-full --no-rebuild --tags runtime
+  rm -f -- "$(pwd)/install/.viberadiant-meson-install-context" && meson install -C build-full --no-rebuild --tags runtime
 
 Common dependencies
 -------------------
@@ -83,8 +83,10 @@ Then:
 
   meson setup build-msys2 --prefix "$PWD/install" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=allinone
   meson compile -C build-msys2
-  meson install -C build-msys2 --no-rebuild --tags runtime
+  rm -f -- "$PWD/install/.viberadiant-meson-install-context" && meson install -C build-msys2 --no-rebuild --tags runtime
   ./install/radiant.exe
+
+The Windows runtime stager follows the configured Qt major and active MSYS2 compiler prefix. It records managed DLL/plugin state in `.viberadiant-msys2-runtime.json`, so unchanged installs validate metadata instead of rescanning and recopying the full dependency closure. The editor's incremental build wrapper additionally uses Meson's unchanged-file preservation only while the build/profile/Qt/toolchain install context matches; switching configurations forces one complete install. A completed direct Meson runtime install clears that wrapper marker, so the next wrapper invocation also performs a complete repair.
 
 Legacy Makefile entrypoint (still available)
 --------------------------------------------
