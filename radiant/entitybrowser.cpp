@@ -19,9 +19,11 @@
 #include <QOpenGLWidget>
 #include <QPixmap>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStandardItemModel>
+#include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -65,6 +67,8 @@
 #include "gtkutil/widget.h"
 
 namespace {
+constexpr int kEntityFilterApplyDelayMilliseconds = 150;
+
 bool string_contains_nocase( const char* haystack, const char* needle ){
 	if ( string_empty( needle ) ) {
 		return true;
@@ -754,6 +758,7 @@ public:
 	QToolButton* m_usedFilterButton = nullptr;
 	QToolButton* m_clearFiltersButton = nullptr;
 	QToolButton* m_listModeButton = nullptr;
+	QTimer* m_filterApplyTimer = nullptr;
 	bool m_filterGlobal = false;
 	bool m_filterUsed = false;
 	bool m_listMode = false;
@@ -1064,6 +1069,18 @@ void EntityBrowser_updateClearFiltersButton(){
 void EntityBrowser_updateUsedFilterButtonLabel( std::size_t usedCount ){
 	if ( g_EntityBrowser.m_usedFilterButton != nullptr ) {
 		g_EntityBrowser.m_usedFilterButton->setText( StringStream<64>( "Used (", usedCount, ')' ).c_str() );
+	}
+}
+
+void EntityBrowser_cancelPendingFilterApply(){
+	if ( g_EntityBrowser.m_filterApplyTimer != nullptr ) {
+		g_EntityBrowser.m_filterApplyTimer->stop();
+	}
+}
+
+void EntityBrowser_scheduleFilterApply(){
+	if ( g_EntityBrowser.m_filterApplyTimer != nullptr ) {
+		g_EntityBrowser.m_filterApplyTimer->start( kEntityFilterApplyDelayMilliseconds );
 	}
 }
 
@@ -1691,6 +1708,7 @@ static void EntityBrowser_rebuildListWidget(){
 }
 
 static void EntityBrowser_selectCategory( const QString& name ){
+	EntityBrowser_cancelPendingFilterApply();
 	const EntityCategory* category = g_EntityBrowser.findCategory( name.toLatin1().constData() );
 	g_EntityBrowser.setCurrentCategory( category );
 	EntityBrowser_updateClearFiltersButton();
@@ -1727,6 +1745,16 @@ static void EntityBrowser_selectCategory( const QString& name ){
 	EntityBrowser_rebuildListWidget();
 	EntityBrowser_ensureVisiblePreviews();
 	g_EntityBrowser.queueDraw();
+}
+
+static void EntityBrowser_applyCurrentFilterNow(){
+	EntityBrowser_cancelPendingFilterApply();
+	if ( const EntityCategory* category = g_EntityBrowser.currentCategory() ) {
+		EntityBrowser_selectCategory( category->name.c_str() );
+	}
+	else {
+		EntityBrowser_updateClearFiltersButton();
+	}
 }
 
 static void EntityBrowser_setListMode( bool listMode ){
@@ -1776,6 +1804,7 @@ static void EntityBrowser_constructCategories(){
 }
 
 static void EntityBrowser_constructTree(){
+	EntityBrowser_cancelPendingFilterApply();
 	if ( g_EntityBrowser.m_treeView == nullptr ) {
 		return;
 	}
@@ -1920,40 +1949,39 @@ QWidget* EntityBrowser_constructWindow( QWidget* toplevel ){
 		entry->setText( g_EntityBrowser.filter() );
 		globalButton->setChecked( g_EntityBrowser.m_filterGlobal );
 		usedButton->setChecked( g_EntityBrowser.m_filterUsed );
+		auto* filterApplyTimer = g_EntityBrowser.m_filterApplyTimer = new QTimer( filterBar );
+		filterApplyTimer->setSingleShot( true );
+		QObject::connect( filterApplyTimer, &QTimer::timeout, [](){
+			EntityBrowser_applyCurrentFilterNow();
+		} );
 
-		QObject::connect( clearButton, &QToolButton::clicked, [](){
-			if ( g_EntityBrowser.m_filterEntry != nullptr ) {
-				g_EntityBrowser.m_filterEntry->clear();
-			}
+		QObject::connect( clearButton, &QToolButton::clicked, [entry, globalButton, usedButton](){
+			EntityBrowser_cancelPendingFilterApply();
+			g_EntityBrowser.setFilter( "" );
 			g_EntityBrowser.m_filterGlobal = false;
 			g_EntityBrowser.m_filterUsed = false;
-			if ( g_EntityBrowser.m_globalFilterButton != nullptr ) {
-				g_EntityBrowser.m_globalFilterButton->setChecked( false );
+			{
+				const QSignalBlocker entryBlocker( entry );
+				const QSignalBlocker globalBlocker( globalButton );
+				const QSignalBlocker usedBlocker( usedButton );
+				entry->clear();
+				globalButton->setChecked( false );
+				usedButton->setChecked( false );
 			}
-			if ( g_EntityBrowser.m_usedFilterButton != nullptr ) {
-				g_EntityBrowser.m_usedFilterButton->setChecked( false );
-			}
-			if ( const EntityCategory* category = g_EntityBrowser.currentCategory() ) {
-				EntityBrowser_selectCategory( category->name.c_str() );
-			}
+			EntityBrowser_applyCurrentFilterNow();
 		} );
 		QObject::connect( entry, &QLineEdit::textChanged, []( const QString& text ){
 			g_EntityBrowser.setFilter( text.toLatin1().constData() );
-			if ( const EntityCategory* category = g_EntityBrowser.currentCategory() ) {
-				EntityBrowser_selectCategory( category->name.c_str() );
-			}
+			EntityBrowser_updateClearFiltersButton();
+			EntityBrowser_scheduleFilterApply();
 		} );
 		QObject::connect( globalButton, &QToolButton::toggled, []( bool checked ){
 			g_EntityBrowser.m_filterGlobal = checked;
-			if ( const EntityCategory* category = g_EntityBrowser.currentCategory() ) {
-				EntityBrowser_selectCategory( category->name.c_str() );
-			}
+			EntityBrowser_applyCurrentFilterNow();
 		} );
 		QObject::connect( usedButton, &QToolButton::toggled, []( bool checked ){
 			g_EntityBrowser.m_filterUsed = checked;
-			if ( const EntityCategory* category = g_EntityBrowser.currentCategory() ) {
-				EntityBrowser_selectCategory( category->name.c_str() );
-			}
+			EntityBrowser_applyCurrentFilterNow();
 		} );
 
 		EntityBrowser_updateClearFiltersButton();
@@ -2041,16 +2069,24 @@ void EntityBrowser_EnsureTree(){
 }
 
 void EntityBrowser_destroyWindow(){
+	EntityBrowser_cancelPendingFilterApply();
 	g_entityBrowserTreeConstructed = false;
+	g_EntityBrowser.m_parent = nullptr;
 	g_EntityBrowser.m_viewStack = nullptr;
 	g_EntityBrowser.m_gl_widget = nullptr;
 	g_EntityBrowser.m_gl_scroll = nullptr;
 	g_EntityBrowser.m_listWidget = nullptr;
 	g_EntityBrowser.m_treeView = nullptr;
+	g_EntityBrowser.m_filterEntry = nullptr;
+	g_EntityBrowser.m_globalFilterButton = nullptr;
+	g_EntityBrowser.m_usedFilterButton = nullptr;
+	g_EntityBrowser.m_clearFiltersButton = nullptr;
 	g_EntityBrowser.m_listModeButton = nullptr;
+	g_EntityBrowser.m_filterApplyTimer = nullptr;
 }
 
 void EntityBrowser_flushReferences(){
+	EntityBrowser_cancelPendingFilterApply();
 	if ( g_entityGraph == nullptr ) {
 		return;
 	}
@@ -2081,6 +2117,7 @@ void EntityBrowser_Construct(){
 }
 
 void EntityBrowser_Destroy(){
+	EntityBrowser_cancelPendingFilterApply();
 	g_entityGraph->erase_root();
 	delete g_entityGraph;
 	g_entityGraph = nullptr;

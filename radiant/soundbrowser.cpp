@@ -23,8 +23,10 @@
 #include <QOpenGLWidget>
 #include <QPixmap>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStandardItemModel>
+#include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
 #include <QTreeView>
@@ -63,6 +65,8 @@
 #endif
 
 namespace {
+constexpr int kSoundFilterApplyDelayMilliseconds = 150;
+
 bool string_contains_nocase( const char* haystack, const char* needle ){
 	if ( string_empty( needle ) ) {
 		return true;
@@ -262,6 +266,7 @@ public:
 	QToolButton* m_globalFilterButton = nullptr;
 	QToolButton* m_usedFilterButton = nullptr;
 	QToolButton* m_clearFiltersButton = nullptr;
+	QTimer* m_filterApplyTimer = nullptr;
 
 	SoundFS m_soundFS;
 	CopiedString m_currentFolderPath;
@@ -659,7 +664,14 @@ void SoundBrowser_updateUsedFilterButtonLabel( std::size_t usedCount ){
 	}
 }
 
+void SoundBrowser_cancelPendingFilterApply(){
+	if ( g_SoundBrowser.m_filterApplyTimer != nullptr ) {
+		g_SoundBrowser.m_filterApplyTimer->stop();
+	}
+}
+
 static void SoundBrowser_updateVisibleFiles(){
+	SoundBrowser_cancelPendingFilterApply();
 	g_SoundBrowser.m_visibleFiles.clear();
 	g_SoundBrowser.m_currentSoundId = -1;
 	g_SoundBrowser.stopPlayback();
@@ -704,6 +716,12 @@ static void SoundBrowser_updateVisibleFiles(){
 	g_SoundBrowser.m_originInvalid = true;
 	SoundBrowser_updateClearFiltersButton();
 	g_SoundBrowser.queueDraw();
+}
+
+void SoundBrowser_scheduleFilterApply(){
+	if ( g_SoundBrowser.m_filterApplyTimer != nullptr ) {
+		g_SoundBrowser.m_filterApplyTimer->start( kSoundFilterApplyDelayMilliseconds );
+	}
 }
 
 static QRect SoundBrowser_cellRectPixels( const SoundBrowser& browser, int index ){
@@ -1120,10 +1138,16 @@ static void SoundBrowser_cacheSoundFile( const char* name ){
 static bool g_soundBrowserTreeConstructed = false;
 
 static void SoundBrowser_constructTree(){
+	SoundBrowser_cancelPendingFilterApply();
 	if ( g_SoundBrowser.m_treeView == nullptr ) {
 		return;
 	}
 
+	g_SoundBrowser.m_currentFolder = nullptr;
+	g_SoundBrowser.m_currentFolderPath = "";
+	g_SoundBrowser.m_visibleFiles.clear();
+	g_SoundBrowser.m_currentSoundId = -1;
+	g_SoundBrowser.clearHover();
 	g_SoundBrowser.m_soundFS.m_folders.clear();
 	g_SoundBrowser.m_soundFS.m_files.clear();
 
@@ -1167,6 +1191,9 @@ static void SoundBrowser_constructTree(){
 		g_SoundBrowser.m_treeView->setCurrentIndex( first );
 		SoundBrowser_selectFolder( first );
 	}
+	else {
+		SoundBrowser_updateVisibleFiles();
+	}
 
 	g_soundBrowserTreeConstructed = true;
 }
@@ -1190,6 +1217,7 @@ void SoundBrowser_PrecacheWorldSounds(){
 }
 
 void SoundBrowser_ReloadSounds(){
+	SoundBrowser_cancelPendingFilterApply();
 	g_SoundBrowser.stopPlayback();
 	g_SoundBrowser.m_soundCache.clear();
 	SoundBrowser_constructTree();
@@ -1301,24 +1329,31 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 		entry->setText( g_SoundBrowser.filter() );
 		globalButton->setChecked( g_SoundBrowser.m_filterGlobal );
 		usedButton->setChecked( g_SoundBrowser.m_filterUsed );
+		auto* filterApplyTimer = g_SoundBrowser.m_filterApplyTimer = new QTimer( filterBar );
+		filterApplyTimer->setSingleShot( true );
+		QObject::connect( filterApplyTimer, &QTimer::timeout, [](){
+			SoundBrowser_updateVisibleFiles();
+		} );
 
-		QObject::connect( clearButton, &QToolButton::clicked, [](){
-			if ( g_SoundBrowser.m_filterEntry != nullptr ) {
-				g_SoundBrowser.m_filterEntry->clear();
-			}
+		QObject::connect( clearButton, &QToolButton::clicked, [entry, globalButton, usedButton](){
+			SoundBrowser_cancelPendingFilterApply();
+			g_SoundBrowser.setFilter( "" );
 			g_SoundBrowser.m_filterGlobal = false;
 			g_SoundBrowser.m_filterUsed = false;
-			if ( g_SoundBrowser.m_globalFilterButton != nullptr ) {
-				g_SoundBrowser.m_globalFilterButton->setChecked( false );
-			}
-			if ( g_SoundBrowser.m_usedFilterButton != nullptr ) {
-				g_SoundBrowser.m_usedFilterButton->setChecked( false );
+			{
+				const QSignalBlocker entryBlocker( entry );
+				const QSignalBlocker globalBlocker( globalButton );
+				const QSignalBlocker usedBlocker( usedButton );
+				entry->clear();
+				globalButton->setChecked( false );
+				usedButton->setChecked( false );
 			}
 			SoundBrowser_updateVisibleFiles();
 		} );
 		QObject::connect( entry, &QLineEdit::textChanged, []( const QString& text ){
 			g_SoundBrowser.setFilter( text.toLatin1().constData() );
-			SoundBrowser_updateVisibleFiles();
+			SoundBrowser_updateClearFiltersButton();
+			SoundBrowser_scheduleFilterApply();
 		} );
 		QObject::connect( globalButton, &QToolButton::toggled, []( bool checked ){
 			g_SoundBrowser.m_filterGlobal = checked;
@@ -1382,8 +1417,24 @@ QWidget* SoundBrowser_constructWindow( QWidget* toplevel ){
 }
 
 void SoundBrowser_destroyWindow(){
+	SoundBrowser_cancelPendingFilterApply();
 	g_SoundBrowser.stopPlayback();
+	g_SoundBrowser.m_parent = nullptr;
 	g_SoundBrowser.m_gl_widget = nullptr;
+	g_SoundBrowser.m_gl_scroll = nullptr;
+	g_SoundBrowser.m_treeView = nullptr;
+	g_SoundBrowser.m_filterEntry = nullptr;
+	g_SoundBrowser.m_globalFilterButton = nullptr;
+	g_SoundBrowser.m_usedFilterButton = nullptr;
+	g_SoundBrowser.m_clearFiltersButton = nullptr;
+	g_SoundBrowser.m_filterApplyTimer = nullptr;
+	g_SoundBrowser.m_player = nullptr;
+	g_SoundBrowser.m_soundBuffer = nullptr;
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+	g_SoundBrowser.m_audioOutput = nullptr;
+#endif
+	g_SoundBrowser.m_currentFolder = nullptr;
+	g_SoundBrowser.m_currentFolderPath = "";
 	g_soundBrowserTreeConstructed = false;
 }
 
@@ -1403,5 +1454,6 @@ void SoundBrowser_Construct(){
 }
 
 void SoundBrowser_Destroy(){
+	SoundBrowser_cancelPendingFilterApply();
 	g_SoundBrowser.stopPlayback();
 }
