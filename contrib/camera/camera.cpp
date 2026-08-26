@@ -222,9 +222,11 @@ bool CameraSynapseClient::RequestAPI( APIDescriptor_t *pAPI ){
 }
 
 #include "version.h"
+#include "stream/stringstream.h"
 
 const char* CameraSynapseClient::GetInfo(){
-	return "Camera plugin v1.0 - Arnout van Meer - built " __DATE__ " " RADIANT_VERSION;
+	static const auto info = StringStream( "Camera plugin v1.0 - Arnout van Meer - built ", RADIANT_BUILD_DATE, " ", RADIANT_VERSION );
+	return info.c_str();
 }
 
 

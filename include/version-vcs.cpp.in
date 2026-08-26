@@ -1,0 +1,6 @@
+#include "version.h"
+
+const char RADIANT_VERSION[] = RADIANT_VERSION_NUMBER @VCS_TAG@;
+const char Q3MAP_VERSION[] = Q3MAP_VERSION_BASE @VCS_TAG@;
+const char RADIANT_BUILD_DATE[] = __DATE__;
+const char RADIANT_BUILD_TIME[] = __TIME__;

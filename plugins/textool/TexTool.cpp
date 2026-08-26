@@ -902,7 +902,9 @@ bool CSynapseClientTexTool::RequestAPI( APIDescriptor_t *pAPI ){
 }
 
 #include "version.h"
+#include "stream/stringstream.h"
 
 const char* CSynapseClientTexTool::GetInfo(){
-	return "Texture Tools plugin built " __DATE__ " " RADIANT_VERSION;
+	static const auto info = StringStream( "Texture Tools plugin built ", RADIANT_BUILD_DATE, " ", RADIANT_VERSION );
+	return info.c_str();
 }

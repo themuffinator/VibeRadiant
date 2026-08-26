@@ -80,7 +80,7 @@
         "-here",
         "-${config:netradiant.msys2Subsystem}",
         "-c",
-        "if [ -d build-msys2-release ]; then meson setup build-msys2-release --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-release --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-release; else meson compile -C build-msys2-release -j ${config:netradiant.buildJobs}; fi && meson install -C build-msys2-release --no-rebuild --tags runtime"
+        "bash scripts/meson-incremental-build.sh --build-dir build-msys2-release --profile release --qt-major \"${config:netradiant.qtMajor}\" --jobs \"${config:netradiant.buildJobs}\" --prefix \"$PWD/install\" --msys2-root \"${config:netradiant.msys2Root}\" --subsystem \"${config:netradiant.msys2Subsystem}\" --install-runtime"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
@@ -104,7 +104,7 @@
         "-here",
         "-${config:netradiant.msys2Subsystem}",
         "-c",
-        "if [ -d build-msys2-debug ]; then meson setup build-msys2-debug --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-debug --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-debug; else meson compile -C build-msys2-debug -j ${config:netradiant.buildJobs}; fi && meson install -C build-msys2-debug --no-rebuild --tags runtime"
+        "bash scripts/meson-incremental-build.sh --build-dir build-msys2-debug --profile debug --qt-major \"${config:netradiant.qtMajor}\" --jobs \"${config:netradiant.buildJobs}\" --prefix \"$PWD/install\" --msys2-root \"${config:netradiant.msys2Root}\" --subsystem \"${config:netradiant.msys2Subsystem}\" --install-runtime"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
@@ -123,7 +123,7 @@
         "-here",
         "-${config:netradiant.msys2Subsystem}",
         "-c",
-        "if [ -d build-msys2-release ]; then meson setup build-msys2-release --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-release --prefix \"$PWD/install\" -Dbuild_profile=release -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-release; else meson compile -C build-msys2-release -j ${config:netradiant.buildJobs}; fi"
+        "bash scripts/meson-incremental-build.sh --build-dir build-msys2-release --profile release --qt-major \"${config:netradiant.qtMajor}\" --jobs \"${config:netradiant.buildJobs}\" --prefix \"$PWD/install\" --msys2-root \"${config:netradiant.msys2Root}\" --subsystem \"${config:netradiant.msys2Subsystem}\""
       ],
       "options": {
         "cwd": "${workspaceFolder}"
@@ -142,7 +142,7 @@
         "-here",
         "-${config:netradiant.msys2Subsystem}",
         "-c",
-        "if [ -d build-msys2-debug ]; then meson setup build-msys2-debug --reconfigure --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; else meson setup build-msys2-debug --prefix \"$PWD/install\" -Dbuild_profile=debug -Dinstall_data=true -Dinstall_dlls=true -Ddownload_gamepacks=no -Dgamepack_source=VibePack -Dqt_major=${config:netradiant.qtMajor} -Dcpp_std=c++20; fi && if [ \"${config:netradiant.buildJobs}\" = \"0\" ]; then meson compile -C build-msys2-debug; else meson compile -C build-msys2-debug -j ${config:netradiant.buildJobs}; fi"
+        "bash scripts/meson-incremental-build.sh --build-dir build-msys2-debug --profile debug --qt-major \"${config:netradiant.qtMajor}\" --jobs \"${config:netradiant.buildJobs}\" --prefix \"$PWD/install\" --msys2-root \"${config:netradiant.msys2Root}\" --subsystem \"${config:netradiant.msys2Subsystem}\""
       ],
       "options": {
         "cwd": "${workspaceFolder}"

@@ -28,6 +28,7 @@
 #include "version.h"
 
 #include "string/string.h"
+#include "stream/stringstream.h"
 #include "modulesystem/singletonmodule.h"
 
 #define PLUGIN_VERSION "0.4"
@@ -76,12 +77,14 @@ const char* getCommandTitleList(){
 void dispatch( const char* command, float* vMin, float* vMax, bool bSingleBrush ){
 	const char *message = nullptr;
 	if ( string_equal( command, "About" ) ) {
+		const auto about = StringStream(
+			"UFO:AI Plugin (<a href='http://ufoai.sf.net'>http://ufoai.sf.net</a>)"
+			"<br>Build: ", RADIANT_BUILD_DATE,
+			"<br>VibeRadiant version: ", RADIANT_VERSION,
+			"<br>Plugin version: " PLUGIN_VERSION
+			"<br>Author: Martin Gerhardy (tlh2000/mattn)<br>" );
 		GlobalRadiant().m_pfnMessageBox( g_mainwnd,
-		                                 "UFO:AI Plugin (<a href='http://ufoai.sf.net'>http://ufoai.sf.net</a>)"
-										 "<br>Build: " __DATE__
-										 "<br>VibeRadiant version: " RADIANT_VERSION
-										 "<br>Plugin version: " PLUGIN_VERSION
-										 "<br>Author: Martin Gerhardy (tlh2000/mattn)<br>",
+		                                 about.c_str(),
 										 "About", EMessageBoxType::Info, 0 );
 	}
 	else if ( string_equal( command, "Level 1" ) ) {

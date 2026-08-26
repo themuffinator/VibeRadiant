@@ -566,12 +566,12 @@ void DoAbout(){
 			}
 
 			{
-				auto *label = new QLabel( "VibeRadiant " RADIANT_VERSION "\n"
-				                         __DATE__ "\n\n"
-				                         RADIANT_ABOUTMSG "\n\n"
-				                         "This program is free software\n"
-				                         "licensed under the GNU GPL.\n"
-				                       );
+				const auto aboutText = StringStream(
+					"VibeRadiant ", RADIANT_VERSION, "\n", RADIANT_BUILD_DATE, "\n\n"
+					RADIANT_ABOUTMSG "\n\n"
+					"This program is free software\n"
+					"licensed under the GNU GPL.\n" );
+				auto *label = new QLabel( QString::fromUtf8( aboutText.c_str() ) );
 				hbox->addWidget( label );
 			}
 

@@ -201,9 +201,11 @@ bool CSynapseClientModel::RequestAPI( APIDescriptor_t *pAPI ){
 }
 
 #include "version.h"
+#include "stream/stringstream.h"
 
 const char* CSynapseClientModel::GetInfo(){
-	return "Sprite Model module built " __DATE__ " " RADIANT_VERSION;
+	static const auto info = StringStream( "Sprite Model module built ", RADIANT_BUILD_DATE, " ", RADIANT_VERSION );
+	return info.c_str();
 }
 
 const char* CSynapseClientModel::GetName(){

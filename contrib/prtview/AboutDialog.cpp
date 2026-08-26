@@ -20,17 +20,18 @@
 #include "AboutDialog.h"
 #include "qerplugin.h"
 #include "version.h"
+#include "stream/stringstream.h"
 
 #include "prtview.h"
 #include "ConfigDialog.h"
 
 void DoAboutDlg(){
-	constexpr char msg[] = "Version 1.000<br><br>"
-	                       "Gtk port by Leonardo Zide<br>"
-	                       "<a href='mailto:leo@lokigames.com'>leo@lokigames.com</a><br><br>"
-	                       "Written by Geoffrey DeWan<br>"
-	                       "<a href='mailto:gdewan@prairienet.org'>gdewan@prairienet.org</a><br><br>"
-	                       "Built against VibeRadiant " RADIANT_VERSION "<br>"
-	                       __DATE__;
-	GlobalRadiant().m_pfnMessageBox( g_pRadiantWnd, msg, "About Portal Viewer", EMessageBoxType::Info, 0 );
+	const auto msg = StringStream(
+		"Version 1.000<br><br>"
+		"Gtk port by Leonardo Zide<br>"
+		"<a href='mailto:leo@lokigames.com'>leo@lokigames.com</a><br><br>"
+		"Written by Geoffrey DeWan<br>"
+		"<a href='mailto:gdewan@prairienet.org'>gdewan@prairienet.org</a><br><br>"
+		"Built against VibeRadiant ", RADIANT_VERSION, "<br>", RADIANT_BUILD_DATE );
+	GlobalRadiant().m_pfnMessageBox( g_pRadiantWnd, msg.c_str(), "About Portal Viewer", EMessageBoxType::Info, 0 );
 }

@@ -15,6 +15,7 @@ sh = find_program('sh', required: true)
 cmake_prog = find_program('cmake', required: true)
 git_prog = find_program('git', required: false)
 python3 = import('python').find_installation()
+subdir('include')
 
 system_name = host_machine.system()
 windows = system_name == 'windows'
@@ -33,17 +34,7 @@ version_parts = version_number.split('.')
 radiant_major = version_parts.length() > 1 ? version_parts[1] : '0'
 radiant_minor = version_parts.length() > 2 ? version_parts[2] : '0'
 
-q3map_version = '2.5.17n'
-git_hash = ''
-if git_prog.found()
-  git_hash = run_command(git_prog, 'rev-parse', '--short', 'HEAD', check: false).stdout().strip()
-endif
-
-radiant_version = version_number
-if git_hash != ''
-  radiant_version += '-git-' + git_hash
-  q3map_version += '-git-' + git_hash
-endif
+q3map_version_base = '2.5.17n'
 
 radiant_exec_suffix = windows ? 'exe' : host_machine.cpu_family()
 
@@ -181,12 +172,12 @@ foreach sym : os_define_symbols
 endforeach
 
 version_define_args = [
+  '-DVIBERADIANT_USE_VCS_VERSION',
   '-DRADIANT_VERSION_NUMBER="' + version_number + '"',
-  '-DRADIANT_VERSION="' + radiant_version + '"',
   '-DRADIANT_MAJOR_VERSION="' + radiant_major + '"',
   '-DRADIANT_MINOR_VERSION="' + radiant_minor + '"',
   '-DRADIANT_ABOUTMSG="' + get_option('radiant_aboutmsg') + '"',
-  '-DQ3MAP_VERSION="' + q3map_version + '"',
+  '-DQ3MAP_VERSION_BASE="' + q3map_version_base + '"',
   '-DRADIANT_EXECUTABLE="' + radiant_exec_suffix + '"',
   '-DRADIANT_UPDATE_URL="' + get_option('radiant_update_url') + '"',
   '-DRADIANT_RELEASES_URL="' + get_option('radiant_releases_url') + '"',
@@ -1171,6 +1162,15 @@ libxmllib_lib = static_library(
   implicit_include_directories: false,
 )
 
+libversion_vcs_lib = static_library(
+  'version-vcs',
+  version_vcs_source,
+  include_directories: [inc_include],
+  pic: true,
+  install: false,
+  implicit_include_directories: false,
+)
+
 static_deps_h2data = [libl_net_lib]
 static_deps_modules_image = [libcrnlib_lib, libddslib_lib, libetclib_lib, libwebplib_lib]
 static_deps_modules_shaders = [libcommandlib_lib]
@@ -1178,9 +1178,9 @@ static_deps_modules_vfspk3 = [libfilematch_lib]
 static_deps_plugins_bobtoolz = [libcommandlib_lib, libmathlib_lib]
 static_deps_plugins_shaderplug = [libxmllib_lib]
 static_deps_q2map = [libl_net_lib]
-static_deps_q3map2 = [libcrnlib_lib, libddslib_lib, libetclib_lib, libfilematch_lib, libl_net_lib, libwebplib_lib]
+static_deps_q3map2 = [libversion_vcs_lib, libcrnlib_lib, libddslib_lib, libetclib_lib, libfilematch_lib, libl_net_lib, libwebplib_lib]
 static_deps_qdata3 = [libl_net_lib]
-static_deps_radiant = [libcommandlib_lib, libgtkutil_lib, libl_net_lib, libquickhull_lib, libxmllib_lib]
+static_deps_radiant = [libversion_vcs_lib, libcommandlib_lib, libgtkutil_lib, libl_net_lib, libquickhull_lib, libxmllib_lib]
 
 if assimp_internal_enabled
   assimp_internal_common_args = [
@@ -1461,6 +1461,7 @@ dll_plugins_prtview = shared_module(
   src_plugins_prtview,
   include_directories: [inc_libs, inc_include],
   dependencies: [glib_dep, qt_widgets_dep, qt_opengl_dep] + os_common_deps,
+  link_with: libversion_vcs_lib,
   name_prefix: '',
   install: true,
   install_dir: 'plugins',
@@ -1495,6 +1496,7 @@ dll_plugins_ufoaiplug = shared_module(
   src_plugins_ufoaiplug,
   include_directories: [inc_libs, inc_include],
   dependencies: [glib_dep, qt_widgets_dep, qt_opengl_dep] + os_common_deps,
+  link_with: libversion_vcs_lib,
   name_prefix: '',
   install: true,
   install_dir: 'plugins',
@@ -1518,6 +1520,7 @@ dll_plugins_bkgrnd2d = shared_module(
   src_plugins_bkgrnd2d,
   include_directories: [inc_libs, inc_include],
   dependencies: [glib_dep, qt_widgets_dep, qt_opengl_dep] + os_common_deps,
+  link_with: libversion_vcs_lib,
   name_prefix: '',
   build_by_default: false,
   install: false,
@@ -1771,7 +1774,7 @@ summary(
     'Install DLLs': get_option('install_dlls') ? 'yes' : 'no',
     'Download gamepacks': get_option('download_gamepacks'),
     'Gamepack source': get_option('gamepack_source'),
-    'Version': radiant_version,
+    'Version': version_number + ' (VCS suffix resolved at build time)',
   },
   section: 'VibeRadiant',
 )

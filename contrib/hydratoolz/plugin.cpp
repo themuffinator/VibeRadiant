@@ -21,6 +21,7 @@
 
 #include "plugin.h"
 #include "version.h"
+#include "stream/stringstream.h"
 
 /*! \file plugin.cpp
     \brief HydraToolz!
@@ -524,5 +525,6 @@ bool CSynapseClientHydraToolz::RequestAPI( APIDescriptor_t *pAPI ){
 }
 
 const char* CSynapseClientHydraToolz::GetInfo(){
-	return "HydraToolz plugin built " __DATE__ " " RADIANT_VERSION;
+	static const auto info = StringStream( "HydraToolz plugin built ", RADIANT_BUILD_DATE, " ", RADIANT_VERSION );
+	return info.c_str();
 }

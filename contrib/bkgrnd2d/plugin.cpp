@@ -292,9 +292,11 @@ bool CSynapseClientBkgrnd2d::RequestAPI( APIDescriptor_t *pAPI ){
 }
 
 #include "version.h"
+#include "stream/stringstream.h"
 
 const char* CSynapseClientBkgrnd2d::GetInfo(){
-	return "2d Background plugin built " __DATE__ " " RADIANT_VERSION;
+	static const auto info = StringStream( "2d Background plugin built ", RADIANT_BUILD_DATE, " ", RADIANT_VERSION );
+	return info.c_str();
 }
 
 const char* CSynapseClientBkgrnd2d::GetName(){

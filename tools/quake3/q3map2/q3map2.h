@@ -31,7 +31,9 @@
 
 
 /* version */
-#ifndef Q3MAP_VERSION
+#include "version.h"            /* ttimo: might want to guard that if built outside of the GtkRadiant tree */
+
+#if !defined( VIBERADIANT_USE_VCS_VERSION ) && !defined( Q3MAP_VERSION )
 #error no Q3MAP_VERSION defined
 #endif
 #define Q3MAP_MOTD      "Your map saw the pretty lights from q3map2's BFG"
@@ -47,8 +49,6 @@
 
 
 /* general */
-#include "version.h"            /* ttimo: might want to guard that if built outside of the GtkRadiant tree */
-
 #include "cmdlib.h"
 #include "qstringops.h"
 #include "qpathops.h"

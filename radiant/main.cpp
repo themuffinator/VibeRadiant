@@ -558,7 +558,7 @@ bool check_version(){
 	if ( !( check_version_file( majorVersionFile.c_str(), RADIANT_MAJOR_VERSION )
 	     && check_version_file( minorVersionFile.c_str(), RADIANT_MINOR_VERSION ) ) ) {
 		const auto msg = StringStream(
-			"This editor binary (" RADIANT_VERSION ") doesn't match what the latest setup has configured in this directory\n"
+			"This editor binary (", RADIANT_VERSION, ") doesn't match what the latest setup has configured in this directory\n"
 			"Make sure you run the right/latest editor binary you installed\n", AppPath_get() );
 		qt_MessageBox( 0, msg, "VibeRadiant" );
 		return false;

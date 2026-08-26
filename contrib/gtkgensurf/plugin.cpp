@@ -198,7 +198,9 @@ bool GenSurfSynapseClient::RequestAPI( APIDescriptor_t *pAPI ){
 }
 
 #include "version.h"
+#include "stream/stringstream.h"
 
 const char* GenSurfSynapseClient::GetInfo(){
-	return "GtkGenSurf - built " __DATE__ " " RADIANT_VERSION;
+	static const auto info = StringStream( "GtkGenSurf - built ", RADIANT_BUILD_DATE, " ", RADIANT_VERSION );
+	return info.c_str();
 }
