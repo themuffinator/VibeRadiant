@@ -1530,6 +1530,9 @@ QWidget* AssetBrowser_constructWindow( QWidget* toplevel ){
 		if ( index < 0 || tabs->widget( index ) == nullptr ) {
 			return;
 		}
+		if ( index != g_assetBrowserModelsTab ) {
+			ModelBrowser_pausePendingFilterApply();
+		}
 		if ( auto* surfaces = static_cast<AssetSurfacesPanel*>( g_assetBrowserSurfacesTab ) ) {
 			surfaces->cancelScheduledRebuild();
 		}

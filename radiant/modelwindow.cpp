@@ -74,6 +74,7 @@
 #include <QImage>
 #include <QMimeData>
 #include <QPixmap>
+#include <QTimer>
 
 #include "mainframe.h"
 #include "camwindow.h"
@@ -85,6 +86,7 @@
 #include "gtkmisc.h"
 
 namespace {
+	constexpr int kModelFilterApplyDelayMilliseconds = 150;
 	constexpr float kAssetBrowserHoverScale = 1.05f;
 	constexpr float kAssetBrowserHoverLerp = 0.2f;
 	constexpr float kAssetBrowserHoverEpsilon = 0.001f;
@@ -656,6 +658,8 @@ public:
 	QToolButton* m_globalFilterButton = nullptr;
 	QToolButton* m_usedFilterButton = nullptr;
 	QToolButton* m_clearFiltersButton = nullptr;
+	QTimer* m_filterApplyTimer = nullptr;
+	bool m_filterApplyPending = false;
 
 	int m_width;
 	int m_height;
@@ -1020,6 +1024,26 @@ void ModelBrowser_updateUsedFilterButtonLabel( std::size_t usedCount ){
 	}
 }
 
+void ModelBrowser_cancelPendingFilterApply(){
+	if ( g_ModelBrowser.m_filterApplyTimer != nullptr ) {
+		g_ModelBrowser.m_filterApplyTimer->stop();
+	}
+	g_ModelBrowser.m_filterApplyPending = false;
+}
+
+void ModelBrowser_pausePendingFilterApply(){
+	if ( g_ModelBrowser.m_filterApplyTimer != nullptr ) {
+		g_ModelBrowser.m_filterApplyTimer->stop();
+	}
+}
+
+void ModelBrowser_scheduleFilterApply(){
+	g_ModelBrowser.m_filterApplyPending = true;
+	if ( g_ModelBrowser.m_filterApplyTimer != nullptr ) {
+		g_ModelBrowser.m_filterApplyTimer->start( kModelFilterApplyDelayMilliseconds );
+	}
+}
+
 void ModelBrowser_rebuildVisibleModels();
 
 static QRect ModelBrowser_cellRectPixels( const ModelBrowser& browser, int index ){
@@ -1124,10 +1148,7 @@ public:
 };
 
 void ModelBrowser_rebuildVisibleModels(){
-	ModelGraph_clear();
-	g_ModelBrowser.m_visibleModelPaths.clear();
-	g_ModelBrowser.m_currentModelId = -1;
-	g_ModelBrowser.clearHover();
+	ModelBrowser_cancelPendingFilterApply();
 
 	std::vector<CopiedString> candidates;
 	if ( g_ModelBrowser.m_filterGlobal ) {
@@ -1145,18 +1166,30 @@ void ModelBrowser_rebuildVisibleModels(){
 		ModelBrowser_updateUsedFilterButtonLabel( usedModels.size() );
 	}
 	const char* filter = g_ModelBrowser.filter();
+	std::vector<CopiedString> visibleModelPaths;
+	visibleModelPaths.reserve( candidates.size() );
 
 	for ( const CopiedString& path : candidates ) {
 		const char* pathText = path.c_str();
-		const char* leaf = path_get_filename_start( pathText );
-		if ( !string_contains_nocase( pathText, filter ) && !string_contains_nocase( leaf, filter ) ) {
+		if ( !string_contains_nocase( pathText, filter ) ) {
 			continue;
 		}
 		if ( g_ModelBrowser.m_filterUsed && !usedModels.contains( pathText ) ) {
 			continue;
 		}
-		g_ModelBrowser.m_visibleModelPaths.push_back( path );
+		visibleModelPaths.push_back( path );
 	}
+
+	if ( visibleModelPaths == g_ModelBrowser.m_visibleModelPaths ) {
+		ModelBrowser_updateClearFiltersButton();
+		g_ModelBrowser.queueDraw();
+		return;
+	}
+
+	ModelGraph_clear();
+	g_ModelBrowser.m_visibleModelPaths = std::move( visibleModelPaths );
+	g_ModelBrowser.m_currentModelId = -1;
+	g_ModelBrowser.clearHover();
 
 	if ( scene::Traversable* traversable = Node_getTraversable( g_modelGraph->root() ) ) {
 		const char* status = g_ModelBrowser.m_filterGlobal ? "All Objects" : g_ModelBrowser.m_currentFolderPath.c_str();
@@ -1783,6 +1816,7 @@ void ModelPaths_addFromArchive( ModelPaths_ArchiveVisitor& visitor, const char *
 typedef ReferenceCaller<ModelPaths_ArchiveVisitor, void(const char*), ModelPaths_addFromArchive> ModelPaths_addFromArchiveCaller;
 
 void ModelBrowser_constructTree(){
+	ModelBrowser_cancelPendingFilterApply();
 	if ( g_ModelBrowser.m_treeView == nullptr ) {
 		return;
 	}
@@ -1855,6 +1889,9 @@ void ModelBrowser_EnsureTree(){
 	if ( !g_modelBrowserTreeConstructed ) {
 		ModelBrowser_constructTree();
 	}
+	else if ( g_ModelBrowser.m_filterApplyPending ) {
+		ModelBrowser_rebuildVisibleModels();
+	}
 }
 
 QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
@@ -1904,6 +1941,7 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		}>( menu_view ) );
 		toolbar_append_button( toolbar, "Find / Replace...", "texbro_find-replace.png", "FindReplaceObjects" );
 		toolbar_append_button( toolbar, "Flush / Reload Objects", "refresh_models.png", makeCallbackF( +[](){
+			ModelBrowser_cancelPendingFilterApply();
 			RefreshReferences();
 			ModelBrowser_constructTree();
 		} ) );
@@ -1947,8 +1985,14 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		entry->setText( g_ModelBrowser.filter() );
 		globalButton->setChecked( g_ModelBrowser.m_filterGlobal );
 		usedButton->setChecked( g_ModelBrowser.m_filterUsed );
+		auto* filterApplyTimer = g_ModelBrowser.m_filterApplyTimer = new QTimer( filterBar );
+		filterApplyTimer->setSingleShot( true );
+		QObject::connect( filterApplyTimer, &QTimer::timeout, [](){
+			ModelBrowser_rebuildVisibleModels();
+		} );
 
 		QObject::connect( clearButton, &QToolButton::clicked, [entry, globalButton, usedButton](){
+			ModelBrowser_cancelPendingFilterApply();
 			g_ModelBrowser.setFilter( "" );
 			g_ModelBrowser.m_filterGlobal = false;
 			g_ModelBrowser.m_filterUsed = false;
@@ -1965,7 +2009,8 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		} );
 		QObject::connect( entry, &QLineEdit::textChanged, []( const QString& text ){
 			g_ModelBrowser.setFilter( text.toLatin1().constData() );
-			ModelBrowser_rebuildVisibleModels();
+			ModelBrowser_updateClearFiltersButton();
+			ModelBrowser_scheduleFilterApply();
 		} );
 		QObject::connect( globalButton, &QToolButton::toggled, []( bool checked ){
 			g_ModelBrowser.m_filterGlobal = checked;
@@ -2028,7 +2073,18 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 }
 
 void ModelBrowser_destroyWindow(){
+	ModelBrowser_cancelPendingFilterApply();
+	g_ModelBrowser.m_parent = nullptr;
 	g_ModelBrowser.m_gl_widget = nullptr;
+	g_ModelBrowser.m_gl_scroll = nullptr;
+	g_ModelBrowser.m_treeView = nullptr;
+	g_ModelBrowser.m_filterEntry = nullptr;
+	g_ModelBrowser.m_globalFilterButton = nullptr;
+	g_ModelBrowser.m_usedFilterButton = nullptr;
+	g_ModelBrowser.m_clearFiltersButton = nullptr;
+	g_ModelBrowser.m_filterApplyTimer = nullptr;
+	g_ModelBrowser.m_currentFolder = nullptr;
+	g_ModelBrowser.m_currentFolderPath = "";
 	g_modelBrowserTreeConstructed = false;
 }
 
@@ -2104,11 +2160,13 @@ void ModelBrowser_Construct(){
 }
 
 void ModelBrowser_Destroy(){
+	ModelBrowser_cancelPendingFilterApply();
 	g_modelGraph->erase_root();
 	delete g_modelGraph;
 }
 
 void ModelBrowser_flushReferences(){
+	ModelBrowser_cancelPendingFilterApply();
 	ModelGraph_clear();
 	g_ModelBrowser.queueDraw();
 }
