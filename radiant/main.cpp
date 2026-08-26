@@ -1325,23 +1325,9 @@ int main( int argc, char* argv[] ){
 	startupGuard.markRadiantInitialised();
 	startupMetrics.mark( "Editor modules initialized" );
 
-	if ( !cliOptions.debugFastForward() ) {
-		set_splash_status( "Checking for updates from GitHub releases..." );
-		UpdateManager_CheckForUpdatesBlocking( UpdateCheckMode::Automatic, splash_window() );
-		startupMetrics.mark( "Startup update check completed" );
-
-		if ( UpdateManager_QuitRequested() ) {
-			startupGuard.removeLocalPid();
-			startupGuard.hideSplash();
-			startupMetrics.mark( "Startup aborted for updater quit" );
-			startupMetrics.flushToLog();
-			return EXIT_SUCCESS;
-		}
-	}
-	else
-	{
-		startupMetrics.mark( "Startup update check skipped by debug flag" );
-	}
+	startupMetrics.mark( cliOptions.debugFastForward()
+		? "Startup update check skipped by debug flag"
+		: "Startup update check deferred" );
 
 	const bool useModernStartup = cliOptions.debugFastForward()
 		|| ( StartupJourney_ModernEnabled() && !cliOptions.legacyFlow );
@@ -1445,14 +1431,13 @@ int main( int argc, char* argv[] ){
 	}
 	startupMetrics.mark( "Main window shown" );
 
-	if ( !cliOptions.debugFastForward() || showWelcomeScreen ) {
-		QTimer::singleShot( 0, [fastForward = cliOptions.debugFastForward(), showWelcomeScreen](){
-			if ( !fastForward ) {
-				Startup_PreMainWindowSetup();
-			}
+	if ( !cliOptions.debugFastForward() ) {
+		QTimer::singleShot( 0, [showWelcomeScreen](){
+			Startup_PreMainWindowSetup();
 			if ( showWelcomeScreen ) {
 				show_startup_welcome_dialog();
 			}
+			UpdateManager_MaybeAutoCheck();
 		} );
 	}
 

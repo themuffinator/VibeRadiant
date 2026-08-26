@@ -23,7 +23,6 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
-#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -43,9 +42,6 @@
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVersionNumber>
-
-#include <functional>
-#include <utility>
 
 #ifndef RADIANT_GITHUB_REPO
 #define RADIANT_GITHUB_REPO "themuffinator/VibeRadiant"
@@ -375,23 +371,7 @@ public:
 	}
 
 	void checkForUpdates( UpdateCheckMode mode ){
-		checkForUpdatesInternal( mode, nullptr, nullptr );
-	}
-
-	void checkForUpdatesBlocking( UpdateCheckMode mode, QWidget* parent_override ){
-		bool finished = false;
-		QEventLoop loop;
-		checkForUpdatesInternal( mode, parent_override, [&](){
-			finished = true;
-			loop.quit();
-		} );
-		if ( !finished ) {
-			loop.exec();
-		}
-	}
-
-	bool quitRequested() const {
-		return m_quit_requested;
+		checkForUpdatesInternal( mode );
 	}
 
 private:
@@ -406,11 +386,8 @@ private:
 	QString m_download_path;
 	QString m_download_dir;
 	bool m_constructed = false;
-	bool m_quit_requested = false;
 	bool m_tried_fallback_manifest = false;
 	QString m_release_notes_url;
-	QPointer<QWidget> m_parent_override;
-	std::function<void()> m_check_finished_callback;
 
 	void ensure_network(){
 		if ( !m_network ) {
@@ -419,7 +396,7 @@ private:
 	}
 
 	QWidget* parentWindow() const {
-		return m_parent_override ? m_parent_override.data() : MainFrame_getWindow();
+		return MainFrame_getWindow();
 	}
 
 	void finish_check(){
@@ -428,32 +405,25 @@ private:
 			m_check_dialog = nullptr;
 		}
 		m_check_in_progress = false;
-		auto callback = std::move( m_check_finished_callback );
-		if ( callback ) {
-			callback();
-		}
 	}
 
-	void checkForUpdatesInternal( UpdateCheckMode mode, QWidget* parent_override, std::function<void()> finished ){
+	void checkForUpdatesInternal( UpdateCheckMode mode ){
 		if ( m_check_in_progress || m_download_in_progress ) {
-			if ( finished ) {
-				finished();
+			if ( mode == UpdateCheckMode::Manual && m_mode == UpdateCheckMode::Automatic
+			     && m_check_in_progress && !m_download_in_progress ) {
+				cancel_reply();
 			}
-			return;
+			else{
+				return;
+			}
 		}
 		if ( mode == UpdateCheckMode::Automatic && !g_update_auto_check ) {
-			if ( finished ) {
-				finished();
-			}
 			return;
 		}
 
 		const qint64 now = QDateTime::currentSecsSinceEpoch();
 		if ( mode == UpdateCheckMode::Automatic && g_update_last_check > 0 &&
 		     now - g_update_last_check < k_update_check_interval_seconds ) {
-			if ( finished ) {
-				finished();
-			}
 			return;
 		}
 
@@ -461,11 +431,8 @@ private:
 
 		g_update_last_check = static_cast<int>( now );
 		m_mode = mode;
-		m_parent_override = parent_override;
-		m_check_finished_callback = std::move( finished );
 		m_release_notes_url.clear();
 		m_tried_fallback_manifest = false;
-		m_quit_requested = false;
 		m_check_in_progress = true;
 
 		if ( m_mode == UpdateCheckMode::Manual ) {
@@ -868,7 +835,6 @@ private:
 			return false;
 		}
 
-		m_quit_requested = true;
 		QCoreApplication::quit();
 		return true;
 	}
@@ -916,7 +882,6 @@ private:
 			return false;
 		}
 
-		m_quit_requested = true;
 		QCoreApplication::quit();
 		return true;
 	}
@@ -986,7 +951,6 @@ private:
 			return false;
 		}
 
-		m_quit_requested = true;
 		QCoreApplication::quit();
 		return true;
 	}
@@ -1011,17 +975,17 @@ private:
 
 	void cancel_reply(){
 		if ( m_reply ) {
-			m_reply->abort();
-			m_reply->deleteLater();
+			QNetworkReply *reply = m_reply;
 			m_reply = nullptr;
+			QObject::disconnect( reply, nullptr, this, nullptr );
+			reply->abort();
+			reply->deleteLater();
 		}
 		if ( m_download_file.isOpen() ) {
 			m_download_file.close();
 		}
 		m_check_in_progress = false;
 		m_download_in_progress = false;
-		m_parent_override = nullptr;
-		m_check_finished_callback = nullptr;
 	}
 };
 
@@ -1050,14 +1014,4 @@ void UpdateManager_CheckForUpdates( UpdateCheckMode mode ){
 	if ( g_update_manager ) {
 		g_update_manager->checkForUpdates( mode );
 	}
-}
-
-void UpdateManager_CheckForUpdatesBlocking( UpdateCheckMode mode, QWidget* parent_override ){
-	if ( g_update_manager ) {
-		g_update_manager->checkForUpdatesBlocking( mode, parent_override );
-	}
-}
-
-bool UpdateManager_QuitRequested(){
-	return g_update_manager && g_update_manager->quitRequested();
 }
