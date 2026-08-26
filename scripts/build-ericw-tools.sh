@@ -173,7 +173,6 @@ cp -f "$SOURCE_DIR/THIRD_PARTY_NOTICES.md" "$DEST_DIR/THIRD_PARTY_NOTICES.md"
 cp -f "$SOURCE_DIR/VIBERADIANT_VENDOR.md" "$DEST_DIR/VIBERADIANT_VENDOR.md"
 cp -f "$SOURCE_DIR/extern/fmt/LICENSE" "$DEST_DIR/LICENSE-fmt.txt"
 cp -f "$SOURCE_DIR/extern/jsoncpp/LICENSE" "$DEST_DIR/LICENSE-jsoncpp.txt"
-cp -f "$SOURCE_DIR/extern/nanobench/LICENSE" "$DEST_DIR/LICENSE-nanobench.txt"
 cp -f "$SOURCE_DIR/extern/pareto/LICENSE" "$DEST_DIR/LICENSE-pareto.txt"
 
 if [ -n "$OUTPUT_EXE_SUFFIX" ] && [ -z "$SOURCE_EXE_SUFFIX" ]; then

@@ -8,7 +8,6 @@ staged `ericw` directory under the names shown here.
 | --- | --- | --- | --- |
 | [{fmt}](https://github.com/fmtlib/fmt) | Copyright Victor Zverovich and contributors; MIT | `extern/fmt/LICENSE` | `LICENSE-fmt.txt` |
 | [JsonCpp](https://github.com/open-source-parsers/jsoncpp) | Copyright Baptiste Lepilleur and the JsonCpp Authors; public domain/MIT | `extern/jsoncpp/LICENSE` | `LICENSE-jsoncpp.txt` |
-| [ankerl::nanobench](https://github.com/martinus/nanobench) | Copyright Martin Leitner-Ankerl; MIT | `extern/nanobench/LICENSE` | `LICENSE-nanobench.txt` |
 | [pareto](https://github.com/alandefreitas/pareto) | Copyright Alan de Freitas; MIT | `extern/pareto/LICENSE` | `LICENSE-pareto.txt` |
 
 `extern/stb_image.h` and `extern/stb_image_write.h`, by Sean Barrett and other

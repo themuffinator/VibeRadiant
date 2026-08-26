@@ -6,7 +6,6 @@ vmt_resolve_version("${CMAKE_CURRENT_SOURCE_DIR}")
 project (VibeyMapTools VERSION ${VIBEY_VERSION_NUMERIC})
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
-list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/extern/Catch2/extras")
 
 message(STATUS "VibeyMapTools version: ${VIBEY_VERSION_FULL}")
 if(VIBEY_VERSION_GIT)
@@ -152,10 +151,18 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15)
 find_package(TBB REQUIRED)
 find_package(embree 4 REQUIRED)
 
-set(TEST_QUAKE_MAP_EXPORT_DIR "" CACHE PATH "When running unit tests, export Quake maps to this directory (useful for testing in game)")
-set(TEST_QUAKE2_MAP_EXPORT_DIR "" CACHE PATH "When running unit tests, export Quake 2 maps to this directory (useful for testing in game)")
-set(TEST_HEXEN2_MAP_EXPORT_DIR "" CACHE PATH "When running unit tests, export Hexen 2 maps to this directory (useful for testing in game)")
-set(TEST_HALFLIFE_MAP_EXPORT_DIR "" CACHE PATH "When running unit tests, export Half-Life maps to this directory (useful for testing in game)")
+# This vendored production subset does not include the upstream test and
+# documentation trees. Keep optional tools disabled unless explicitly enabled.
+option(DISABLE_TESTS "Disables Tests" ON)
+option(DISABLE_DOCS "Disables Docs" ON)
+option(ENABLE_HUB "Enable vmt-hub tool" OFF)
+
+if(NOT DISABLE_TESTS)
+	message(FATAL_ERROR "This VibeRadiant vendor subset does not include the VibeyMapTools test sources; configure with DISABLE_TESTS=ON")
+endif()
+if(NOT DISABLE_DOCS)
+	message(FATAL_ERROR "This VibeRadiant vendor subset does not include the VibeyMapTools documentation sources; configure with DISABLE_DOCS=ON")
+endif()
 
 add_subdirectory(extern)
 add_subdirectory(src/common)
@@ -166,25 +173,8 @@ add_subdirectory(src/qbsp)
 add_subdirectory(src/vis)
 add_subdirectory(src/maputil)
 
-option(DISABLE_TESTS "Disables Tests" OFF)
-option(DISABLE_DOCS "Disables Docs" OFF)
-option(ENABLE_HUB "Enable vmt-hub tool" ON)
-
 if (ENABLE_HUB)
 	add_subdirectory(src/hub)
-endif ()
-
-if(NOT DISABLE_TESTS)
-	enable_testing()
-	# just creates testmaps.hh with absolute path to the testmaps source directory.
-	# include it as #include <testmaps.hh>
-	configure_file(tests/testmaps.hh.in testmaps.hh @ONLY)
-	include_directories(${CMAKE_CURRENT_BINARY_DIR})
-	add_subdirectory(tests)
-endif ()
-
-if(NOT DISABLE_DOCS)
-	add_subdirectory(docs)
 endif ()
 
 install(FILES README.md DESTINATION .)

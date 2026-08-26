@@ -12,8 +12,15 @@ separate command-line programs for VibeRadiant.
 
 The uncommitted upstream `src/buildgui` experiment is deliberately excluded:
 it was ignored by the upstream repository and therefore has no provenance in
-the recorded snapshot. The optional `vmt-hub`, tests, documentation sources,
-and release-only assets are also excluded from VibeRadiant's normal tool build.
+the recorded snapshot. The optional `vmt-hub` remains available but is disabled
+by default. Upstream tests, documentation sources, and release-only assets are
+not bundled; attempts to enable the absent test or documentation trees stop at
+configure time with a clear diagnostic.
+
+The bundled dependencies are production-source subsets. The {fmt}
+documentation and tests; JsonCpp documentation, tests, examples, and test
+runners; and pareto documentation, tests, examples, and Python bindings are
+excluded. Nanobench is omitted entirely because no production target links it.
 
 ## Bundled dependencies
 
@@ -21,7 +28,6 @@ and release-only assets are also excluded from VibeRadiant's normal tool build.
 | --- | --- | --- |
 | [{fmt}](https://github.com/fmtlib/fmt) | 10.2.1, [`e69e5f977d458f2650bb346dadf2ad30c5320281`](https://github.com/fmtlib/fmt/commit/e69e5f977d458f2650bb346dadf2ad30c5320281) | MIT |
 | [JsonCpp](https://github.com/open-source-parsers/jsoncpp) | 1.9.7, [`b511d9e64956db998b74909df112ac8c8f41d6ff`](https://github.com/open-source-parsers/jsoncpp/commit/b511d9e64956db998b74909df112ac8c8f41d6ff) | Public domain/MIT |
-| [ankerl::nanobench](https://github.com/martinus/nanobench) | 4.3.11, [`e4327893194f06928012eb81cabc606c4e4791ac`](https://github.com/martinus/nanobench/commit/e4327893194f06928012eb81cabc606c4e4791ac) | MIT |
 | [pareto](https://github.com/alandefreitas/pareto) | 1.2.0, [`47f491eeaead1b5a95e27ee3d6bc4c591b0e4462`](https://github.com/alandefreitas/pareto/commit/47f491eeaead1b5a95e27ee3d6bc4c591b0e4462) | MIT |
 | [stb_image / stb_image_write](https://github.com/nothings/stb) | v2.28 / v1.16; files are byte-identical to the recorded VibeyMapTools snapshot | Public domain or MIT |
 
