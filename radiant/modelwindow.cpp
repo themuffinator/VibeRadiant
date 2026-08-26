@@ -58,6 +58,7 @@
 #include <QCursor>
 #include <QToolBar>
 #include <QLineEdit>
+#include <QSignalBlocker>
 #include <QMenu>
 #include <QToolButton>
 #include <QHBoxLayout>
@@ -1947,18 +1948,19 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 		globalButton->setChecked( g_ModelBrowser.m_filterGlobal );
 		usedButton->setChecked( g_ModelBrowser.m_filterUsed );
 
-		QObject::connect( clearButton, &QToolButton::clicked, [](){
-			if ( g_ModelBrowser.m_filterEntry != nullptr ) {
-				g_ModelBrowser.m_filterEntry->clear();
-			}
+		QObject::connect( clearButton, &QToolButton::clicked, [entry, globalButton, usedButton](){
+			g_ModelBrowser.setFilter( "" );
 			g_ModelBrowser.m_filterGlobal = false;
 			g_ModelBrowser.m_filterUsed = false;
-			if ( g_ModelBrowser.m_globalFilterButton != nullptr ) {
-				g_ModelBrowser.m_globalFilterButton->setChecked( false );
+			{
+				const QSignalBlocker entryBlocker( entry );
+				const QSignalBlocker globalBlocker( globalButton );
+				const QSignalBlocker usedBlocker( usedButton );
+				entry->clear();
+				globalButton->setChecked( false );
+				usedButton->setChecked( false );
 			}
-			if ( g_ModelBrowser.m_usedFilterButton != nullptr ) {
-				g_ModelBrowser.m_usedFilterButton->setChecked( false );
-			}
+			ModelBrowser_updateClearFiltersButton();
 			ModelBrowser_rebuildVisibleModels();
 		} );
 		QObject::connect( entry, &QLineEdit::textChanged, []( const QString& text ){

@@ -20,6 +20,7 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStyle>
@@ -1066,13 +1067,20 @@ public:
 			rebuild();
 		} );
 		QObject::connect( m_clearButton, &QToolButton::clicked, this, [this](){
+			m_filterRebuildTimer->stop();
 			m_filter = "";
 			m_filterGlobal = false;
 			m_filterUsed = false;
-			m_filterEntry->setText( "" );
-			m_globalButton->setChecked( false );
-			m_usedButton->setChecked( false );
+			{
+				const QSignalBlocker filterBlocker( m_filterEntry );
+				const QSignalBlocker globalBlocker( m_globalButton );
+				const QSignalBlocker usedBlocker( m_usedButton );
+				m_filterEntry->clear();
+				m_globalButton->setChecked( false );
+				m_usedButton->setChecked( false );
+			}
 			persistState();
+			updateClearButton();
 			rebuild();
 		} );
 		QObject::connect( m_tree, &QTreeWidget::itemActivated, this, []( QTreeWidgetItem* item, int column ){
@@ -1253,13 +1261,20 @@ public:
 			rebuild();
 		} );
 		QObject::connect( m_clearButton, &QToolButton::clicked, this, [this](){
+			m_filterRebuildTimer->stop();
 			m_filter = "";
 			m_filterGlobal = false;
 			m_filterUsed = false;
-			m_filterEntry->setText( "" );
-			m_globalButton->setChecked( false );
-			m_usedButton->setChecked( false );
+			{
+				const QSignalBlocker filterBlocker( m_filterEntry );
+				const QSignalBlocker globalBlocker( m_globalButton );
+				const QSignalBlocker usedBlocker( m_usedButton );
+				m_filterEntry->clear();
+				m_globalButton->setChecked( false );
+				m_usedButton->setChecked( false );
+			}
 			persistState();
+			updateClearButton();
 			rebuild();
 		} );
 
@@ -1411,13 +1426,20 @@ public:
 			rebuild();
 		} );
 		QObject::connect( m_clearButton, &QToolButton::clicked, this, [this](){
+			m_filterRebuildTimer->stop();
 			m_filter = "";
 			m_filterGlobal = false;
 			m_filterUsed = false;
-			m_filterEntry->setText( "" );
-			m_globalButton->setChecked( false );
-			m_usedButton->setChecked( false );
+			{
+				const QSignalBlocker filterBlocker( m_filterEntry );
+				const QSignalBlocker globalBlocker( m_globalButton );
+				const QSignalBlocker usedBlocker( m_usedButton );
+				m_filterEntry->clear();
+				m_globalButton->setChecked( false );
+				m_usedButton->setChecked( false );
+			}
 			persistState();
+			updateClearButton();
 			rebuild();
 		} );
 
