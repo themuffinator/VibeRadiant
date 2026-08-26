@@ -14,17 +14,27 @@ SOURCE_DIR="$REPO_ROOT/tools/quake2/ericw-tools"
 BUILD_DIR="$REPO_ROOT/build-ericw-tools"
 DEST_DIR=
 BUILD_TYPE=Release
+GENERATOR=${CMAKE_GENERATOR:-}
+CMAKE_TOOL=cmake
 EXECUTABLE_SUFFIX=auto
 STAMP_FILE=
+DEPFILE=
+DEPFILE_HELPER="$SCRIPT_DIR/emit-ericw-depfile.py"
+PYTHON_COMMAND=python3
 
 usage() {
 	echo "Usage: $0 [--mode build|install|stage] [--source <dir>] [--build-dir <dir>] [--dest <dir>] [--build-type <type>]"
 	echo "  --mode build    Configure/build vmt-bsp, vmt-light, vmt-vis"
 	echo "  --mode install  Build and copy tools into <dest> as qbsp/light/vis (default)"
 	echo "  --mode stage    Copy an existing build without rebuilding"
-	echo "  --dest          Required when --mode install"
+	echo "  --dest          Required when --mode install or --mode stage"
+	echo "  --generator     CMake generator (defaults to CMAKE_GENERATOR or CMake's default)"
+	echo "  --cmake         CMake executable (default: cmake from PATH)"
 	echo "  --executable-suffix  Installed suffix without a leading dot (default: auto)"
 	echo "  --stamp         Write a success stamp after --mode build"
+	echo "  --depfile       Write nested build dependencies for an outer build system"
+	echo "  --depfile-helper  Dependency scanner (default: scripts/emit-ericw-depfile.py)"
+	echo "  --python        Python interpreter used by the dependency scanner"
 }
 
 while [ $# -gt 0 ]; do
@@ -49,12 +59,32 @@ while [ $# -gt 0 ]; do
 			BUILD_TYPE="$2"
 			shift 2
 			;;
+		--generator)
+			GENERATOR="$2"
+			shift 2
+			;;
+		--cmake)
+			CMAKE_TOOL="$2"
+			shift 2
+			;;
 		--executable-suffix)
 			EXECUTABLE_SUFFIX="$2"
 			shift 2
 			;;
 		--stamp)
 			STAMP_FILE="$2"
+			shift 2
+			;;
+		--depfile)
+			DEPFILE="$2"
+			shift 2
+			;;
+		--depfile-helper)
+			DEPFILE_HELPER="$2"
+			shift 2
+			;;
+		--python)
+			PYTHON_COMMAND="$2"
 			shift 2
 			;;
 		-h|--help)
@@ -80,43 +110,156 @@ if [ ! -f "$SOURCE_DIR/CMakeLists.txt" ]; then
 	exit 1
 fi
 
+SOURCE_DIR=$(CDPATH= cd -- "$SOURCE_DIR" && pwd)
+mkdir -p "$BUILD_DIR"
+BUILD_DIR=$(CDPATH= cd -- "$BUILD_DIR" && pwd)
+
 if { [ "$MODE" = "install" ] || [ "$MODE" = "stage" ]; } && [ -z "$DEST_DIR" ]; then
-	echo "--dest is required for --mode install"
+	echo "--dest is required for --mode install or --mode stage"
 	usage
 	exit 1
 fi
 
+if [ -n "$DEPFILE" ] && [ ! -f "$DEPFILE_HELPER" ]; then
+	echo "ericw-tools depfile helper not found: $DEPFILE_HELPER"
+	exit 1
+fi
+if [ -n "$DEPFILE" ] && [ -z "$STAMP_FILE" ]; then
+	echo "--depfile requires --stamp so the dependency rule has an output"
+	exit 1
+fi
+
+CONFIGURE_GENERATOR=$GENERATOR
+if [ -n "$GENERATOR" ] && [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
+	CACHED_GENERATOR=$(sed -n 's/^CMAKE_GENERATOR:[^=]*=//p' "$BUILD_DIR/CMakeCache.txt" | sed -n '1p')
+	if [ -n "$CACHED_GENERATOR" ] && [ "$CACHED_GENERATOR" != "$GENERATOR" ]; then
+		# Preserve pre-existing build trees rather than asking CMake to switch a
+		# generator in place. Fresh Meson build trees still use Ninja explicitly.
+		CONFIGURE_GENERATOR=
+	fi
+fi
+
+cmake_cache_value() {
+	cache_key=$1
+	sed -n "s/^${cache_key}:[^=]*=//p" "$BUILD_DIR/CMakeCache.txt" | sed -n '1p'
+}
+
+tool_version_line() {
+	tool_path=$1
+	if [ -n "$tool_path" ] && [ -x "$tool_path" ]; then
+		"$tool_path" --version 2>/dev/null | sed -n '1p'
+	fi
+}
+
+build_config_signature() {
+	config_generator=$(cmake_cache_value CMAKE_GENERATOR)
+	config_cmake=$(cmake_cache_value CMAKE_COMMAND)
+	config_c_compiler=$(cmake_cache_value CMAKE_C_COMPILER)
+	config_cxx_compiler=$(cmake_cache_value CMAKE_CXX_COMPILER)
+	config_make_program=$(cmake_cache_value CMAKE_MAKE_PROGRAM)
+	printf '%s\n' \
+		"source=$SOURCE_DIR" \
+		"build_type=$BUILD_TYPE" \
+		"disable_tests=ON" \
+		"disable_docs=ON" \
+		"enable_hub=NO" \
+		"msystem=${MSYSTEM:-}" \
+		"requested_generator=$GENERATOR" \
+		"requested_cmake=$CMAKE_TOOL" \
+		"requested_cmake_version=$(tool_version_line "$CMAKE_TOOL")" \
+		"generator=$config_generator" \
+		"cmake=$config_cmake" \
+		"cmake_version=$(tool_version_line "$config_cmake")" \
+		"c_compiler=$config_c_compiler" \
+		"c_compiler_version=$(tool_version_line "$config_c_compiler")" \
+		"cxx_compiler=$config_cxx_compiler" \
+		"cxx_compiler_version=$(tool_version_line "$config_cxx_compiler")" \
+		"make_program=$config_make_program" \
+		"make_program_version=$(tool_version_line "$config_make_program")"
+}
+
+write_text_atomic() {
+	atomic_destination=$1
+	atomic_contents=$2
+	case "$atomic_destination" in
+		*/*) mkdir -p "${atomic_destination%/*}" ;;
+	esac
+	atomic_temporary=$(mktemp "${atomic_destination}.tmp.XXXXXX")
+	trap 'rm -f -- "$atomic_temporary"' 0
+	trap 'rm -f -- "$atomic_temporary"; exit 1' HUP INT TERM
+	printf '%s\n' "$atomic_contents" > "$atomic_temporary"
+	mv -f -- "$atomic_temporary" "$atomic_destination"
+	atomic_temporary=
+	trap - 0 HUP INT TERM
+}
+
+generator_build_file_exists() {
+	case "$(cmake_cache_value CMAKE_GENERATOR)" in
+		Ninja*) [ -f "$BUILD_DIR/build.ninja" ] ;;
+		*Makefiles*) [ -f "$BUILD_DIR/Makefile" ] ;;
+		*) return 0 ;;
+	esac
+}
+
 if [ "$MODE" != "stage" ]; then
-	mkdir -p "$BUILD_DIR"
 	CONFIG_STAMP="$BUILD_DIR/.viberadiant-ericw-config"
-	CONFIG_SIGNATURE="source=$SOURCE_DIR
-build_type=$BUILD_TYPE"
 
 	CONFIGURE_BUILD=1
-	if [ -f "$BUILD_DIR/CMakeCache.txt" ] && [ -f "$CONFIG_STAMP" ] &&
-		[ "$(cat "$CONFIG_STAMP")" = "$CONFIG_SIGNATURE" ]; then
-		CONFIGURE_BUILD=0
+	if [ -f "$BUILD_DIR/CMakeCache.txt" ] && [ -f "$CONFIG_STAMP" ] && generator_build_file_exists; then
+		CONFIG_SIGNATURE=$(build_config_signature)
+		if [ "$(cat "$CONFIG_STAMP")" = "$CONFIG_SIGNATURE" ]; then
+			CONFIGURE_BUILD=0
+		fi
 	fi
 
 	if [ "$CONFIGURE_BUILD" -eq 1 ]; then
-		cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" \
-			-DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-			-DDISABLE_TESTS=ON \
-			-DDISABLE_DOCS=ON \
-			-DENABLE_HUB=NO
-		printf '%s\n' "$CONFIG_SIGNATURE" > "$CONFIG_STAMP"
+		if [ -n "$CONFIGURE_GENERATOR" ]; then
+			"$CMAKE_TOOL" -S "$SOURCE_DIR" -B "$BUILD_DIR" -G "$CONFIGURE_GENERATOR" \
+				-DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+				-DDISABLE_TESTS=ON \
+				-DDISABLE_DOCS=ON \
+				-DENABLE_HUB=NO
+		else
+			if [ -n "$GENERATOR" ] && [ -n "${CACHED_GENERATOR:-}" ] && [ "$CACHED_GENERATOR" != "$GENERATOR" ]; then
+				echo "Keeping existing CMake generator '$CACHED_GENERATOR' (requested '$GENERATOR')."
+			fi
+			"$CMAKE_TOOL" -S "$SOURCE_DIR" -B "$BUILD_DIR" \
+				-DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+				-DDISABLE_TESTS=ON \
+				-DDISABLE_DOCS=ON \
+				-DENABLE_HUB=NO
+		fi
+		CONFIG_SIGNATURE=$(build_config_signature)
+		write_text_atomic "$CONFIG_STAMP" "$CONFIG_SIGNATURE"
 	fi
 
-	# CMake's generated build graph performs its own source dependency and
-	# reconfigure checks. This makes an always-stale outer Meson target cheap
-	# while still rebuilding when any vendored source changes.
-	cmake --build "$BUILD_DIR" --target vmt-bsp vmt-light vmt-vis
+	# CMake's generated graph resolves the exact nested rebuild work. The outer
+	# depfile keeps Meson dormant until an input, build tool, or output changes.
+	"$CMAKE_TOOL" --build "$BUILD_DIR" --target vmt-bsp vmt-light vmt-vis
+
+	BUILT_EXE_SUFFIX=
+	if [ -f "$BUILD_DIR/src/qbsp/vmt-bsp.exe" ]; then
+		BUILT_EXE_SUFFIX=.exe
+	elif [ ! -f "$BUILD_DIR/src/qbsp/vmt-bsp" ]; then
+		echo "Missing built binary: $BUILD_DIR/src/qbsp/vmt-bsp"
+		exit 1
+	fi
+
+	if [ -n "$DEPFILE" ]; then
+		"$PYTHON_COMMAND" "$DEPFILE_HELPER" \
+			--source-dir "$SOURCE_DIR" \
+			--build-dir "$BUILD_DIR" \
+			--depfile "$DEPFILE" \
+			--target "$STAMP_FILE" \
+			--explicit "$SCRIPT_PATH" \
+			--explicit "$DEPFILE_HELPER" \
+			--output "src/qbsp/vmt-bsp$BUILT_EXE_SUFFIX" \
+			--output "src/light/vmt-light$BUILT_EXE_SUFFIX" \
+			--output "src/vis/vmt-vis$BUILT_EXE_SUFFIX"
+	fi
 
 	if [ -n "$STAMP_FILE" ]; then
-		case "$STAMP_FILE" in
-			*/*) mkdir -p "${STAMP_FILE%/*}" ;;
-		esac
-		printf 'built\n' > "$STAMP_FILE"
+		write_text_atomic "$STAMP_FILE" "built"
 	fi
 
 	if [ "$MODE" = "build" ]; then

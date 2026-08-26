@@ -12,7 +12,9 @@ project(
 cc = meson.get_compiler('c')
 cpp = meson.get_compiler('cpp')
 sh = find_program('sh', required: true)
+cmake_prog = find_program('cmake', required: true)
 git_prog = find_program('git', required: false)
+python3 = import('python').find_installation()
 
 system_name = host_machine.system()
 windows = system_name == 'windows'
@@ -1237,6 +1239,8 @@ endif
 ericw_tools_source_dir = meson.project_source_root() / 'tools/quake2/ericw-tools'
 ericw_tools_build_dir = meson.current_build_dir() / 'ericw-tools'
 ericw_tools_script = meson.project_source_root() / 'scripts/build-ericw-tools.sh'
+ericw_tools_script_file = files('scripts/build-ericw-tools.sh')[0]
+ericw_tools_depfile_helper = files('scripts/emit-ericw-depfile.py')[0]
 ericw_tools_build_type = 'Release'
 if build_profile == 'debug'
   ericw_tools_build_type = 'Debug'
@@ -1249,20 +1253,32 @@ if windows
   radiant_link_args += ['-mwindows']
 endif
 
+ericw_tools_generator_args = []
+if meson.backend() == 'ninja'
+  ericw_tools_generator_args = ['--generator', 'Ninja']
+endif
+
 ericw_tools_build_stamp = custom_target(
   'ericw-tools-build',
   output: 'ericw-tools-build.stamp',
+  depfile: 'ericw-tools-build.d',
   command: [
     sh,
-    ericw_tools_script,
+    ericw_tools_script_file,
     '--mode', 'build',
     '--source', ericw_tools_source_dir,
     '--build-dir', ericw_tools_build_dir,
     '--build-type', ericw_tools_build_type,
+  ] + ericw_tools_generator_args + [
+    '--cmake', cmake_prog,
     '--stamp', '@OUTPUT@',
+    '--depfile', '@DEPFILE@',
+    '--depfile-helper', ericw_tools_depfile_helper,
+    '--python', python3,
   ],
+  depend_files: [ericw_tools_script_file, ericw_tools_depfile_helper],
   build_by_default: true,
-  build_always_stale: true,
+  build_always_stale: meson.backend() != 'ninja',
 )
 
 dll_modules_archivezip = shared_module(
