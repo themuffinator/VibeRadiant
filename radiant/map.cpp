@@ -396,9 +396,11 @@ void Map_Free(){
 
 	Pointfile_Clear();
 
-	g_map.m_resource->detach( g_map );
-	GlobalReferenceCache().release( g_map.m_name.c_str() );
-	g_map.m_resource = 0;
+	if ( g_map.m_resource != nullptr ) {
+		g_map.m_resource->detach( g_map );
+		GlobalReferenceCache().release( g_map.m_name.c_str() );
+		g_map.m_resource = nullptr;
+	}
 
 	ModelBrowser_flushReferences();
 	EntityBrowser_flushReferences();

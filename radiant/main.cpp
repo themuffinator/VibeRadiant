@@ -1447,11 +1447,10 @@ int main( int argc, char* argv[] ){
 
 	QApplication::exec();
 
-	Map_Free();
-
-	if ( !Map_Unnamed( g_map ) ) {
+	if ( Map_Valid( g_map ) && !Map_Unnamed( g_map ) ) {
 		g_strLastMap = Map_Name( g_map );
 	}
+	Map_Free();
 
 //	user_shortcuts_save();
 
