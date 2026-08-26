@@ -33,6 +33,7 @@ void ModelBrowser_cancelPendingFilterApply();
 void ModelBrowser_pausePendingFilterApply();
 
 void ModelBrowser_flushReferences();
+void ModelBrowser_mapReady();
 
 #include "math/vectorfwd.h"
 

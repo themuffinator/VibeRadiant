@@ -25,6 +25,7 @@
 #include <deque>
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include "ifiletypes.h"
 #include "ifilesystem.h"
 #include "iarchive.h"
@@ -74,6 +75,7 @@
 #include <QImage>
 #include <QMimeData>
 #include <QPixmap>
+#include <QShowEvent>
 #include <QTimer>
 
 #include "mainframe.h"
@@ -92,6 +94,18 @@ namespace {
 	constexpr float kAssetBrowserHoverEpsilon = 0.001f;
 	constexpr float kAssetBrowserHoverRotateDegrees = 12.0f;
 	constexpr float kAssetBrowserHoverSpinDegreesPerSecond = 90.0f;
+
+	class ScopedModelPreviewRebuild
+	{
+		bool& m_inProgress;
+	public:
+		explicit ScopedModelPreviewRebuild( bool& inProgress ) : m_inProgress( inProgress ) {
+			m_inProgress = true;
+		}
+		~ScopedModelPreviewRebuild(){
+			m_inProgress = false;
+		}
+	};
 
 int AssetBrowser_fontPixelHeight(){
 	return OpenGLFont_getPixelHeightSafe();
@@ -660,6 +674,9 @@ public:
 	QToolButton* m_clearFiltersButton = nullptr;
 	QTimer* m_filterApplyTimer = nullptr;
 	bool m_filterApplyPending = false;
+	bool m_previewsDirty = false;
+	bool m_previewRefreshReady = true;
+	bool m_previewRebuildInProgress = false;
 
 	int m_width;
 	int m_height;
@@ -1148,6 +1165,15 @@ public:
 };
 
 void ModelBrowser_rebuildVisibleModels(){
+	if ( !g_ModelBrowser.m_previewRefreshReady ) {
+		return;
+	}
+	if ( g_ModelBrowser.m_previewRebuildInProgress ) {
+		ModelBrowser_scheduleFilterApply();
+		return;
+	}
+	const bool forceReload = std::exchange( g_ModelBrowser.m_previewsDirty, false );
+	ScopedModelPreviewRebuild rebuildGuard( g_ModelBrowser.m_previewRebuildInProgress );
 	ModelBrowser_cancelPendingFilterApply();
 
 	std::vector<CopiedString> candidates;
@@ -1180,7 +1206,7 @@ void ModelBrowser_rebuildVisibleModels(){
 		visibleModelPaths.push_back( path );
 	}
 
-	if ( visibleModelPaths == g_ModelBrowser.m_visibleModelPaths ) {
+	if ( !forceReload && visibleModelPaths == g_ModelBrowser.m_visibleModelPaths ) {
 		ModelBrowser_updateClearFiltersButton();
 		g_ModelBrowser.queueDraw();
 		return;
@@ -1816,6 +1842,9 @@ void ModelPaths_addFromArchive( ModelPaths_ArchiveVisitor& visitor, const char *
 typedef ReferenceCaller<ModelPaths_ArchiveVisitor, void(const char*), ModelPaths_addFromArchive> ModelPaths_addFromArchiveCaller;
 
 void ModelBrowser_constructTree(){
+	if ( !g_ModelBrowser.m_previewRefreshReady || g_ModelBrowser.m_previewRebuildInProgress ) {
+		return;
+	}
 	ModelBrowser_cancelPendingFilterApply();
 	if ( g_ModelBrowser.m_treeView == nullptr ) {
 		return;
@@ -1869,7 +1898,9 @@ void ModelBrowser_constructTree(){
 		g_ModelBrowser.m_treeView->setCurrentIndex( first );
 		TreeView_onRowActivated( first );
 	}
-
+	else {
+		g_ModelBrowser.m_previewsDirty = false;
+	}
 	g_modelBrowserTreeConstructed = true;
 }
 
@@ -1886,13 +1917,33 @@ protected:
 };
 
 void ModelBrowser_EnsureTree(){
+	if ( !g_ModelBrowser.m_previewRefreshReady ) {
+		return;
+	}
+	if ( g_ModelBrowser.m_previewRebuildInProgress ) {
+		ModelBrowser_scheduleFilterApply();
+		return;
+	}
 	if ( !g_modelBrowserTreeConstructed ) {
 		ModelBrowser_constructTree();
 	}
-	else if ( g_ModelBrowser.m_filterApplyPending ) {
+	else if ( g_ModelBrowser.m_filterApplyPending || g_ModelBrowser.m_previewsDirty ) {
 		ModelBrowser_rebuildVisibleModels();
 	}
 }
+
+class ModelBrowserSplitter : public QSplitter
+{
+protected:
+	void showEvent( QShowEvent* event ) override {
+		QSplitter::showEvent( event );
+		QTimer::singleShot( 0, this, [this](){
+			if ( isVisible() ) {
+				ModelBrowser_EnsureTree();
+			}
+		} );
+	}
+};
 
 QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 	g_ModelBrowser.m_parent = toplevel;
@@ -1900,7 +1951,7 @@ QWidget* ModelBrowser_constructWindow( QWidget* toplevel ){
 
 	const bool disableOpenGL = OpenGLWidgetsDisabled();
 
-	auto *splitter = new QSplitter;
+	auto *splitter = new ModelBrowserSplitter;
 	auto *containerWidgetLeft = new QWidget; // Adding a QLayout to a QSplitter is not supported, use proxy widget
 	auto *containerWidgetRight = new QWidget; // Adding a QLayout to a QSplitter is not supported, use proxy widget
 	splitter->addWidget( containerWidgetLeft );
@@ -2085,6 +2136,9 @@ void ModelBrowser_destroyWindow(){
 	g_ModelBrowser.m_filterApplyTimer = nullptr;
 	g_ModelBrowser.m_currentFolder = nullptr;
 	g_ModelBrowser.m_currentFolderPath = "";
+	g_ModelBrowser.m_previewsDirty = false;
+	g_ModelBrowser.m_previewRefreshReady = true;
+	g_ModelBrowser.m_previewRebuildInProgress = false;
 	g_modelBrowserTreeConstructed = false;
 }
 
@@ -2167,6 +2221,19 @@ void ModelBrowser_Destroy(){
 
 void ModelBrowser_flushReferences(){
 	ModelBrowser_cancelPendingFilterApply();
+	g_ModelBrowser.m_previewRefreshReady = false;
 	ModelGraph_clear();
+	g_ModelBrowser.m_previewsDirty = true;
 	g_ModelBrowser.queueDraw();
+}
+
+void ModelBrowser_mapReady(){
+	g_ModelBrowser.m_previewRefreshReady = true;
+	if ( QTreeView* treeView = g_ModelBrowser.m_treeView; treeView != nullptr && treeView->isVisible() ) {
+		QTimer::singleShot( 0, treeView, [treeView](){
+			if ( treeView->isVisible() ) {
+				ModelBrowser_EnsureTree();
+			}
+		} );
+	}
 }

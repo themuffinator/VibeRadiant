@@ -1034,6 +1034,7 @@ void Map_LoadFile( const char *filename ){
 	g_currentMap = &g_map;
 
 	GridStatus_changed();
+	ModelBrowser_mapReady();
 }
 
 class Excluder
@@ -1289,6 +1290,7 @@ void Map_New(){
 	g_currentMap = &g_map;
 
 	GridStatus_changed();
+	ModelBrowser_mapReady();
 }
 
 /*
