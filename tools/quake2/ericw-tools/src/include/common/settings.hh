@@ -97,9 +97,10 @@ public:
     const char *what() const noexcept override;
 };
 
-// Thrown after displaying a complete command-line diagnostic. Explicit help
-// uses status 0; invalid command lines use a nonzero status. Tests should let
-// the test framework catch this rather than terminating the process.
+// Thrown after displaying a complete command-line diagnostic or version
+// banner. Explicit help/version uses status 0; invalid command lines use a
+// nonzero status. Tests should let the test framework catch this rather than
+// terminating the process.
 struct quit_after_help_exception : public std::exception
 {
     explicit quit_after_help_exception(int exit_code = 0) noexcept

@@ -112,13 +112,19 @@ settings::common_settings bspinfo_options;
 
 static void PrintUsage()
 {
-    fmt::print("usage: vmt-bspinfo [-help/-h/-?] [-werror] [-export-lightmap-atlas] [--] bspfile [bspfiles]\n");
+    fmt::print(
+        "usage: vmt-bspinfo [-help/-h/-?] [-version] [-werror] [-export-lightmap-atlas] [--] bspfile [bspfiles]\n");
 }
 
 static bool IsHelpArgument(std::string_view argument)
 {
     return argument == "-help" || argument == "--help" || argument == "-h" || argument == "--h" || argument == "-?" ||
            argument == "--?";
+}
+
+static bool IsVersionArgument(std::string_view argument)
+{
+    return argument == "-version" || argument == "--version";
 }
 
 int main(int argc, char **argv)
@@ -128,6 +134,9 @@ int main(int argc, char **argv)
         logging::reset_warning_count();
 
         fmt::print("---- vmt-bspinfo / VibeyMapTools {} ----\n", VIBEYMAPTOOLS_VERSION);
+        if (argc == 2 && IsVersionArgument(argv[1])) {
+            return 0;
+        }
         if (argc == 2 && IsHelpArgument(argv[1])) {
             PrintUsage();
             return 0;
@@ -149,6 +158,9 @@ int main(int argc, char **argv)
             }
             if (!end_of_options && IsHelpArgument(argument)) {
                 PrintUsage();
+                return 0;
+            }
+            if (!end_of_options && IsVersionArgument(argument)) {
                 return 0;
             }
             if (!end_of_options && (argument == "-werror" || argument == "--werror")) {

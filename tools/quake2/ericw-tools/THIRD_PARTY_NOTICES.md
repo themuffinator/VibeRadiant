@@ -12,8 +12,11 @@ staged `ericw` directory under the names shown here.
 
 `extern/stb_image.h` and `extern/stb_image_write.h`, by Sean Barrett and other
 contributors, are available under either the public-domain dedication or the
-MIT licence embedded at the end of each header. Those source files are
-byte-identical to the files in the recorded VibeyMapTools snapshot.
+MIT licence embedded at the end of each header. `stb_image_write.h` is
+byte-identical to the recorded VibeyMapTools snapshot. `stb_image.h` starts
+from that snapshot and backports the upstream [v2.30 bounded PNG transparency
+loops](https://github.com/nothings/stb/blob/2c980bb59875b0d32144a71867fbdebb2f77cd20/stb_image.h#L4804-L4809)
+that suppress an erroneous GCC out-of-bounds warning.
 
 [Embree](https://github.com/RenderKit/embree) (Apache-2.0) and
 [oneTBB](https://github.com/uxlfoundation/oneTBB) (Apache-2.0) are external

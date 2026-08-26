@@ -600,7 +600,8 @@ void setting_container::set_settings(const entdict_t &epairs, source source)
 
 void setting_container::print_help(bool fatal)
 {
-    fmt::print("{}usage: {} [-help/-h/-?] [-options] {}\n\n", program_description, program_name, remainder_name);
+    fmt::print(
+        "{}usage: {} [-help/-h/-?] [-version] [-options] {}\n\n", program_description, program_name, remainder_name);
 
     for (auto grouped : grouped()) {
         if (grouped.first) {
@@ -748,6 +749,8 @@ std::vector<std::string> setting_container::parse(parser_base_t &parser)
 
         if (parser.token == "help" || parser.token == "h" || parser.token == "?") {
             print_help(true);
+        } else if (parser.token == "version") {
+            throw quit_after_help_exception();
         } else if (parser.token == "rst") {
             print_rst_documentation();
         }
