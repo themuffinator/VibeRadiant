@@ -1666,6 +1666,11 @@ void Radiant_Restart(){
 
 
 void Restart(){
+	// Freeze the current preference callbacks before modules register them again.
+	// Startup normally defers this dialog until first use, but an in-process module
+	// reload must preserve the single-construction lifecycle it historically had.
+	PreferencesDialog_constructWindow( MainFrame_getWindow() );
+
 	PluginsMenu_clear();
 	PluginToolbar_clear();
 
@@ -3391,7 +3396,6 @@ void MainFrame::Create(){
 	}
 
 	EntityList_constructWindow( window );
-	PreferencesDialog_constructWindow( window );
 	FindTextureDialog_constructWindow( window );
 	SurfaceInspector_constructWindow( window );
 

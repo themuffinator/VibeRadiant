@@ -3460,10 +3460,14 @@ PrefsDlg g_Preferences;               // global prefs instance
 
 
 void PreferencesDialog_constructWindow( QWidget* main_window ){
-	g_Preferences.Create( main_window );
+	if ( g_Preferences.GetWidget() == nullptr ) {
+		g_Preferences.Create( main_window );
+	}
 }
 void PreferencesDialog_destroyWindow(){
-	g_Preferences.Destroy();
+	if ( g_Preferences.GetWidget() != nullptr ) {
+		g_Preferences.Destroy();
+	}
 }
 
 
@@ -3632,6 +3636,7 @@ void PreferencesDialog_restartRequired( const char* staticName ){
 
 void PreferencesDialog_showDialog(){
 	//if ( ConfirmModified( "Edit Preferences" ) && g_Preferences.DoModal() == eIDOK ) {
+	PreferencesDialog_constructWindow( MainFrame_getWindow() );
 	if ( g_Preferences.m_searchEdit != nullptr ) {
 		g_Preferences.m_searchEdit->setFocus();
 	}
@@ -3656,6 +3661,7 @@ void PreferencesDialog_showDialog(){
 }
 
 void PreferencesDialog_showDialogForQuery( const char* query ){
+	PreferencesDialog_constructWindow( MainFrame_getWindow() );
 	if ( g_Preferences.m_searchEdit != nullptr && query != nullptr && !string_empty( query ) ) {
 		g_Preferences.m_searchEdit->setText( query );
 	}
