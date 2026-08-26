@@ -1155,7 +1155,14 @@ static void SoundBrowser_constructTree(){
 		GlobalFileSystem().forEachFile( kSoundBrowserRoot, ext.c_str(), makeCallbackF( SoundBrowser_addFromFileSystem ), 99 );
 	}
 
-	auto *model = new QStandardItemModel( g_SoundBrowser.m_treeView );
+	auto *model = qobject_cast<QStandardItemModel*>( g_SoundBrowser.m_treeView->model() );
+	if ( model == nullptr ) {
+		model = new QStandardItemModel( g_SoundBrowser.m_treeView );
+		g_SoundBrowser.m_treeView->setModel( model );
+	}
+	else {
+		model->clear();
+	}
 
 	{
 		if( !g_SoundBrowser.m_soundFS.m_files.empty() ){
@@ -1165,8 +1172,6 @@ static void SoundBrowser_constructTree(){
 		for( const SoundFS& folder : g_SoundBrowser.m_soundFS.m_folders )
 			SoundBrowser_constructTreeModel( folder, model, model->invisibleRootItem() );
 	}
-
-	g_SoundBrowser.m_treeView->setModel( model );
 
 	if ( model->rowCount() > 0 ) {
 		const QModelIndex first = model->index( 0, 0 );

@@ -1809,14 +1809,20 @@ static void EntityBrowser_constructTree(){
 		return;
 	}
 
+	g_EntityBrowser.setCurrentCategory( nullptr );
 	EntityBrowser_constructCategories();
 
-	auto *model = new QStandardItemModel( g_EntityBrowser.m_treeView );
+	auto *model = qobject_cast<QStandardItemModel*>( g_EntityBrowser.m_treeView->model() );
+	if ( model == nullptr ) {
+		model = new QStandardItemModel( g_EntityBrowser.m_treeView );
+		g_EntityBrowser.m_treeView->setModel( model );
+	}
+	else {
+		model->clear();
+	}
 	for ( const EntityCategory& category : g_EntityBrowser.categories() ) {
 		model->invisibleRootItem()->appendRow( new QStandardItem( category.name.c_str() ) );
 	}
-
-	g_EntityBrowser.m_treeView->setModel( model );
 
 	if ( model->rowCount() > 0 ) {
 		const QModelIndex first = model->index( 0, 0 );

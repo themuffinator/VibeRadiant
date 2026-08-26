@@ -1811,7 +1811,14 @@ void ModelBrowser_constructTree(){
 //%	modelFS_traverse( g_ModelBrowser.m_modelFS );
 
 
-	auto *model = new QStandardItemModel( g_ModelBrowser.m_treeView ); //. ? delete old or clear() & reuse
+	auto *model = qobject_cast<QStandardItemModel*>( g_ModelBrowser.m_treeView->model() );
+	if ( model == nullptr ) {
+		model = new QStandardItemModel( g_ModelBrowser.m_treeView );
+		g_ModelBrowser.m_treeView->setModel( model );
+	}
+	else {
+		model->clear();
+	}
 
 	{
 		if( !g_ModelBrowser.m_modelFS.m_files.empty() ){ // models in the root: add blank item for access
@@ -1821,8 +1828,6 @@ void ModelBrowser_constructTree(){
 		for( const ModelFS& m : g_ModelBrowser.m_modelFS.m_folders )
 			ModelBrowser_constructTreeModel( m, model, model->invisibleRootItem() );
 	}
-
-	g_ModelBrowser.m_treeView->setModel( model );
 
 	if ( model->rowCount() > 0 ) {
 		const QModelIndex first = model->index( 0, 0 );
