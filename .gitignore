@@ -12,7 +12,8 @@
 /.cache/
 /.clang*
 /compile_commands.json
-/conftest*
+/conftest
+/conftest.exe
 /ericw-tools-build.stamp
 /icons/*.rc
 __pycache__/

@@ -16,6 +16,7 @@ Sources used:
 
 ## Local changes (this repo)
 
+- Repository hygiene follow-up: removed 7.34 MiB of generated Visual Studio workspace databases/state from version control while retaining the existing local ignore, and narrowed the Make probe ignore from `/conftest*` to generated executables so the required tracked `conftest.cpp` source is no longer accidentally classified as ignored.
 - Asset-browser startup/search performance follow-up: deferred hidden Surfaces, Entities, idTech4 AI, and Script population until each tab is first activated, including lazy entity-category/preview construction; coalesced scan-heavy Surfaces/AI/Script text filtering behind a 150 ms single-shot delay while keeping filter state, buttons, explicit refreshes, and tab activation immediate.
 - Meson configure/provenance refinement: sourced the Meson project version directly from the tracked `VERSION` file (removing a configure-time shell process), let Meson's configured warning level own the baseline warning flags without redundant manual `-W`/`-Wall`, and recorded the recovered full JsonCpp vendor revision.
 - Gamepack mod defaults: dedicated mod profiles can declare `defaultGameName`; startup applies that descriptor-provided default to `fs_game` before VFS initialization when no saved per-installation choice overrides it.
